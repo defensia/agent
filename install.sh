@@ -3,6 +3,7 @@
 # Usage: curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <INSTALL_TOKEN>
 # Non-interactive: DEFENSIA_SERVER_URL=https://... DEFENSIA_AGENT_NAME=web-01 curl -fsSL ... | sudo bash -s -- --token <TOKEN>
 # Install only (no registration): curl -fsSL ... | sudo bash -s -- --install-only
+# Old servers (SSL error): apt-get update && apt-get install -y ca-certificates && curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <TOKEN>
 
 set -euo pipefail
 
@@ -19,7 +20,7 @@ BINARY_NAME="defensia-agent"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/defensia"
 SERVICE_NAME="defensia-agent"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+INIT_SYSTEM=""
 GITHUB_REPO="${GITHUB_REPO:-defensia/agent}"
 RELEASE_BASE="${RELEASE_BASE:-https://github.com/${GITHUB_REPO}/releases/latest/download}"
 
@@ -65,8 +66,17 @@ check_os() {
     [[ "$(uname -s)" == "Linux" ]] || error "Defensia Agent only supports Linux."
 }
 
-check_systemd() {
-    command -v systemctl &>/dev/null || error "systemd is required. Supported distros: Ubuntu 20+, Debian 11+, CentOS Stream 8+, RHEL 8+, Rocky Linux 8+, AlmaLinux 8+, Fedora 38+, Amazon Linux 2023."
+detect_init() {
+    if command -v systemctl &>/dev/null && systemctl --version &>/dev/null; then
+        INIT_SYSTEM="systemd"
+    elif command -v initctl &>/dev/null && initctl --version 2>/dev/null | grep -q upstart; then
+        INIT_SYSTEM="upstart"
+    elif [[ -d /etc/init.d ]]; then
+        INIT_SYSTEM="sysvinit"
+    else
+        error "No supported init system found (systemd, upstart, or sysvinit)."
+    fi
+    info "Init system: ${INIT_SYSTEM}"
 }
 
 detect_auth_log() {
@@ -93,9 +103,13 @@ check_deps() {
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
 
+    # Ensure CA certificates are up to date (old servers may lack modern root CAs)
+    missing+=("ca-certificates")
+
     if [[ ${#missing[@]} -gt 0 ]]; then
-        warn "Installing missing dependencies: ${missing[*]}"
+        warn "Installing/updating dependencies: ${missing[*]}"
         if command -v apt-get &>/dev/null; then
+            apt-get update -qq
             apt-get install -y -qq "${missing[@]}"
         elif command -v yum &>/dev/null; then
             yum install -y -q "${missing[@]}"
@@ -175,11 +189,30 @@ register_agent() {
     success "Agent registered. Token saved to ${CONFIG_DIR}/config.json"
 }
 
-# ─── Systemd ───────────────────────────────────────────────────────────────────
+# ─── Service install ──────────────────────────────────────────────────────────
 install_service() {
+    local auth_log
+    auth_log="$(detect_auth_log)"
+
+    case "$INIT_SYSTEM" in
+        systemd)
+            install_service_systemd "$auth_log"
+            ;;
+        upstart)
+            install_service_upstart "$auth_log"
+            ;;
+        sysvinit)
+            install_service_sysvinit "$auth_log"
+            ;;
+    esac
+}
+
+install_service_systemd() {
+    local auth_log="$1"
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
     info "Installing systemd service..."
 
-    cat > "$SERVICE_FILE" <<EOF
+    cat > "$service_file" <<EOF
 [Unit]
 Description=Defensia Security Agent
 Documentation=https://defensia.com/docs/agent
@@ -195,7 +228,7 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=${SERVICE_NAME}
 Environment=DEFENSIA_CONFIG=${CONFIG_DIR}/config.json
-Environment=AUTH_LOG_PATH=$(detect_auth_log)
+Environment=AUTH_LOG_PATH=${auth_log}
 
 # Security hardening
 NoNewPrivileges=no
@@ -218,26 +251,154 @@ EOF
     fi
 }
 
+install_service_upstart() {
+    local auth_log="$1"
+    local conf_file="/etc/init/${SERVICE_NAME}.conf"
+    info "Installing Upstart service..."
+
+    cat > "$conf_file" <<EOF
+description "Defensia Security Agent"
+
+start on runlevel [2345]
+stop on runlevel [!2345]
+
+respawn
+respawn limit 10 30
+
+env DEFENSIA_CONFIG=${CONFIG_DIR}/config.json
+env AUTH_LOG_PATH=${auth_log}
+
+exec ${INSTALL_DIR}/${BINARY_NAME} start
+EOF
+
+    if [[ "$INSTALL_ONLY" == true ]]; then
+        success "Service installed (not started — no token configured)."
+    else
+        initctl start "${SERVICE_NAME}" || true
+        success "Service started."
+    fi
+}
+
+install_service_sysvinit() {
+    local auth_log="$1"
+    local init_script="/etc/init.d/${SERVICE_NAME}"
+    info "Installing SysVinit service..."
+
+    cat > "$init_script" <<'INITEOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          defensia-agent
+# Required-Start:    $network $remote_fs
+# Required-Stop:     $network $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Description:       Defensia Security Agent
+### END INIT INFO
+
+DAEMON=INSTALL_DIR_PLACEHOLDER/defensia-agent
+PIDFILE=/var/run/defensia-agent.pid
+export DEFENSIA_CONFIG=CONFIG_DIR_PLACEHOLDER/config.json
+export AUTH_LOG_PATH=AUTH_LOG_PLACEHOLDER
+
+case "$1" in
+    start)
+        echo "Starting defensia-agent..."
+        start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec "$DAEMON" -- start
+        ;;
+    stop)
+        echo "Stopping defensia-agent..."
+        start-stop-daemon --stop --pidfile "$PIDFILE" --retry 10
+        rm -f "$PIDFILE"
+        ;;
+    restart)
+        $0 stop
+        $0 start
+        ;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "defensia-agent is running (PID $(cat "$PIDFILE"))"
+        else
+            echo "defensia-agent is not running"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+INITEOF
+
+    # Replace placeholders
+    sed -i "s|INSTALL_DIR_PLACEHOLDER|${INSTALL_DIR}|g" "$init_script"
+    sed -i "s|CONFIG_DIR_PLACEHOLDER|${CONFIG_DIR}|g" "$init_script"
+    sed -i "s|AUTH_LOG_PLACEHOLDER|${auth_log}|g" "$init_script"
+
+    chmod +x "$init_script"
+    update-rc.d "${SERVICE_NAME}" defaults 2>/dev/null || true
+
+    if [[ "$INSTALL_ONLY" == true ]]; then
+        success "Service installed (not started — no token configured)."
+    else
+        "$init_script" start
+        success "Service started."
+    fi
+}
+
 check_service() {
     sleep 2
-    if systemctl is-active --quiet "${SERVICE_NAME}"; then
-        success "Agent is running!"
-        echo ""
-        systemctl status "${SERVICE_NAME}" --no-pager -l | head -15
-    else
-        warn "Service may not have started correctly. Check logs:"
-        echo "  journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
-    fi
+    case "$INIT_SYSTEM" in
+        systemd)
+            if systemctl is-active --quiet "${SERVICE_NAME}"; then
+                success "Agent is running!"
+                echo ""
+                systemctl status "${SERVICE_NAME}" --no-pager -l | head -15
+            else
+                warn "Service may not have started correctly. Check logs:"
+                echo "  journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+            fi
+            ;;
+        upstart)
+            if initctl status "${SERVICE_NAME}" 2>/dev/null | grep -q "running"; then
+                success "Agent is running!"
+                initctl status "${SERVICE_NAME}"
+            else
+                warn "Service may not have started correctly. Check logs:"
+                echo "  cat /var/log/syslog | grep ${SERVICE_NAME}"
+            fi
+            ;;
+        sysvinit)
+            if "/etc/init.d/${SERVICE_NAME}" status 2>/dev/null; then
+                success "Agent is running!"
+            else
+                warn "Service may not have started correctly. Check logs:"
+                echo "  cat /var/log/syslog | grep ${SERVICE_NAME}"
+            fi
+            ;;
+    esac
 }
 
 # ─── Uninstall ─────────────────────────────────────────────────────────────────
 uninstall() {
     info "Uninstalling Defensia Agent..."
 
-    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-    rm -f "$SERVICE_FILE"
-    systemctl daemon-reload
+    # Try all init systems — safe even if only one is present
+    if command -v systemctl &>/dev/null; then
+        systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+        systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    if command -v initctl &>/dev/null; then
+        initctl stop "${SERVICE_NAME}" 2>/dev/null || true
+        rm -f "/etc/init/${SERVICE_NAME}.conf"
+    fi
+    if [[ -f "/etc/init.d/${SERVICE_NAME}" ]]; then
+        "/etc/init.d/${SERVICE_NAME}" stop 2>/dev/null || true
+        update-rc.d -f "${SERVICE_NAME}" remove 2>/dev/null || true
+        rm -f "/etc/init.d/${SERVICE_NAME}"
+    fi
+
     rm -f "${INSTALL_DIR}/${BINARY_NAME}"
     rm -rf "$CONFIG_DIR"
 
@@ -260,7 +421,7 @@ main() {
 
     check_root
     check_os
-    check_systemd
+    detect_init
 
     local arch
     arch="$(detect_arch)"
@@ -283,7 +444,11 @@ main() {
         echo ""
         echo "  To activate, register with your Defensia token:"
         echo "    ${BINARY_NAME} register https://defensia.cloud <AGENT_NAME> <TOKEN>"
-        echo "    systemctl start ${SERVICE_NAME}"
+        case "$INIT_SYSTEM" in
+            systemd)  echo "    systemctl start ${SERVICE_NAME}" ;;
+            upstart)  echo "    initctl start ${SERVICE_NAME}" ;;
+            sysvinit) echo "    /etc/init.d/${SERVICE_NAME} start" ;;
+        esac
         echo ""
         echo "  Get your token at: https://defensia.cloud/dashboard"
         echo ""
@@ -321,8 +486,20 @@ main() {
     echo -e "${GREEN}${BOLD}  Defensia Agent installed successfully!${NC}"
     echo ""
     echo "  Useful commands:"
-    echo "    systemctl status ${SERVICE_NAME}"
-    echo "    journalctl -u ${SERVICE_NAME} -f"
+    case "$INIT_SYSTEM" in
+        systemd)
+            echo "    systemctl status ${SERVICE_NAME}"
+            echo "    journalctl -u ${SERVICE_NAME} -f"
+            ;;
+        upstart)
+            echo "    initctl status ${SERVICE_NAME}"
+            echo "    tail -f /var/log/syslog | grep ${SERVICE_NAME}"
+            ;;
+        sysvinit)
+            echo "    /etc/init.d/${SERVICE_NAME} status"
+            echo "    tail -f /var/log/syslog | grep ${SERVICE_NAME}"
+            ;;
+    esac
     echo "    ${BINARY_NAME} --help"
     echo ""
 }
