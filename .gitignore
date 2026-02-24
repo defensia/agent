@@ -1,5 +1,5 @@
 build/
-defensia-agent
+/defensia-agent
 defensia-agent-linux-*
 *.exe
 .DS_Store
