@@ -229,6 +229,19 @@ func (c *Client) ReportEvents(events []EventRequest) error {
 	return c.post("/api/v1/agent/events", c.token, map[string]any{"events": events}, nil)
 }
 
+// SoftwareAuditRequest sends software audit results to the server.
+type SoftwareAuditRequest struct {
+	AuditID     int64       `json:"audit_id"`
+	Summary     interface{} `json:"summary"`
+	KeySoftware interface{} `json:"key_software"`
+	Packages    interface{} `json:"packages,omitempty"`
+}
+
+// SubmitSoftwareAudit sends software audit results to the server.
+func (c *Client) SubmitSoftwareAudit(req SoftwareAuditRequest) error {
+	return c.post("/api/v1/agent/software-audit-results", c.token, req, nil)
+}
+
 func (c *Client) post(path, token string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
