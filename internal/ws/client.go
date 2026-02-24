@@ -61,13 +61,19 @@ type ScanRequestedPayload struct {
 	ScanID int64 `json:"scan_id"`
 }
 
+// ImportRequestedPayload matches the broadcastWith() from ImportRequested event.
+type ImportRequestedPayload struct {
+	AgentID int64 `json:"agent_id"`
+}
+
 // Handlers called when events are received from the server.
 type Handlers struct {
-	OnBanCreated    func(BanCreatedPayload)
-	OnBanRemoved    func(BanRemovedPayload)
-	OnRuleCreated   func(RuleCreatedPayload)
-	OnRuleRemoved   func(RuleRemovedPayload)
-	OnScanRequested func(ScanRequestedPayload)
+	OnBanCreated       func(BanCreatedPayload)
+	OnBanRemoved       func(BanRemovedPayload)
+	OnRuleCreated      func(RuleCreatedPayload)
+	OnRuleRemoved      func(RuleRemovedPayload)
+	OnScanRequested    func(ScanRequestedPayload)
+	OnImportRequested  func(ImportRequestedPayload)
 }
 
 // Client manages the WebSocket connection to Reverb.
@@ -289,6 +295,14 @@ func (c *Client) dispatch(event string, rawData json.RawMessage) {
 			var p ScanRequestedPayload
 			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
 				c.handlers.OnScanRequested(p)
+			}
+		}
+
+	case "import.requested":
+		if c.handlers.OnImportRequested != nil {
+			var p ImportRequestedPayload
+			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
+				c.handlers.OnImportRequested(p)
 			}
 		}
 	}

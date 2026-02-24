@@ -2,6 +2,7 @@
 # Defensia Agent Installer
 # Usage: curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <INSTALL_TOKEN>
 # Non-interactive: DEFENSIA_SERVER_URL=https://... DEFENSIA_AGENT_NAME=web-01 curl -fsSL ... | sudo bash -s -- --token <TOKEN>
+# Install only (no registration): curl -fsSL ... | sudo bash -s -- --install-only
 
 set -euo pipefail
 
@@ -31,12 +32,17 @@ error()   { echo -e "${RED}[defensia]${NC} ✗ $*" >&2; exit 1; }
 # ─── Parse args ───────────────────────────────────────────────────────────────
 parse_args() {
     INSTALL_TOKEN=""
+    INSTALL_ONLY=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --token)
                 INSTALL_TOKEN="${2:-}"
                 [[ -n "$INSTALL_TOKEN" ]] || error "--token requires a value."
                 shift 2
+                ;;
+            --install-only)
+                INSTALL_ONLY=true
+                shift
                 ;;
             --uninstall)
                 check_root
@@ -203,9 +209,13 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "${SERVICE_NAME}"
-    systemctl start "${SERVICE_NAME}"
 
-    success "Service enabled and started."
+    if [[ "$INSTALL_ONLY" == true ]]; then
+        success "Service installed and enabled (not started — no token configured)."
+    else
+        systemctl start "${SERVICE_NAME}"
+        success "Service enabled and started."
+    fi
 }
 
 check_service() {
@@ -238,8 +248,10 @@ uninstall() {
 main() {
     parse_args "$@"
 
-    # Require install token
-    [[ -n "$INSTALL_TOKEN" ]] || error "Install token is required. Usage: curl -fsSL .../install.sh | sudo bash -s -- --token <TOKEN>"
+    # Require install token unless --install-only
+    if [[ "$INSTALL_ONLY" != true ]] && [[ -z "$INSTALL_TOKEN" ]]; then
+        error "Install token is required. Usage: curl -fsSL .../install.sh | sudo bash -s -- --token <TOKEN>"
+    fi
 
     echo ""
     echo -e "${BOLD}  Defensia Agent Installer${NC}"
@@ -262,6 +274,21 @@ main() {
 
     # Download binary
     download_binary "$arch"
+
+    # --install-only: install binary + systemd service, skip registration
+    if [[ "$INSTALL_ONLY" == true ]]; then
+        install_service
+        echo ""
+        echo -e "${GREEN}${BOLD}  Defensia Agent installed (binary only).${NC}"
+        echo ""
+        echo "  To activate, register with your Defensia token:"
+        echo "    ${BINARY_NAME} register https://defensia.cloud <AGENT_NAME> <TOKEN>"
+        echo "    systemctl start ${SERVICE_NAME}"
+        echo ""
+        echo "  Get your token at: https://defensia.cloud/dashboard"
+        echo ""
+        exit 0
+    fi
 
     # Already installed? Re-register?
     if [[ -f "${CONFIG_DIR}/config.json" ]]; then

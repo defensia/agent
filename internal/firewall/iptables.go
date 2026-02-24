@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"strings"
 )
 
 // RuleSpec describes a firewall rule to apply.
@@ -133,4 +134,111 @@ func ApplyBans(ips []string) {
 			log.Printf("[firewall] error applying ban for %s: %v", ip, err)
 		}
 	}
+}
+
+// ParsedRule represents an iptables rule parsed from `iptables -S INPUT`.
+type ParsedRule struct {
+	RawRule   string
+	Type      string // "block" or "allow"
+	Protocol  string // "tcp", "udp", "icmp", "all"
+	Source    string // IP address (no CIDR /32)
+	Port      int    // 0 means no port
+}
+
+// ListRules reads existing INPUT chain rules via `iptables -S INPUT`
+// and returns only simple rules Defensia can manage.
+func ListRules() ([]ParsedRule, error) {
+	out, err := exec.Command("iptables", "-S", "INPUT").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("iptables -S INPUT: %w", err)
+	}
+
+	var rules []ParsedRule
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Only parse -A INPUT rules (skip -P INPUT ACCEPT/DROP policy)
+		if !strings.HasPrefix(line, "-A INPUT") {
+			continue
+		}
+		parsed, ok := parseLine(line)
+		if ok {
+			rules = append(rules, parsed)
+		}
+	}
+
+	log.Printf("[firewall] listed %d manageable rules from iptables", len(rules))
+	return rules, nil
+}
+
+// parseLine parses a single iptables -S line into a ParsedRule.
+// Returns false if the rule is too complex for Defensia to manage.
+func parseLine(line string) (ParsedRule, bool) {
+	fields := strings.Fields(line)
+
+	// Skip rules with modules we can't manage (-m state, conntrack, multiport, limit, etc.)
+	// Skip rules with interface binds (-i, -o) or negations (!)
+	for _, f := range fields {
+		switch f {
+		case "-m", "-i", "-o", "!":
+			return ParsedRule{}, false
+		}
+	}
+
+	rule := ParsedRule{
+		RawRule:  line,
+		Protocol: "all",
+	}
+
+	for i := 0; i < len(fields); i++ {
+		switch fields[i] {
+		case "-j":
+			if i+1 < len(fields) {
+				switch fields[i+1] {
+				case "DROP", "REJECT":
+					rule.Type = "block"
+				case "ACCEPT":
+					rule.Type = "allow"
+				default:
+					// Custom chain target — skip
+					return ParsedRule{}, false
+				}
+				i++
+			}
+		case "-s":
+			if i+1 < len(fields) {
+				src := fields[i+1]
+				// Strip /32 suffix from single IPs
+				src = strings.TrimSuffix(src, "/32")
+				rule.Source = src
+				i++
+			}
+		case "-p":
+			if i+1 < len(fields) {
+				rule.Protocol = fields[i+1]
+				i++
+			}
+		case "--dport":
+			if i+1 < len(fields) {
+				if p, err := strconv.Atoi(fields[i+1]); err == nil {
+					rule.Port = p
+				}
+				i++
+			}
+		}
+	}
+
+	// Must have a target (block or allow)
+	if rule.Type == "" {
+		return ParsedRule{}, false
+	}
+
+	// Must have at least a source IP or a port to be meaningful
+	if rule.Source == "" && rule.Port == 0 {
+		return ParsedRule{}, false
+	}
+
+	return rule, true
 }

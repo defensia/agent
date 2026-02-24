@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -141,6 +142,9 @@ func runAgent() {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
+	// Import existing iptables rules on first startup
+	go importExistingRules(apiClient)
+
 	go w.Run()
 
 	// Start Reverb WebSocket listener
@@ -182,6 +186,10 @@ func runAgent() {
 				log.Printf("[reverb] scan.requested: scan_id=%d", p.ScanID)
 				go runScan(apiClient, p.ScanID)
 			},
+			OnImportRequested: func(p ws.ImportRequestedPayload) {
+				log.Printf("[reverb] import.requested: agent_id=%d", p.AgentID)
+				go importExistingRules(apiClient)
+			},
 		},
 	)
 	go wsClient.Run()
@@ -203,6 +211,7 @@ func runAgent() {
 				Status:           "online",
 				Version:          version,
 				Timestamp:        time.Now().UTC().Format(time.RFC3339),
+				IPAddress:        detectOutboundIP(),
 				ZombieCount:      zReport.Count,
 				WebServer:        wsName,
 				WebServerVersion: wsVersion,
@@ -307,6 +316,39 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, geo *geoip.Lookup) err
 	return nil
 }
 
+// importExistingRules reads current iptables INPUT rules and sends them to the server.
+func importExistingRules(client *api.Client) {
+	rules, err := firewall.ListRules()
+	if err != nil {
+		log.Printf("[import] failed to list iptables rules: %v", err)
+		return
+	}
+
+	if len(rules) == 0 {
+		log.Printf("[import] no manageable iptables rules found")
+		return
+	}
+
+	imported := make([]api.ImportedRule, len(rules))
+	for i, r := range rules {
+		imported[i] = api.ImportedRule{
+			RawRule:   r.RawRule,
+			Type:      r.Type,
+			Protocol:  r.Protocol,
+			Source:    r.Source,
+			Port:      r.Port,
+		}
+	}
+
+	resp, err := client.ImportRules(api.ImportRulesRequest{Rules: imported})
+	if err != nil {
+		log.Printf("[import] failed to send rules to server: %v", err)
+		return
+	}
+
+	log.Printf("[import] complete — imported=%d, skipped=%d, total=%d", resp.Imported, resp.Skipped, resp.Total)
+}
+
 // runScan executes a vulnerability scan and submits results to the server.
 func runScan(client *api.Client, scanID int64) {
 	log.Printf("[scanner] starting scan %d", scanID)
@@ -404,6 +446,35 @@ func detectOutboundIP() string {
 	if ip := os.Getenv("AGENT_IP"); ip != "" {
 		return ip
 	}
+
+	// Try UDP dial to detect the preferred outbound IP (no actual traffic sent)
+	conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second)
+	if err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && !addr.IP.IsUnspecified() {
+			return addr.IP.String()
+		}
+	}
+
+	// Fallback: iterate network interfaces
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
+					return ipNet.IP.String()
+				}
+			}
+		}
+	}
+
 	return "0.0.0.0"
 }
 

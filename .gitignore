@@ -1,7 +1,1 @@
-build/
 /defensia-agent
-defensia-agent-linux-*
-*.exe
-.DS_Store
-dev-config.json
-test-auth.log

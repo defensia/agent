@@ -54,6 +54,7 @@ type HeartbeatRequest struct {
 	Status           string `json:"status"`
 	Version          string `json:"version"`
 	Timestamp        string `json:"timestamp"`
+	IPAddress        string `json:"ip_address,omitempty"`
 	ZombieCount      int    `json:"zombie_count"`
 	WebServer        string `json:"web_server,omitempty"`
 	WebServerVersion string `json:"web_server_version,omitempty"`
@@ -179,6 +180,36 @@ type ScanFinding struct {
 
 func (c *Client) SubmitScanResults(req ScanResultRequest) error {
 	return c.post("/api/v1/agent/scan-results", c.token, req, nil)
+}
+
+// ImportedRule represents a single iptables rule to import.
+type ImportedRule struct {
+	RawRule   string `json:"raw_rule"`
+	Type      string `json:"type"`
+	Protocol  string `json:"protocol"`
+	Source    string `json:"source,omitempty"`
+	Port      int    `json:"port,omitempty"`
+}
+
+// ImportRulesRequest sends discovered iptables rules to the server.
+type ImportRulesRequest struct {
+	Rules []ImportedRule `json:"rules"`
+}
+
+// ImportRulesResponse is the server's reply after importing rules.
+type ImportRulesResponse struct {
+	Imported int `json:"imported"`
+	Skipped  int `json:"skipped"`
+	Total    int `json:"total"`
+}
+
+// ImportRules sends discovered iptables rules to the server for import.
+func (c *Client) ImportRules(req ImportRulesRequest) (*ImportRulesResponse, error) {
+	var resp ImportRulesResponse
+	if err := c.post("/api/v1/agent/rules/import", c.token, req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // EventRequest represents a security event to report to the server.
