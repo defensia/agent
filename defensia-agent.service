@@ -1,0 +1,24 @@
+[Unit]
+Description=Defensia Security Agent
+Documentation=https://defensia.com/docs/agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/defensia-agent start
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=defensia-agent
+Environment=DEFENSIA_CONFIG=/etc/defensia/config.json
+
+# Needs root for iptables — hardening where possible
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectSystem=false
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
