@@ -89,10 +89,38 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 
 	log.Printf("[updater] updated to v%s, restarting...", latestVersion)
 
-	// Restart the service
-	if err := exec.Command("systemctl", "restart", "defensia-agent").Run(); err != nil {
-		log.Printf("[updater] failed to restart service: %v", err)
+	// Restart the service — detect init system
+	restartService()
+}
+
+// restartService tries systemd, then upstart, then sysvinit.
+func restartService() {
+	// systemd
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		if err := exec.Command("systemctl", "restart", "defensia-agent").Run(); err == nil {
+			return
+		}
+		log.Printf("[updater] systemctl restart failed, trying alternatives...")
 	}
+
+	// upstart
+	if _, err := exec.LookPath("initctl"); err == nil {
+		if err := exec.Command("initctl", "restart", "defensia-agent").Run(); err == nil {
+			return
+		}
+		log.Printf("[updater] initctl restart failed, trying alternatives...")
+	}
+
+	// sysvinit
+	initScript := "/etc/init.d/defensia-agent"
+	if _, err := os.Stat(initScript); err == nil {
+		if err := exec.Command(initScript, "restart").Run(); err == nil {
+			return
+		}
+		log.Printf("[updater] sysvinit restart failed")
+	}
+
+	log.Printf("[updater] could not restart service via any init system")
 }
 
 // isNewer returns true if latest > current using simple semver comparison.
