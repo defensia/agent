@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/defensia/agent/internal/api"
+	"github.com/defensia/agent/internal/collector"
 	"github.com/defensia/agent/internal/config"
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
@@ -137,8 +138,44 @@ func runAgent() {
 		return ""
 	})
 
+	// Start web log watcher (if web server access log found)
+	var webW *watcher.WebWatcher
+	if webLogPath := watcher.DetectWebLogPath(); webLogPath != "" {
+		webW = watcher.NewWebWatcher(
+			func(ip, reason string, count int) {
+				log.Printf("[webwatcher] banning %s: %s (count=%d)", ip, reason, count)
+				if err := firewall.BanIP(ip); err != nil {
+					log.Printf("[firewall] error: %v", err)
+				}
+				if err := apiClient.ReportBan(api.BanRequest{
+					IPAddress: ip,
+					Reason:    reason,
+					BanCount:  count,
+				}); err != nil {
+					log.Printf("[api] failed to report ban: %v", err)
+				}
+			},
+			func(ip, eventType, severity string, details map[string]string) {
+				apiClient.ReportEvents([]api.EventRequest{{
+					Type:       eventType,
+					Severity:   severity,
+					SourceIP:   ip,
+					Details:    details,
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			},
+		)
+		webW.SetCheckIP(func(ip string) string {
+			cc, blocked := geo.IsBlocked(ip)
+			if blocked {
+				return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
+			}
+			return ""
+		})
+	}
+
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, geo); err != nil {
+	if err := syncAndApply(apiClient, w, webW, geo); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -146,6 +183,9 @@ func runAgent() {
 	go importExistingRules(apiClient)
 
 	go w.Run()
+	if webW != nil {
+		go webW.Run()
+	}
 
 	// Start Reverb WebSocket listener
 	wsClient := ws.New(
@@ -189,6 +229,10 @@ func runAgent() {
 			OnImportRequested: func(p ws.ImportRequestedPayload) {
 				log.Printf("[reverb] import.requested: agent_id=%d", p.AgentID)
 				go importExistingRules(apiClient)
+			},
+			OnAuditRequested: func(p ws.AuditRequestedPayload) {
+				log.Printf("[reverb] audit.requested: audit_id=%d", p.AuditID)
+				go runSoftwareAudit(apiClient, p.AuditID)
 			},
 		},
 	)
@@ -237,7 +281,7 @@ func runAgent() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, geo); err != nil {
+			if err := syncAndApply(apiClient, w, webW, geo); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -252,7 +296,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, geo *geoip.Lookup) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, geo *geoip.Lookup) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -275,6 +319,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, geo *geoip.Lookup) err
 		}
 	}
 	w.UpdateWhitelist(wlIPs, wlCIDRs)
+	if webW != nil {
+		webW.UpdateWhitelist(wlIPs, wlCIDRs)
+	}
 
 	// Extract blocked countries from rules and update GeoIP
 	var blockedCountries []string
@@ -378,6 +425,26 @@ func runScan(client *api.Client, scanID int64) {
 	}
 
 	log.Printf("[scanner] scan %d complete — %d findings submitted", scanID, len(findings))
+}
+
+// runSoftwareAudit collects the full software inventory and submits it to the server.
+func runSoftwareAudit(client *api.Client, auditID int64) {
+	log.Printf("[collector] starting software audit %d", auditID)
+
+	result := collector.Collect()
+
+	if err := client.SubmitSoftwareAudit(api.SoftwareAuditRequest{
+		AuditID:     auditID,
+		Summary:     result.Summary,
+		KeySoftware: result.KeySoftware,
+		Packages:    result.Packages,
+	}); err != nil {
+		log.Printf("[collector] failed to submit audit %d: %v", auditID, err)
+		return
+	}
+
+	log.Printf("[collector] audit %d complete — %d packages, %d key software items",
+		auditID, result.Summary.TotalPackages, len(result.KeySoftware))
 }
 
 // applyAndAckRule applies a single firewall rule and sends the ack back to the server.
