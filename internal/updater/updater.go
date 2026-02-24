@@ -73,8 +73,12 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 		return
 	}
 
+	// Try atomic rename first (works if same filesystem)
 	if err := os.Rename(tmpPath, targetPath); err != nil {
-		// Cross-device rename; fall back to copy
+		// Cross-device or "text file busy": remove the running binary first.
+		// Linux allows unlinking a running executable — the old inode stays
+		// alive until the process exits, but the path becomes free.
+		os.Remove(targetPath)
 		if err := copyFile(tmpPath, targetPath); err != nil {
 			log.Printf("[updater] failed to replace binary: %v", err)
 			os.Remove(tmpPath)
