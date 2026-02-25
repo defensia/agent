@@ -23,7 +23,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.6.0"
+var version = "0.6.1"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -242,6 +242,22 @@ func runAgent() {
 			OnAuditRequested: func(p ws.AuditRequestedPayload) {
 				log.Printf("[reverb] audit.requested: audit_id=%d", p.AuditID)
 				go runSoftwareAudit(apiClient, p.AuditID)
+			},
+			OnUpdateRequested: func(p ws.UpdateRequestedPayload) {
+				log.Printf("[reverb] update.requested: checking for updates...")
+				resp, err := apiClient.Heartbeat(api.HeartbeatRequest{
+					Status:    "online",
+					Version:   version,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					IPAddress: detectOutboundIP(),
+				})
+				if err != nil {
+					log.Printf("[updater] heartbeat failed: %v", err)
+					return
+				}
+				if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
+					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL)
+				}
 			},
 		},
 	)

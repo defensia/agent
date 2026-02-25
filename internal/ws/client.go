@@ -71,6 +71,11 @@ type AuditRequestedPayload struct {
 	AuditID int64 `json:"audit_id"`
 }
 
+// UpdateRequestedPayload matches the broadcastWith() from UpdateRequested event.
+type UpdateRequestedPayload struct {
+	AgentID int64 `json:"agent_id"`
+}
+
 // Handlers called when events are received from the server.
 type Handlers struct {
 	OnBanCreated       func(BanCreatedPayload)
@@ -80,6 +85,7 @@ type Handlers struct {
 	OnScanRequested    func(ScanRequestedPayload)
 	OnImportRequested  func(ImportRequestedPayload)
 	OnAuditRequested   func(AuditRequestedPayload)
+	OnUpdateRequested  func(UpdateRequestedPayload)
 }
 
 // Client manages the WebSocket connection to Reverb.
@@ -347,6 +353,14 @@ func (c *Client) dispatch(event string, rawData json.RawMessage) {
 			var p AuditRequestedPayload
 			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
 				c.handlers.OnAuditRequested(p)
+			}
+		}
+
+	case "update.requested":
+		if c.handlers.OnUpdateRequested != nil {
+			var p UpdateRequestedPayload
+			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
+				c.handlers.OnUpdateRequested(p)
 			}
 		}
 	}
