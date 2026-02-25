@@ -138,6 +138,12 @@ func (c *Client) connect() error {
 
 	log.Printf("[ws] connected to %s", c.reverbURL)
 
+	// Proactive keepalive: send pusher:ping every 30s to prevent nginx
+	// proxy_read_timeout from closing the connection.
+	done := make(chan struct{})
+	defer close(done)
+	go c.keepalive(conn, done)
+
 	var socketID string
 
 	for {
@@ -162,6 +168,9 @@ func (c *Client) connect() error {
 		case "pusher:ping":
 			c.sendPong(conn)
 
+		case "pusher:pong":
+			// Response to our keepalive ping — nothing to do.
+
 		case "pusher_internal:subscription_succeeded":
 			log.Printf("[ws] subscribed to %s", msg.Channel)
 
@@ -172,6 +181,23 @@ func (c *Client) connect() error {
 			if msg.Channel == fmt.Sprintf("private-agent.%d", c.agentID) {
 				c.dispatch(msg.Event, msg.Data)
 			}
+		}
+	}
+}
+
+// keepalive sends pusher:ping every 30 seconds until the connection closes.
+func (c *Client) keepalive(conn *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			c.mu.Lock()
+			_ = conn.WriteJSON(message{Event: "pusher:ping"})
+			c.mu.Unlock()
 		}
 	}
 }
@@ -245,6 +271,8 @@ func (c *Client) subscribe(conn *websocket.Conn, channel, auth string) error {
 
 	data, _ := json.Marshal(subscribeData{Auth: auth, Channel: channel})
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return conn.WriteJSON(message{
 		Event: "pusher:subscribe",
 		Data:  data,
@@ -252,6 +280,8 @@ func (c *Client) subscribe(conn *websocket.Conn, channel, auth string) error {
 }
 
 func (c *Client) sendPong(conn *websocket.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	_ = conn.WriteJSON(message{Event: "pusher:pong"})
 }
 

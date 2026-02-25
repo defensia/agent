@@ -11,11 +11,15 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
+var updateMu sync.Mutex
+
 // CheckAndUpdate compares the current version with the latest version.
 // If a newer version is available, it downloads, verifies, and replaces the binary.
+// A mutex prevents concurrent calls (heartbeat + sync) from racing.
 func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	if latestVersion == "" || downloadBaseURL == "" {
 		return
@@ -24,6 +28,11 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	if !isNewer(currentVersion, latestVersion) {
 		return
 	}
+
+	if !updateMu.TryLock() {
+		return // another update already in progress
+	}
+	defer updateMu.Unlock()
 
 	log.Printf("[updater] new version available: %s -> %s", currentVersion, latestVersion)
 
@@ -42,10 +51,18 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	}
 	expectedHash = strings.TrimSpace(strings.Fields(expectedHash)[0])
 
-	// Download binary to temp file
-	tmpPath := "/tmp/defensia-agent-update"
+	// Download binary to unique temp file to avoid conflicts
+	tmpFile, err := os.CreateTemp("", "defensia-agent-update-*")
+	if err != nil {
+		log.Printf("[updater] failed to create temp file: %v", err)
+		return
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
 	if err := downloadFile(binaryURL, tmpPath); err != nil {
 		log.Printf("[updater] failed to download binary: %v", err)
+		os.Remove(tmpPath)
 		return
 	}
 
@@ -75,16 +92,32 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 
 	// Try atomic rename first (works if same filesystem)
 	if err := os.Rename(tmpPath, targetPath); err != nil {
-		// Cross-device or "text file busy": remove the running binary first.
-		// Linux allows unlinking a running executable — the old inode stays
-		// alive until the process exits, but the path becomes free.
-		os.Remove(targetPath)
-		if err := copyFile(tmpPath, targetPath); err != nil {
-			log.Printf("[updater] failed to replace binary: %v", err)
+		// Cross-device or "text file busy": copy to a staging path next to
+		// the target, then atomic-rename the staging file into place.
+		stagingPath := targetPath + ".new"
+		if err := copyFile(tmpPath, stagingPath); err != nil {
+			log.Printf("[updater] failed to copy to staging: %v", err)
 			os.Remove(tmpPath)
+			os.Remove(stagingPath)
 			return
 		}
 		os.Remove(tmpPath)
+
+		// Remove old binary and rename staging into place.
+		// Linux allows unlinking a running executable — the old inode stays
+		// alive until the process exits, but the path becomes free.
+		os.Remove(targetPath)
+		if err := os.Rename(stagingPath, targetPath); err != nil {
+			log.Printf("[updater] failed to rename staging binary: %v", err)
+			os.Remove(stagingPath)
+			return
+		}
+	}
+
+	// Final safety check: verify the target binary exists and is executable
+	if _, err := os.Stat(targetPath); err != nil {
+		log.Printf("[updater] CRITICAL: binary not found at %s after replace — not restarting", targetPath)
+		return
 	}
 
 	log.Printf("[updater] updated to v%s, restarting...", latestVersion)

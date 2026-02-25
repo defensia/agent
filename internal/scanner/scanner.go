@@ -32,6 +32,15 @@ func Run() []Finding {
 	findings = append(findings, checkProcesses()...)
 	findings = append(findings, checkWebServer()...)
 
+	// Software version checks
+	findings = append(findings, checkOSVersion()...)
+	findings = append(findings, checkKernelVersion()...)
+	findings = append(findings, checkSecurityUpdates()...)
+	findings = append(findings, checkPHPVersion()...)
+	findings = append(findings, checkMySQLVersion()...)
+	findings = append(findings, checkOpenSSHVersion()...)
+	findings = append(findings, checkWebServerVersion()...)
+
 	return findings
 }
 

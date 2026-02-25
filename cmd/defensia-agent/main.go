@@ -23,7 +23,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.1.0"
+var version = "0.5.1"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -138,10 +138,12 @@ func runAgent() {
 		return ""
 	})
 
-	// Start web log watcher (if web server access log found)
+	// Start web log watcher (if web server access logs found)
 	var webW *watcher.WebWatcher
-	if webLogPath := watcher.DetectWebLogPath(); webLogPath != "" {
+	if webLogPaths := watcher.DetectWebLogPaths(); len(webLogPaths) > 0 {
+		log.Printf("[webwatcher] detected %d access log(s)", len(webLogPaths))
 		webW = watcher.NewWebWatcher(
+			webLogPaths,
 			func(ip, reason string, count int) {
 				log.Printf("[webwatcher] banning %s: %s (count=%d)", ip, reason, count)
 				if err := firewall.BanIP(ip); err != nil {
@@ -172,6 +174,8 @@ func runAgent() {
 			}
 			return ""
 		})
+	} else {
+		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
 
 	// Initial sync (applies config, whitelists, rules, bans)
