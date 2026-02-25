@@ -178,12 +178,26 @@ func ListRules() ([]ParsedRule, error) {
 func parseLine(line string) (ParsedRule, bool) {
 	fields := strings.Fields(line)
 
-	// Skip rules with modules we can't manage (-m state, conntrack, multiport, limit, etc.)
 	// Skip rules with interface binds (-i, -o) or negations (!)
 	for _, f := range fields {
 		switch f {
-		case "-m", "-i", "-o", "!":
+		case "-i", "-o", "!":
 			return ParsedRule{}, false
+		}
+	}
+
+	// Check -m modules: allow simple protocol matches (tcp, udp, icmp)
+	// but skip complex modules (state, conntrack, multiport, limit, comment, etc.)
+	for i, f := range fields {
+		if f == "-m" && i+1 < len(fields) {
+			mod := fields[i+1]
+			switch mod {
+			case "tcp", "udp", "icmp":
+				// Simple protocol match — OK
+			default:
+				// Complex module — skip this rule
+				return ParsedRule{}, false
+			}
 		}
 	}
 
@@ -227,6 +241,9 @@ func parseLine(line string) (ParsedRule, bool) {
 				}
 				i++
 			}
+		case "-m":
+			// Skip the module name (already validated above)
+			i++
 		}
 	}
 
