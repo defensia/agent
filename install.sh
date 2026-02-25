@@ -97,27 +97,88 @@ detect_arch() {
     esac
 }
 
+collect_system_info() {
+    local os_info=""
+    if [[ -f /etc/os-release ]]; then
+        os_info="$(. /etc/os-release && echo "${PRETTY_NAME:-${ID} ${VERSION_ID}}")"
+    elif [[ -f /etc/lsb-release ]]; then
+        os_info="$(. /etc/lsb-release && echo "${DISTRIB_DESCRIPTION:-${DISTRIB_ID} ${DISTRIB_RELEASE}}")"
+    else
+        os_info="$(uname -sr)"
+    fi
+    echo "$os_info"
+}
+
+dep_install_failed() {
+    local err_log="$1"
+    local os_info
+    os_info="$(collect_system_info)"
+
+    echo ""
+    echo -e "${RED}${BOLD}  ✗ Dependency installation failed${NC}"
+    echo -e "  ─────────────────────────────────"
+    echo ""
+    echo -e "  This usually happens on servers with outdated or broken"
+    echo -e "  package repositories (e.g. EOL distributions)."
+    echo ""
+    echo -e "  ${BOLD}You can try manually:${NC}"
+    echo -e "    apt-get update --fix-missing && apt-get install -y ca-certificates curl iptables"
+    echo -e "    ${CYAN}# Then re-run the installer${NC}"
+    echo ""
+    echo -e "  ${BOLD}If the problem persists, open a support ticket at:${NC}"
+    echo -e "  ${CYAN}https://defensia.cloud/tickets/create${NC}"
+    echo ""
+    echo -e "  Please include this info:"
+    echo -e "  ┌──────────────────────────────────────"
+    echo -e "  │ OS:   ${os_info}"
+    echo -e "  │ Arch: $(uname -m)"
+    echo -e "  │ Kernel: $(uname -r)"
+    echo -e "  │ Init: ${INIT_SYSTEM:-unknown}"
+    echo -e "  │ Error: ${err_log}"
+    echo -e "  └──────────────────────────────────────"
+    echo ""
+    exit 1
+}
+
 check_deps() {
     local missing=()
     for cmd in curl iptables; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
 
-    # Ensure CA certificates are up to date (old servers may lack modern root CAs)
-    missing+=("ca-certificates")
+    # Only add ca-certificates if not already installed
+    if command -v dpkg &>/dev/null; then
+        dpkg -s ca-certificates &>/dev/null || missing+=("ca-certificates")
+    elif command -v rpm &>/dev/null; then
+        rpm -q ca-certificates &>/dev/null || missing+=("ca-certificates")
+    else
+        missing+=("ca-certificates")
+    fi
 
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        warn "Installing/updating dependencies: ${missing[*]}"
-        if command -v apt-get &>/dev/null; then
-            apt-get update -qq
-            apt-get install -y -qq "${missing[@]}"
-        elif command -v yum &>/dev/null; then
-            yum install -y -q "${missing[@]}"
-        elif command -v dnf &>/dev/null; then
-            dnf install -y -q "${missing[@]}"
-        else
-            error "Cannot install dependencies automatically. Please install: ${missing[*]}"
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    warn "Installing/updating dependencies: ${missing[*]}"
+    local err_output=""
+    if command -v apt-get &>/dev/null; then
+        # Fix broken packages first (common on old servers)
+        dpkg --configure -a --force-confdef &>/dev/null || true
+        # apt-get update may fail on servers with broken/EOL repos — try anyway
+        err_output="$(apt-get update -qq 2>&1)" || true
+        if ! apt-get install -y -qq --fix-broken "${missing[@]}" 2>&1; then
+            dep_install_failed "apt-get install failed — $(echo "$err_output" | grep -E '^(E:|W:)' | head -3 | tr '\n' ' ')"
         fi
+    elif command -v yum &>/dev/null; then
+        if ! yum install -y -q "${missing[@]}" 2>/dev/null; then
+            dep_install_failed "yum install failed"
+        fi
+    elif command -v dnf &>/dev/null; then
+        if ! dnf install -y -q "${missing[@]}" 2>/dev/null; then
+            dep_install_failed "dnf install failed"
+        fi
+    else
+        dep_install_failed "No package manager found (apt-get, yum, dnf)"
     fi
 }
 
@@ -132,7 +193,32 @@ download_binary() {
 
     if ! curl -fsSL --progress-bar -o "$tmp" "$url"; then
         rm -f "$tmp"
-        error "Download failed. Check your internet connection or visit https://defensia.com/docs/agent."
+        local os_info
+        os_info="$(collect_system_info)"
+        echo ""
+        echo -e "${RED}${BOLD}  ✗ Download failed${NC}"
+        echo -e "  ──────────────────"
+        echo ""
+        echo -e "  Could not download the agent binary from:"
+        echo -e "  ${url}"
+        echo ""
+        echo -e "  This may be caused by:"
+        echo -e "  • No internet connectivity"
+        echo -e "  • Outdated CA certificates (try: apt-get install -y ca-certificates)"
+        echo -e "  • Firewall blocking github.com"
+        echo ""
+        echo -e "  ${BOLD}If the problem persists, open a support ticket at:${NC}"
+        echo -e "  ${CYAN}https://defensia.cloud/tickets/create${NC}"
+        echo ""
+        echo -e "  Please include this info:"
+        echo -e "  ┌──────────────────────────────────────"
+        echo -e "  │ OS:   ${os_info}"
+        echo -e "  │ Arch: $(uname -m)"
+        echo -e "  │ Kernel: $(uname -r)"
+        echo -e "  │ Error: Download failed from ${url}"
+        echo -e "  └──────────────────────────────────────"
+        echo ""
+        exit 1
     fi
 
     # Verify checksum if available
@@ -182,9 +268,35 @@ register_agent() {
 
     info "Registering agent '${agent_name}' with ${server_url}..."
 
-    DEFENSIA_CONFIG="${CONFIG_DIR}/config.json" \
-        "${INSTALL_DIR}/${BINARY_NAME}" register "$server_url" "$agent_name" "$install_token" \
-        || error "Registration failed. Check the server URL, install token, and that the server is reachable."
+    if ! DEFENSIA_CONFIG="${CONFIG_DIR}/config.json" \
+        "${INSTALL_DIR}/${BINARY_NAME}" register "$server_url" "$agent_name" "$install_token"; then
+        local os_info
+        os_info="$(collect_system_info)"
+        echo ""
+        echo -e "${RED}${BOLD}  ✗ Registration failed${NC}"
+        echo -e "  ──────────────────────"
+        echo ""
+        echo -e "  Could not register agent '${agent_name}' with ${server_url}"
+        echo ""
+        echo -e "  Common causes:"
+        echo -e "  • Invalid or expired install token"
+        echo -e "  • Server URL is unreachable"
+        echo -e "  • Server limit reached for your plan"
+        echo ""
+        echo -e "  ${BOLD}If the problem persists, open a support ticket at:${NC}"
+        echo -e "  ${CYAN}https://defensia.cloud/tickets/create${NC}"
+        echo ""
+        echo -e "  Please include this info:"
+        echo -e "  ┌──────────────────────────────────────"
+        echo -e "  │ OS:   ${os_info}"
+        echo -e "  │ Arch: $(uname -m)"
+        echo -e "  │ Kernel: $(uname -r)"
+        echo -e "  │ Server: ${server_url}"
+        echo -e "  │ Error: Registration failed"
+        echo -e "  └──────────────────────────────────────"
+        echo ""
+        exit 1
+    fi
 
     success "Agent registered. Token saved to ${CONFIG_DIR}/config.json"
 }

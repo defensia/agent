@@ -23,7 +23,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.5.2"
+var version = "0.6.0"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -140,10 +140,15 @@ func runAgent() {
 
 	// Start web log watcher (if web server access logs found)
 	var webW *watcher.WebWatcher
-	if webLogPaths := watcher.DetectWebLogPaths(); len(webLogPaths) > 0 {
+	if webLogInfos, domainMap := watcher.DetectWebLogInfo(); len(webLogInfos) > 0 {
+		webLogPaths := make([]string, len(webLogInfos))
+		for i, info := range webLogInfos {
+			webLogPaths[i] = info.Path
+		}
 		log.Printf("[webwatcher] detected %d access log(s)", len(webLogPaths))
 		webW = watcher.NewWebWatcher(
 			webLogPaths,
+			domainMap,
 			func(ip, reason string, count int) {
 				log.Printf("[webwatcher] banning %s: %s (count=%d)", ip, reason, count)
 				if err := firewall.BanIP(ip); err != nil {

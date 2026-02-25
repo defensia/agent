@@ -1,12 +1,14 @@
 package watcher
 
 import (
+	"context"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,12 +19,26 @@ import (
 // Severity must be one of: "info", "warning", "critical" (matching the API validation).
 type EventFunc func(ip, eventType, severity string, details map[string]string)
 
+// LogPathInfo holds a log file path and its associated domain names.
+type LogPathInfo struct {
+	Path    string
+	Domains []string
+}
+
+// parseFileStats tracks parse success/failure rates per log file.
+type parseFileStats struct {
+	totalLines  int
+	failedLines int
+	warned      bool
+}
+
 // WebWatcher tails web server access logs and bans IPs that match attack patterns.
 type WebWatcher struct {
-	logPaths []string
-	onBan    BanFunc
-	onEvent  EventFunc
-	checkIP  CheckIPFunc
+	logPaths  []string
+	domainMap map[string][]string // logPath → domain names
+	onBan     BanFunc
+	onEvent   EventFunc
+	checkIP   CheckIPFunc
 
 	mu        sync.Mutex
 	banned    map[string]bool
@@ -31,48 +47,60 @@ type WebWatcher struct {
 
 	// Per-rule attempt tracking: ruleKey:ip → timestamps
 	attempts map[string][]time.Time
+
+	// Parse failure tracking per log file
+	parseStats map[string]*parseFileStats
+
+	// Hot-reload: active goroutines with cancel functions
+	activePaths map[string]context.CancelFunc
 }
 
-// DetectWebLogPaths returns all web server access log paths found.
-// Detection order: env var → nginx config → apache config → well-known paths.
-func DetectWebLogPaths() []string {
-	seen := make(map[string]bool)
-	var paths []string
+// ── Log path detection ──────────────────────────────────────────────
 
-	add := func(p string) {
-		if !seen[p] {
-			seen[p] = true
-			paths = append(paths, p)
+// DetectWebLogInfo returns all web server access log paths with associated domains.
+// Detection order: env var → nginx config → apache config → well-known paths.
+func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
+	seen := make(map[string]bool)
+	var infos []LogPathInfo
+	domainMap := make(map[string][]string)
+
+	add := func(info LogPathInfo) {
+		if !seen[info.Path] {
+			seen[info.Path] = true
+			infos = append(infos, info)
+			if len(info.Domains) > 0 {
+				domainMap[info.Path] = info.Domains
+			}
 		}
 	}
 
-	// 1. Explicit env var always wins (supports comma-separated)
+	// 1. Explicit env var always wins (supports comma-separated, no domain info)
 	if env := os.Getenv("WEB_LOG_PATH"); env != "" {
 		for _, p := range strings.Split(env, ",") {
 			p = strings.TrimSpace(p)
 			if _, err := os.Stat(p); err == nil {
-				add(p)
+				add(LogPathInfo{Path: p})
 			} else {
 				log.Printf("[webwatcher] WEB_LOG_PATH=%s but file not found", p)
 			}
 		}
-		if len(paths) > 0 {
-			return paths
+		if len(infos) > 0 {
+			return infos, domainMap
 		}
 	}
 
-	// 2. Parse nginx config for ALL access_log directives
-	for _, p := range detectNginxLogPaths() {
-		add(p)
+	// 2. Parse nginx config for access_log + server_name
+	for _, info := range detectNginxLogInfo() {
+		add(info)
 	}
 
-	// 3. Parse apache config for ALL CustomLog directives
-	for _, p := range detectApacheLogPaths() {
-		add(p)
+	// 3. Parse apache config for CustomLog + ServerName
+	for _, info := range detectApacheLogInfo() {
+		add(info)
 	}
 
 	// 4. Well-known static paths as fallback (only if nothing found from config)
-	if len(paths) == 0 {
+	if len(infos) == 0 {
 		knownPaths := []string{
 			"/var/log/nginx/access.log",
 			"/var/log/apache2/access.log",
@@ -87,47 +115,159 @@ func DetectWebLogPaths() []string {
 		}
 		for _, p := range knownPaths {
 			if _, err := os.Stat(p); err == nil {
-				add(p)
+				add(LogPathInfo{Path: p})
 			}
 		}
 	}
 
+	return infos, domainMap
+}
+
+// DetectWebLogPaths returns just the paths (backward compat wrapper).
+func DetectWebLogPaths() []string {
+	infos, _ := DetectWebLogInfo()
+	paths := make([]string, len(infos))
+	for i, info := range infos {
+		paths[i] = info.Path
+	}
 	return paths
 }
 
-// detectNginxLogPaths parses nginx config to find ALL access_log paths.
-func detectNginxLogPaths() []string {
+// detectNginxLogInfo parses nginx config to find ALL access_log paths with their server_names.
+func detectNginxLogInfo() []LogPathInfo {
 	out, err := exec.Command("nginx", "-T").CombinedOutput()
 	if err != nil {
 		return nil
 	}
 
-	seen := make(map[string]bool)
-	var paths []string
+	type serverBlock struct {
+		serverNames []string
+		logPaths    []string
+	}
+
+	var blocks []serverBlock
+	var current *serverBlock
+	inServer := false
+	braceDepth := 0       // depth within the current server block
+	serverStartDepth := 0 // global depth when server{ was encountered
+
+	// Track global brace depth for http-level access_log directives
+	globalDepth := 0
+
 	for _, line := range strings.Split(string(out), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "access_log ") && !strings.HasPrefix(trimmed, "#") {
-			parts := strings.Fields(trimmed)
-			if len(parts) >= 2 {
-				path := strings.TrimSuffix(parts[1], ";")
-				if path == "off" || strings.HasPrefix(path, "syslog:") || strings.HasPrefix(path, "|") {
-					continue
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		// Count braces in this line
+		openBraces := strings.Count(trimmed, "{")
+		closeBraces := strings.Count(trimmed, "}")
+
+		prevGlobalDepth := globalDepth
+		globalDepth += openBraces - closeBraces
+
+		// Detect server block start: "server {" or "server\n{"
+		if !inServer && strings.HasPrefix(trimmed, "server") {
+			rest := strings.TrimPrefix(trimmed, "server")
+			rest = strings.TrimSpace(rest)
+			if rest == "{" || rest == "" || strings.HasPrefix(rest, "{") {
+				inServer = true
+				current = &serverBlock{}
+				serverStartDepth = prevGlobalDepth
+				braceDepth = openBraces - closeBraces
+				continue
+			}
+		}
+
+		if inServer {
+			braceDepth += openBraces - closeBraces
+
+			// Server block closed when braceDepth returns to 0
+			if braceDepth <= 0 {
+				if current != nil {
+					blocks = append(blocks, *current)
 				}
-				if !seen[path] {
-					if _, err := os.Stat(path); err == nil {
-						seen[path] = true
-						paths = append(paths, path)
+				current = nil
+				inServer = false
+				continue
+			}
+
+			// Inside server block — capture server_name
+			if strings.HasPrefix(trimmed, "server_name ") {
+				names := strings.TrimSuffix(strings.TrimPrefix(trimmed, "server_name "), ";")
+				for _, n := range strings.Fields(names) {
+					n = strings.TrimSpace(n)
+					if n != "" && n != "_" {
+						current.serverNames = append(current.serverNames, n)
+					}
+				}
+			}
+
+			// Inside server block — capture access_log
+			if strings.HasPrefix(trimmed, "access_log ") {
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 2 {
+					path := strings.TrimSuffix(parts[1], ";")
+					if path != "off" && !strings.HasPrefix(path, "syslog:") && !strings.HasPrefix(path, "|") {
+						current.logPaths = append(current.logPaths, path)
+					}
+				}
+			}
+		} else {
+			// Outside server blocks — http-level access_log (default for all vhosts)
+			if strings.HasPrefix(trimmed, "access_log ") && globalDepth >= 1 {
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 2 {
+					path := strings.TrimSuffix(parts[1], ";")
+					if path != "off" && !strings.HasPrefix(path, "syslog:") && !strings.HasPrefix(path, "|") {
+						blocks = append(blocks, serverBlock{
+							logPaths: []string{path},
+						})
 					}
 				}
 			}
 		}
+
+		_ = serverStartDepth // used for context, depth tracking is via braceDepth
 	}
-	return paths
+
+	// If server block wasn't closed (malformed), still capture it
+	if current != nil && len(current.logPaths) > 0 {
+		blocks = append(blocks, *current)
+	}
+
+	// Build deduplicated LogPathInfo list
+	pathDomains := make(map[string]map[string]bool)
+	for _, block := range blocks {
+		for _, lp := range block.logPaths {
+			if _, err := os.Stat(lp); err != nil {
+				continue
+			}
+			if pathDomains[lp] == nil {
+				pathDomains[lp] = make(map[string]bool)
+			}
+			for _, name := range block.serverNames {
+				pathDomains[lp][name] = true
+			}
+		}
+	}
+
+	var result []LogPathInfo
+	for path, domainSet := range pathDomains {
+		var domains []string
+		for d := range domainSet {
+			domains = append(domains, d)
+		}
+		sort.Strings(domains)
+		result = append(result, LogPathInfo{Path: path, Domains: domains})
+	}
+
+	return result
 }
 
-// detectApacheLogPaths parses apache config to find ALL CustomLog paths.
-func detectApacheLogPaths() []string {
-	// Check if apache is installed
+// detectApacheLogInfo parses apache config to find ALL CustomLog paths with their ServerNames.
+func detectApacheLogInfo() []LogPathInfo {
 	apacheInstalled := false
 	for _, cmd := range []string{"apache2ctl", "apachectl", "httpd"} {
 		if _, err := exec.LookPath(cmd); err == nil {
@@ -139,70 +279,135 @@ func detectApacheLogPaths() []string {
 		return nil
 	}
 
-	seen := make(map[string]bool)
-	var paths []string
-
-	// Collect CustomLog paths from all config files
 	configFiles := []string{
 		"/etc/apache2/apache2.conf",
 		"/etc/httpd/conf/httpd.conf",
 		"/usr/local/apache/conf/httpd.conf",
 	}
-
-	// Add sites-enabled vhosts
 	vhostFiles, _ := filepath.Glob("/etc/apache2/sites-enabled/*.conf")
 	configFiles = append(configFiles, vhostFiles...)
 	vhostFiles2, _ := filepath.Glob("/etc/httpd/conf.d/*.conf")
 	configFiles = append(configFiles, vhostFiles2...)
+
+	pathDomains := make(map[string]map[string]bool)
 
 	for _, cf := range configFiles {
 		data, err := os.ReadFile(cf)
 		if err != nil {
 			continue
 		}
-		for _, p := range parseApacheCustomLogs(string(data)) {
-			if !seen[p] {
-				if _, err := os.Stat(p); err == nil {
-					seen[p] = true
-					paths = append(paths, p)
+		for _, vhost := range parseApacheVhosts(string(data)) {
+			for _, lp := range vhost.logPaths {
+				if _, err := os.Stat(lp); err != nil {
+					continue
+				}
+				if pathDomains[lp] == nil {
+					pathDomains[lp] = make(map[string]bool)
+				}
+				for _, d := range vhost.serverNames {
+					pathDomains[lp][d] = true
 				}
 			}
 		}
 	}
 
-	return paths
+	var result []LogPathInfo
+	for path, domainSet := range pathDomains {
+		var domains []string
+		for d := range domainSet {
+			domains = append(domains, d)
+		}
+		sort.Strings(domains)
+		result = append(result, LogPathInfo{Path: path, Domains: domains})
+	}
+	return result
 }
 
-// parseApacheCustomLogs extracts ALL CustomLog paths from apache config content.
-func parseApacheCustomLogs(content string) []string {
-	var paths []string
+type apacheVhost struct {
+	serverNames []string
+	logPaths    []string
+}
+
+// parseApacheVhosts extracts ServerName/ServerAlias + CustomLog pairs from Apache config.
+func parseApacheVhosts(content string) []apacheVhost {
+	var results []apacheVhost
+	var current *apacheVhost
+
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
+		}
+		lower := strings.ToLower(trimmed)
+
+		if strings.HasPrefix(lower, "<virtualhost") {
+			current = &apacheVhost{}
+			continue
+		}
+		if strings.HasPrefix(lower, "</virtualhost") {
+			if current != nil {
+				results = append(results, *current)
+				current = nil
+			}
+			continue
+		}
+
+		if current == nil {
+			// Outside VirtualHost — capture global CustomLog
+			if strings.HasPrefix(trimmed, "CustomLog ") {
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 2 {
+					path := strings.Trim(parts[1], "\"")
+					if !strings.HasPrefix(path, "|") && !strings.HasPrefix(path, "syslog:") {
+						results = append(results, apacheVhost{logPaths: []string{path}})
+					}
+				}
+			}
+			continue
+		}
+
+		if strings.HasPrefix(lower, "servername ") {
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				current.serverNames = append(current.serverNames, parts[1])
+			}
+		}
+		if strings.HasPrefix(lower, "serveralias ") {
+			parts := strings.Fields(trimmed)
+			for _, alias := range parts[1:] {
+				current.serverNames = append(current.serverNames, alias)
+			}
 		}
 		if strings.HasPrefix(trimmed, "CustomLog ") {
 			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
 				path := strings.Trim(parts[1], "\"")
 				if !strings.HasPrefix(path, "|") && !strings.HasPrefix(path, "syslog:") {
-					paths = append(paths, path)
+					current.logPaths = append(current.logPaths, path)
 				}
 			}
 		}
 	}
-	return paths
+	return results
 }
 
+// ── WebWatcher lifecycle ────────────────────────────────────────────
+
 // NewWebWatcher creates a watcher for web server access logs.
-func NewWebWatcher(paths []string, onBan BanFunc, onEvent EventFunc) *WebWatcher {
+func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc, onEvent EventFunc) *WebWatcher {
+	if domainMap == nil {
+		domainMap = make(map[string][]string)
+	}
 	return &WebWatcher{
-		logPaths:  paths,
-		onBan:     onBan,
-		onEvent:   onEvent,
-		attempts:  make(map[string][]time.Time),
-		banned:    make(map[string]bool),
-		whitelist: make(map[string]bool),
+		logPaths:    paths,
+		domainMap:   domainMap,
+		onBan:       onBan,
+		onEvent:     onEvent,
+		attempts:    make(map[string][]time.Time),
+		banned:      make(map[string]bool),
+		whitelist:   make(map[string]bool),
+		parseStats:  make(map[string]*parseFileStats),
+		activePaths: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -255,28 +460,124 @@ func (w *WebWatcher) Run() {
 		return
 	}
 
+	// Startup logging with domain info
+	totalDomains := 0
 	for _, p := range w.logPaths {
-		log.Printf("[webwatcher] watching %s", p)
+		if domains, ok := w.domainMap[p]; ok && len(domains) > 0 {
+			log.Printf("[webwatcher] watching %s (%s)", p, strings.Join(domains, ", "))
+			totalDomains += len(domains)
+		} else {
+			log.Printf("[webwatcher] watching %s", p)
+		}
+	}
+	if totalDomains > 0 {
+		log.Printf("[webwatcher] monitoring %d log file(s) covering %d domain(s)", len(w.logPaths), totalDomains)
 	}
 
 	// Periodic cleanup of stale attempts
 	go w.cleanupLoop()
 
-	// Start a goroutine per log file (all share the same mutex/state)
-	var wg sync.WaitGroup
+	// Hot-reload of new log files every 5 minutes
+	go w.hotReloadLoop()
+
+	// Start a goroutine per log file
 	for _, p := range w.logPaths {
-		wg.Add(1)
-		go func(path string) {
-			defer wg.Done()
-			for {
-				if err := w.tail(path); err != nil {
-					log.Printf("[webwatcher] %s error: %v — retrying in 5s", filepath.Base(path), err)
-					time.Sleep(5 * time.Second)
-				}
-			}
-		}(p)
+		w.startTailGoroutine(p)
 	}
-	wg.Wait()
+
+	// Block forever
+	select {}
+}
+
+// startTailGoroutine launches a tailing goroutine for a log file if not already active.
+func (w *WebWatcher) startTailGoroutine(path string) {
+	w.mu.Lock()
+	if _, exists := w.activePaths[path]; exists {
+		w.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.activePaths[path] = cancel
+	w.mu.Unlock()
+
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.activePaths, path)
+			w.mu.Unlock()
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if err := w.tailWithContext(ctx, path); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("[webwatcher] %s error: %v — retrying in 5s", filepath.Base(path), err)
+				time.Sleep(5 * time.Second)
+			}
+		}
+	}()
+}
+
+// hotReloadLoop periodically re-detects log paths and starts tailing new ones.
+func (w *WebWatcher) hotReloadLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		newInfos, newDomainMap := DetectWebLogInfo()
+
+		newPathSet := make(map[string]bool)
+		for _, info := range newInfos {
+			newPathSet[info.Path] = true
+		}
+
+		w.mu.Lock()
+
+		// Update domain map
+		for path, domains := range newDomainMap {
+			w.domainMap[path] = domains
+		}
+
+		// Find new paths not yet being watched
+		var toStart []string
+		for _, info := range newInfos {
+			if _, exists := w.activePaths[info.Path]; !exists {
+				toStart = append(toStart, info.Path)
+				w.logPaths = append(w.logPaths, info.Path)
+			}
+		}
+
+		// Find removed paths to stop
+		var toStop []string
+		for path, cancel := range w.activePaths {
+			if !newPathSet[path] {
+				cancel()
+				toStop = append(toStop, path)
+			}
+		}
+
+		w.mu.Unlock()
+
+		for _, path := range toStart {
+			domainStr := ""
+			if domains, ok := newDomainMap[path]; ok && len(domains) > 0 {
+				domainStr = " (" + strings.Join(domains, ", ") + ")"
+			}
+			log.Printf("[webwatcher] new log detected: %s%s", path, domainStr)
+			w.startTailGoroutine(path)
+		}
+
+		for _, path := range toStop {
+			log.Printf("[webwatcher] log removed, stopped watching: %s", filepath.Base(path))
+		}
+	}
 }
 
 func (w *WebWatcher) cleanupLoop() {
@@ -307,8 +608,8 @@ func (w *WebWatcher) cleanupLoop() {
 	}
 }
 
-// tail follows a single access log file.
-func (w *WebWatcher) tail(logPath string) error {
+// tailWithContext follows a single access log file, respecting context cancellation.
+func (w *WebWatcher) tailWithContext(ctx context.Context, logPath string) error {
 	f, err := os.Open(logPath)
 	if err != nil {
 		return err
@@ -334,7 +635,13 @@ func (w *WebWatcher) tail(logPath string) error {
 
 	var partial string
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+
 		fi, err = os.Stat(logPath)
 		if err != nil {
 			return err
@@ -367,7 +674,7 @@ func (w *WebWatcher) tail(logPath string) error {
 				if idx < 0 {
 					break
 				}
-				w.processLine(partial[:idx])
+				w.processLine(logPath, partial[:idx])
 				partial = partial[idx+1:]
 			}
 		}
@@ -376,9 +683,9 @@ func (w *WebWatcher) tail(logPath string) error {
 			return err
 		}
 	}
-
-	return nil
 }
+
+// ── Log parsing ─────────────────────────────────────────────────────
 
 // accessLogEntry holds parsed fields from an access log line.
 type accessLogEntry struct {
@@ -514,7 +821,7 @@ var scannerAgents = []string{
 
 // Threshold-based rules
 type thresholdRule struct {
-	key       string    // map key prefix
+	key       string // map key prefix
 	eventType string
 	threshold int
 	window    time.Duration
@@ -527,9 +834,41 @@ var (
 	rule404Flood   = thresholdRule{"404_flood", "404_flood", 30, 5 * time.Minute}
 )
 
-func (w *WebWatcher) processLine(line string) {
+// ── Line processing ─────────────────────────────────────────────────
+
+// enrichDetails adds domain and log_file info to event details.
+func (w *WebWatcher) enrichDetails(logPath string, details map[string]string) map[string]string {
+	if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
+		details["domain"] = strings.Join(domains, ",")
+	}
+	details["log_file"] = filepath.Base(logPath)
+	return details
+}
+
+func (w *WebWatcher) processLine(logPath, line string) {
 	entry, ok := parseAccessLog(line)
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Track parse stats
+	stats := w.parseStats[logPath]
+	if stats == nil {
+		stats = &parseFileStats{}
+		w.parseStats[logPath] = stats
+	}
+	stats.totalLines++
+
 	if !ok {
+		stats.failedLines++
+		if !stats.warned && stats.totalLines >= 100 {
+			rate := float64(stats.failedLines) / float64(stats.totalLines)
+			if rate > 0.5 {
+				stats.warned = true
+				log.Printf("[webwatcher] WARNING: %s — high parse failure rate (%.0f%% of %d lines). Custom log format? Use combined format or set WEB_LOG_PATH to exclude.",
+					logPath, rate*100, stats.totalLines)
+			}
+		}
 		return
 	}
 
@@ -537,9 +876,6 @@ func (w *WebWatcher) processLine(line string) {
 	uriLower := strings.ToLower(entry.uri)
 	uaLower := strings.ToLower(entry.userAgent)
 	refLower := strings.ToLower(entry.referer)
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	if w.banned[ip] {
 		return
@@ -563,12 +899,12 @@ func (w *WebWatcher) processLine(line string) {
 			if strings.Contains(uriLower, pat) {
 				w.banned[ip] = true
 				go w.onBan(ip, rule.eventType, 1)
-				go w.onEvent(ip, rule.eventType, "critical", map[string]string{
+				go w.onEvent(ip, rule.eventType, "critical", w.enrichDetails(logPath, map[string]string{
 					"uri":        entry.uri,
 					"method":     entry.method,
 					"user_agent": entry.userAgent,
 					"pattern":    pat,
-				})
+				}))
 				return
 			}
 		}
@@ -579,11 +915,11 @@ func (w *WebWatcher) processLine(line string) {
 		if strings.Contains(uaLower, agent) {
 			w.banned[ip] = true
 			go w.onBan(ip, "scanner_detected", 1)
-			go w.onEvent(ip, "scanner_detected", "warning", map[string]string{
+			go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, map[string]string{
 				"uri":        entry.uri,
 				"user_agent": entry.userAgent,
 				"scanner":    agent,
-			})
+			}))
 			return
 		}
 	}
@@ -592,11 +928,11 @@ func (w *WebWatcher) processLine(line string) {
 	if strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {") {
 		w.banned[ip] = true
 		go w.onBan(ip, "shellshock", 1)
-		go w.onEvent(ip, "shellshock", "critical", map[string]string{
+		go w.onEvent(ip, "shellshock", "critical", w.enrichDetails(logPath, map[string]string{
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
 			"referer":    entry.referer,
-		})
+		}))
 		return
 	}
 
@@ -625,9 +961,9 @@ func (w *WebWatcher) processLine(line string) {
 	// ── Threshold: WP Login brute force ──
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
 		if w.checkThreshold(ip, ruleWPLogin, now) {
-			go w.onEvent(ip, ruleWPLogin.eventType, "critical", map[string]string{
+			go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, map[string]string{
 				"uri": entry.uri,
-			})
+			}))
 		}
 		return
 	}
@@ -635,9 +971,9 @@ func (w *WebWatcher) processLine(line string) {
 	// ── Threshold: XMLRPC abuse ──
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
 		if w.checkThreshold(ip, ruleXMLRPC, now) {
-			go w.onEvent(ip, ruleXMLRPC.eventType, "warning", map[string]string{
+			go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, map[string]string{
 				"uri": entry.uri,
-			})
+			}))
 		}
 		return
 	}
@@ -645,9 +981,9 @@ func (w *WebWatcher) processLine(line string) {
 	// ── Threshold: plugin scanner ──
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
 		if w.checkThreshold(ip, rulePluginScan, now) {
-			go w.onEvent(ip, rulePluginScan.eventType, "info", map[string]string{
+			go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, map[string]string{
 				"uri": entry.uri,
-			})
+			}))
 		}
 		return
 	}
@@ -655,9 +991,9 @@ func (w *WebWatcher) processLine(line string) {
 	// ── Threshold: 404 flood ──
 	if entry.status == 404 {
 		if w.checkThreshold(ip, rule404Flood, now) {
-			go w.onEvent(ip, rule404Flood.eventType, "info", map[string]string{
+			go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, map[string]string{
 				"uri": entry.uri,
-			})
+			}))
 		}
 		return
 	}
