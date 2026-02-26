@@ -60,7 +60,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	expectedHash, err := downloadText(checksumURL)
 	if err != nil {
 		log.Printf("[updater] failed to download checksum: %v", err)
-		reportEvent("update_failed", "high", mergeDetails(versionDetails, map[string]string{
+		reportFailure(reportEvent, "high", mergeDetails(versionDetails, map[string]string{
 			"reason": "download_failed", "error": fmt.Sprintf("checksum download: %v", err),
 		}))
 		return
@@ -79,7 +79,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	if err := downloadFile(binaryURL, tmpPath); err != nil {
 		log.Printf("[updater] failed to download binary: %v", err)
 		os.Remove(tmpPath)
-		reportEvent("update_failed", "high", mergeDetails(versionDetails, map[string]string{
+		reportFailure(reportEvent, "high", mergeDetails(versionDetails, map[string]string{
 			"reason": "download_failed", "error": fmt.Sprintf("binary download: %v", err),
 		}))
 		return
@@ -96,7 +96,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	if actualHash != expectedHash {
 		log.Printf("[updater] checksum mismatch: expected %s, got %s", expectedHash, actualHash)
 		os.Remove(tmpPath)
-		reportEvent("update_failed", "high", mergeDetails(versionDetails, map[string]string{
+		reportFailure(reportEvent, "high", mergeDetails(versionDetails, map[string]string{
 			"reason": "checksum_mismatch",
 			"error":  fmt.Sprintf("expected %s, got %s", expectedHash[:16], actualHash[:16]),
 		}))
@@ -121,7 +121,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		}
 		log.Printf("[updater] pre-flight check FAILED (err=%v, output=%q) — aborting update", err, string(out))
 		os.Remove(tmpPath)
-		reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
 			"reason": "preflight_failed",
 			"error":  errMsg,
 			"output": strings.TrimSpace(string(out)),
@@ -148,7 +148,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 			log.Printf("[updater] CRITICAL: failed to stage new binary: %v — rolling back", err)
 			rollback()
 			os.Remove(tmpPath)
-			reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+			reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
 				"reason": "replace_failed", "error": fmt.Sprintf("staging copy: %v", err),
 			}))
 			return
@@ -158,7 +158,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 			log.Printf("[updater] CRITICAL: failed to rename staging binary: %v — rolling back", err)
 			os.Remove(stagingPath)
 			rollback()
-			reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+			reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
 				"reason": "replace_failed", "error": fmt.Sprintf("staging rename: %v", err),
 			}))
 			return
@@ -169,7 +169,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	if _, err := os.Stat(targetPath); err != nil {
 		log.Printf("[updater] CRITICAL: binary not found at %s after replace — rolling back", targetPath)
 		rollback()
-		reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
 			"reason": "binary_missing_after_replace", "error": err.Error(),
 		}))
 		return
@@ -184,7 +184,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	if err := restartService(); err != nil {
 		log.Printf("[updater] restart failed: %v — rolling back", err)
 		rollback()
-		reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
 			"reason": "restart_failed", "error": err.Error(),
 		}))
 		// Try restart again with the old binary
@@ -192,6 +192,15 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 			log.Printf("[updater] CRITICAL: rollback restart also failed: %v", err)
 		}
 	}
+}
+
+// reportFailure is a convenience wrapper that attaches recent service logs
+// to the event details before reporting an update failure.
+func reportFailure(reportEvent EventReporter, severity string, details map[string]string) {
+	if logs := recentLogs(50); logs != "" {
+		details["recent_logs"] = logs
+	}
+	reportEvent("update_failed", severity, details)
 }
 
 // mergeDetails merges two maps, with b overriding a.
@@ -337,6 +346,20 @@ func fileHash(path string) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// recentLogs captures the last N lines from the agent's systemd journal.
+// Returns empty string if journalctl is not available.
+func recentLogs(lines int) string {
+	if _, err := exec.LookPath("journalctl"); err != nil {
+		return ""
+	}
+	out, err := exec.Command("journalctl", "-u", "defensia-agent", "--no-pager",
+		"-n", fmt.Sprintf("%d", lines), "--output", "short-iso").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func copyFile(src, dst string) error {
