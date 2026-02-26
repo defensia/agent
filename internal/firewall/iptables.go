@@ -101,10 +101,21 @@ func source(spec RuleSpec) string {
 	return ""
 }
 
+// isReservedIP returns true for loopback, link-local, and private IPs
+// that must never be banned via iptables.
+func isReservedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
+}
+
 // BanIP adds a DROP rule for the given IP address.
 func BanIP(ip string) error {
-	if net.ParseIP(ip) == nil {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+	if isReservedIP(parsed) {
+		log.Printf("[firewall] refusing to ban reserved IP: %s", ip)
+		return fmt.Errorf("refusing to ban reserved IP: %s", ip)
 	}
 
 	return ApplyRule(RuleSpec{
@@ -255,6 +266,13 @@ func parseLine(line string) (ParsedRule, bool) {
 	// Must have at least a source IP or a port to be meaningful
 	if rule.Source == "" && rule.Port == 0 {
 		return ParsedRule{}, false
+	}
+
+	// Skip reserved IPs — they should never be managed or imported
+	if rule.Source != "" {
+		if ip := net.ParseIP(rule.Source); ip != nil && isReservedIP(ip) {
+			return ParsedRule{}, false
+		}
 	}
 
 	return rule, true
