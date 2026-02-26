@@ -20,10 +20,15 @@ var updateMu sync.Mutex
 const targetPath = "/usr/local/bin/defensia-agent"
 const backupPath = "/usr/local/bin/defensia-agent.bak"
 
+// EventReporter is a callback to send events to the server without
+// coupling the updater to the full API client.
+type EventReporter func(eventType, severity string, details map[string]string)
+
 // CheckAndUpdate compares the current version with the latest version.
 // If a newer version is available, it downloads, verifies, runs a preflight
 // check, and only then replaces the binary with automatic rollback on failure.
-func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
+// The reportEvent callback is used to notify the server about update outcomes.
+func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, reportEvent EventReporter) {
 	if latestVersion == "" || downloadBaseURL == "" {
 		return
 	}
@@ -46,10 +51,18 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	binaryURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), binaryName)
 	checksumURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), checksumName)
 
+	versionDetails := map[string]string{
+		"current_version": currentVersion,
+		"target_version":  latestVersion,
+	}
+
 	// 1. Download checksum
 	expectedHash, err := downloadText(checksumURL)
 	if err != nil {
 		log.Printf("[updater] failed to download checksum: %v", err)
+		reportEvent("update_failed", "high", mergeDetails(versionDetails, map[string]string{
+			"reason": "download_failed", "error": fmt.Sprintf("checksum download: %v", err),
+		}))
 		return
 	}
 	expectedHash = strings.TrimSpace(strings.Fields(expectedHash)[0])
@@ -66,6 +79,9 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	if err := downloadFile(binaryURL, tmpPath); err != nil {
 		log.Printf("[updater] failed to download binary: %v", err)
 		os.Remove(tmpPath)
+		reportEvent("update_failed", "high", mergeDetails(versionDetails, map[string]string{
+			"reason": "download_failed", "error": fmt.Sprintf("binary download: %v", err),
+		}))
 		return
 	}
 
@@ -80,6 +96,10 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	if actualHash != expectedHash {
 		log.Printf("[updater] checksum mismatch: expected %s, got %s", expectedHash, actualHash)
 		os.Remove(tmpPath)
+		reportEvent("update_failed", "high", mergeDetails(versionDetails, map[string]string{
+			"reason": "checksum_mismatch",
+			"error":  fmt.Sprintf("expected %s, got %s", expectedHash[:16], actualHash[:16]),
+		}))
 		return
 	}
 
@@ -95,8 +115,17 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	// 5. PRE-FLIGHT CHECK: run the new binary with "check" to verify it works
 	out, err := exec.Command(tmpPath, "check").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "OK") {
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
 		log.Printf("[updater] pre-flight check FAILED (err=%v, output=%q) — aborting update", err, string(out))
 		os.Remove(tmpPath)
+		reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "preflight_failed",
+			"error":  errMsg,
+			"output": strings.TrimSpace(string(out)),
+		}))
 		return
 	}
 	log.Printf("[updater] pre-flight check passed: %s", strings.TrimSpace(string(out)))
@@ -119,6 +148,9 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 			log.Printf("[updater] CRITICAL: failed to stage new binary: %v — rolling back", err)
 			rollback()
 			os.Remove(tmpPath)
+			reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+				"reason": "replace_failed", "error": fmt.Sprintf("staging copy: %v", err),
+			}))
 			return
 		}
 		os.Remove(tmpPath)
@@ -126,6 +158,9 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 			log.Printf("[updater] CRITICAL: failed to rename staging binary: %v — rolling back", err)
 			os.Remove(stagingPath)
 			rollback()
+			reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+				"reason": "replace_failed", "error": fmt.Sprintf("staging rename: %v", err),
+			}))
 			return
 		}
 	}
@@ -134,20 +169,41 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	if _, err := os.Stat(targetPath); err != nil {
 		log.Printf("[updater] CRITICAL: binary not found at %s after replace — rolling back", targetPath)
 		rollback()
+		reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "binary_missing_after_replace", "error": err.Error(),
+		}))
 		return
 	}
 
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
-	// 9. Restart the service
+	// 9. Report success BEFORE restart (restart kills the current process)
+	reportEvent("update_completed", "info", versionDetails)
+
+	// 10. Restart the service
 	if err := restartService(); err != nil {
 		log.Printf("[updater] restart failed: %v — rolling back", err)
 		rollback()
+		reportEvent("update_failed", "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "restart_failed", "error": err.Error(),
+		}))
 		// Try restart again with the old binary
 		if err := restartService(); err != nil {
 			log.Printf("[updater] CRITICAL: rollback restart also failed: %v", err)
 		}
 	}
+}
+
+// mergeDetails merges two maps, with b overriding a.
+func mergeDetails(a, b map[string]string) map[string]string {
+	m := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		m[k] = v
+	}
+	for k, v := range b {
+		m[k] = v
+	}
+	return m
 }
 
 // rollback restores the backup binary to the target path.

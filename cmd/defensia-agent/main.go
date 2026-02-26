@@ -112,6 +112,16 @@ func runAgent() {
 
 	apiClient := api.New(cfg.ServerURL, cfg.AgentToken)
 
+	// Callback for the updater to report update outcomes to the server
+	reportUpdateEvent := func(eventType, severity string, details map[string]string) {
+		_ = apiClient.ReportEvents([]api.EventRequest{{
+			Type:       eventType,
+			Severity:   severity,
+			Details:    details,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}
+
 	log.Printf("Starting Defensia agent v%s (agent_id=%d)", version, cfg.AgentID)
 
 	// Initialize GeoIP lookup
@@ -191,7 +201,7 @@ func runAgent() {
 	}
 
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, webW, geo); err != nil {
+	if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -263,7 +273,7 @@ func runAgent() {
 					return
 				}
 				if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
-					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL)
+					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 				}
 			},
 		},
@@ -320,7 +330,7 @@ func runAgent() {
 
 			// Check for agent update
 			if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
-				go updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL)
+				go updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 			}
 		}
 	}()
@@ -334,7 +344,7 @@ func runAgent() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, webW, geo); err != nil {
+			if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -349,7 +359,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, geo *geoip.Lookup) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -410,7 +420,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 	// Check for agent update from sync response
 	if sync.AgentUpdate != nil && sync.AgentUpdate.LatestVersion != "" {
-		go updater.CheckAndUpdate(version, sync.AgentUpdate.LatestVersion, sync.AgentUpdate.DownloadBaseURL)
+		go updater.CheckAndUpdate(version, sync.AgentUpdate.LatestVersion, sync.AgentUpdate.DownloadBaseURL, reportUpdateEvent)
 	}
 
 	return nil
