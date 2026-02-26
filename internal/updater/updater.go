@@ -120,7 +120,10 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 		return
 	}
 
-	log.Printf("[updater] updated to v%s, restarting...", latestVersion)
+	log.Printf("[updater] updated to %s, restarting...", latestVersion)
+
+	// Fix service file for old kernels before restarting
+	fixServiceFile()
 
 	// Restart the service — detect init system
 	restartService()
@@ -154,6 +157,58 @@ func restartService() {
 	}
 
 	log.Printf("[updater] could not restart service via any init system")
+}
+
+// fixServiceFile ensures the systemd unit is compatible with the running kernel.
+// Older kernels (< 4.x) don't support the mount namespaces required by
+// PrivateTmp/ProtectHome, which causes "Failed to run 'start' task: No such
+// file or directory" on systemd restart.
+func fixServiceFile() {
+	serviceFile := "/etc/systemd/system/defensia-agent.service"
+	data, err := os.ReadFile(serviceFile)
+	if err != nil {
+		return // not systemd or file doesn't exist
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "PrivateTmp=yes") {
+		return // already clean
+	}
+
+	// Check kernel major version
+	out, err := exec.Command("uname", "-r").Output()
+	if err != nil {
+		return
+	}
+	release := strings.TrimSpace(string(out))
+	major := 0
+	fmt.Sscanf(strings.SplitN(release, ".", 2)[0], "%d", &major)
+	if major >= 4 {
+		return // kernel supports mount namespaces fine
+	}
+
+	log.Printf("[updater] kernel %s detected — removing incompatible systemd directives", release)
+
+	// Remove hardening lines that require mount namespace support
+	lines := strings.Split(content, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch trimmed {
+		case "PrivateTmp=yes", "ProtectHome=yes", "ProtectSystem=false",
+			"NoNewPrivileges=no", "# Security hardening":
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+
+	if err := os.WriteFile(serviceFile, []byte(strings.Join(cleaned, "\n")), 0644); err != nil {
+		log.Printf("[updater] failed to update service file: %v", err)
+		return
+	}
+
+	exec.Command("systemctl", "daemon-reload").Run()
+	log.Printf("[updater] service file updated — removed PrivateTmp/ProtectHome for old kernel")
 }
 
 // isNewer returns true if latest > current using simple semver comparison.
