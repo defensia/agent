@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // RuleSpec describes a firewall rule to apply.
@@ -101,10 +102,49 @@ func source(spec RuleSpec) string {
 	return ""
 }
 
+// localIPs caches the server's own IP addresses (collected once at first use).
+var localIPs map[string]bool
+var localIPsOnce sync.Once
+
+// collectLocalIPs gathers all IP addresses assigned to local network interfaces.
+func collectLocalIPs() map[string]bool {
+	ips := make(map[string]bool)
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.Printf("[firewall] warning: could not enumerate local IPs: %v", err)
+		return ips
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil {
+			ips[ip.String()] = true
+		}
+	}
+	log.Printf("[firewall] collected %d local IPs for self-protection", len(ips))
+	return ips
+}
+
+// isLocalIP returns true if the given IP belongs to this server.
+func isLocalIP(ip net.IP) bool {
+	localIPsOnce.Do(func() { localIPs = collectLocalIPs() })
+	return localIPs[ip.String()]
+}
+
 // isReservedIP returns true for loopback, link-local, and private IPs
 // that must never be banned via iptables.
 func isReservedIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
+}
+
+// isSafeIP returns true if the IP must not be banned (reserved or own server IP).
+func isSafeIP(ip net.IP) bool {
+	return isReservedIP(ip) || isLocalIP(ip)
 }
 
 // BanIP adds a DROP rule for the given IP address.
@@ -113,9 +153,9 @@ func BanIP(ip string) error {
 	if parsed == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
 	}
-	if isReservedIP(parsed) {
-		log.Printf("[firewall] refusing to ban reserved IP: %s", ip)
-		return fmt.Errorf("refusing to ban reserved IP: %s", ip)
+	if isSafeIP(parsed) {
+		log.Printf("[firewall] refusing to ban safe IP (reserved or self): %s", ip)
+		return fmt.Errorf("refusing to ban safe IP: %s", ip)
 	}
 
 	return ApplyRule(RuleSpec{
@@ -268,9 +308,9 @@ func parseLine(line string) (ParsedRule, bool) {
 		return ParsedRule{}, false
 	}
 
-	// Skip reserved IPs — they should never be managed or imported
+	// Skip safe IPs (reserved or own server) — they should never be managed or imported
 	if rule.Source != "" {
-		if ip := net.ParseIP(rule.Source); ip != nil && isReservedIP(ip) {
+		if ip := net.ParseIP(rule.Source); ip != nil && isSafeIP(ip) {
 			return ParsedRule{}, false
 		}
 	}
