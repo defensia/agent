@@ -102,6 +102,19 @@ func source(spec RuleSpec) string {
 	return ""
 }
 
+// protectedIPs holds additional IPs that must never be banned (e.g. the API server).
+var protectedIPs = make(map[string]bool)
+
+// AddProtectedIPs registers IPs that must never be banned (e.g. the Defensia API server).
+func AddProtectedIPs(ips ...string) {
+	for _, ip := range ips {
+		if parsed := net.ParseIP(ip); parsed != nil {
+			protectedIPs[parsed.String()] = true
+			log.Printf("[firewall] added protected IP: %s", parsed)
+		}
+	}
+}
+
 // localIPs caches the server's own IP addresses (collected once at first use).
 var localIPs map[string]bool
 var localIPsOnce sync.Once
@@ -142,9 +155,9 @@ func isReservedIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
 }
 
-// isSafeIP returns true if the IP must not be banned (reserved or own server IP).
+// isSafeIP returns true if the IP must not be banned (reserved, own server, or protected).
 func isSafeIP(ip net.IP) bool {
-	return isReservedIP(ip) || isLocalIP(ip)
+	return isReservedIP(ip) || isLocalIP(ip) || protectedIPs[ip.String()]
 }
 
 // BanIP adds a DROP rule for the given IP address.
@@ -185,6 +198,46 @@ func ApplyBans(ips []string) {
 			log.Printf("[firewall] error applying ban for %s: %v", ip, err)
 		}
 	}
+}
+
+// CleanupStaleBans removes iptables DROP rules for IPs that are no longer
+// in the active ban list from the server (e.g. expired bans).
+// activeBanIPs: IPs that should remain banned.
+// activeRuleIPs: IPs managed by user-created firewall rules (not bans), so they won't be removed.
+func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
+	current, err := ListRules()
+	if err != nil {
+		log.Printf("[firewall] cleanup: cannot list rules: %v", err)
+		return 0
+	}
+
+	removed := 0
+	for _, r := range current {
+		// Only clean up simple DROP rules with a source IP and no port
+		// (ban rules are: -s <IP> -j DROP with no port/protocol)
+		if r.Type != "block" || r.Source == "" || r.Port != 0 || r.Protocol != "all" {
+			continue
+		}
+
+		// Still an active ban — keep it
+		if activeBanIPs[r.Source] {
+			continue
+		}
+
+		// Managed by a user firewall rule — don't touch
+		if activeRuleIPs[r.Source] {
+			continue
+		}
+
+		if err := UnbanIP(r.Source); err != nil {
+			log.Printf("[firewall] cleanup: failed to remove stale ban for %s: %v", r.Source, err)
+		} else {
+			log.Printf("[firewall] cleanup: removed expired ban for %s", r.Source)
+			removed++
+		}
+	}
+
+	return removed
 }
 
 // ParsedRule represents an iptables rule parsed from `iptables -S INPUT`.

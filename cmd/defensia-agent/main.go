@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -123,6 +124,16 @@ func runAgent() {
 	}
 
 	log.Printf("Starting Defensia agent v%s (agent_id=%d)", version, cfg.AgentID)
+
+	// Protect the API server IP from being banned (would cut off agent comms)
+	if u, err := url.Parse(cfg.ServerURL); err == nil {
+		host := u.Hostname()
+		if ips, err := net.LookupHost(host); err == nil {
+			firewall.AddProtectedIPs(ips...)
+		} else {
+			log.Printf("[main] warning: could not resolve API host %s: %v", host, err)
+		}
+	}
 
 	// Initialize GeoIP lookup
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
@@ -396,11 +407,24 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	geo.SetBlocked(blockedCountries)
 
 	// Apply bans
-	ips := make([]string, 0, len(sync.Bans))
+	activeBanIPs := make(map[string]bool, len(sync.Bans))
+	banIPs := make([]string, 0, len(sync.Bans))
 	for _, b := range sync.Bans {
-		ips = append(ips, b.IPAddress)
+		activeBanIPs[b.IPAddress] = true
+		banIPs = append(banIPs, b.IPAddress)
 	}
-	firewall.ApplyBans(ips)
+	firewall.ApplyBans(banIPs)
+
+	// Build set of IPs managed by user firewall rules (so cleanup doesn't remove them)
+	activeRuleIPs := make(map[string]bool)
+	for _, r := range sync.Rules {
+		if r.IPAddress != nil && *r.IPAddress != "" && r.Type == "block" {
+			activeRuleIPs[*r.IPAddress] = true
+		}
+	}
+
+	// Remove iptables DROP rules for bans that expired or were removed server-side
+	cleaned := firewall.CleanupStaleBans(activeBanIPs, activeRuleIPs)
 
 	// Apply firewall rules that are pending or synced (skip country-only rules)
 	rulesApplied := 0
@@ -415,8 +439,8 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 
-	log.Printf("[sync] applied %d bans, %d/%d rules, %d whitelists, %d geoblock countries",
-		len(sync.Bans), rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries))
+	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries",
+		len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries))
 
 	// Check for agent update from sync response
 	if sync.AgentUpdate != nil && sync.AgentUpdate.LatestVersion != "" {

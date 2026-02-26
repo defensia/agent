@@ -324,22 +324,6 @@ install_service_systemd() {
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
     info "Installing systemd service..."
 
-    # Detect kernel major version — kernels < 4.x don't support mount namespaces
-    # required by PrivateTmp/ProtectHome (e.g. OVH kernel 3.14 on Ubuntu 16.04)
-    local kernel_major
-    kernel_major="$(uname -r | cut -d. -f1)"
-    local hardening=""
-    if [[ "$kernel_major" -ge 4 ]]; then
-        hardening="
-# Security hardening
-NoNewPrivileges=no
-PrivateTmp=yes
-ProtectSystem=false
-ProtectHome=yes"
-    else
-        warn "Kernel $(uname -r) detected — skipping PrivateTmp/ProtectHome (requires kernel 4.x+)"
-    fi
-
     cat > "$service_file" <<EOF
 [Unit]
 Description=Defensia Security Agent
@@ -356,7 +340,13 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=${SERVICE_NAME}
 Environment=DEFENSIA_CONFIG=${CONFIG_DIR}/config.json
-Environment=AUTH_LOG_PATH=${auth_log}${hardening}
+Environment=AUTH_LOG_PATH=${auth_log}
+
+# Security hardening
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectSystem=false
+ProtectHome=yes
 
 [Install]
 WantedBy=multi-user.target
