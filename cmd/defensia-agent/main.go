@@ -269,14 +269,19 @@ func runAgent() {
 		log.Printf("[webserver] detected %s %s", wsName, wsVersion)
 	}
 
-	// Heartbeat ticker (includes zombie count + web server info)
+	// Metrics collector
+	metricsCollector := monitor.NewMetricsCollector()
+
+	// Heartbeat ticker (includes zombie count + web server info + system metrics)
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 
 		for range ticker.C {
 			zReport := monitor.ScanZombies()
-			resp, err := apiClient.Heartbeat(api.HeartbeatRequest{
+			sysMetrics := metricsCollector.Collect()
+
+			hbReq := api.HeartbeatRequest{
 				Status:           "online",
 				Version:          version,
 				Timestamp:        time.Now().UTC().Format(time.RFC3339),
@@ -284,7 +289,23 @@ func runAgent() {
 				ZombieCount:      zReport.Count,
 				WebServer:        wsName,
 				WebServerVersion: wsVersion,
-			})
+				Metrics: &api.SystemMetrics{
+					CPUPercent:    sysMetrics.CPUPercent,
+					MemoryTotal:   sysMetrics.MemoryTotal,
+					MemoryUsed:    sysMetrics.MemoryUsed,
+					MemoryPercent: sysMetrics.MemoryPercent,
+					DiskTotal:     sysMetrics.DiskTotal,
+					DiskUsed:      sysMetrics.DiskUsed,
+					DiskPercent:   sysMetrics.DiskPercent,
+					LoadAvg1:      sysMetrics.LoadAvg1,
+					LoadAvg5:      sysMetrics.LoadAvg5,
+					LoadAvg15:     sysMetrics.LoadAvg15,
+					NetBytesIn:    sysMetrics.NetBytesIn,
+					NetBytesOut:   sysMetrics.NetBytesOut,
+				},
+			}
+
+			resp, err := apiClient.Heartbeat(hbReq)
 			if err != nil {
 				log.Printf("[heartbeat] error: %v", err)
 				continue

@@ -49,15 +49,32 @@ type RegisterResponse struct {
 	} `json:"reverb"`
 }
 
+// SystemMetrics holds server performance data.
+type SystemMetrics struct {
+	CPUPercent    float64 `json:"cpu_percent"`
+	MemoryTotal   uint64  `json:"memory_total"`
+	MemoryUsed    uint64  `json:"memory_used"`
+	MemoryPercent float64 `json:"memory_percent"`
+	DiskTotal     uint64  `json:"disk_total"`
+	DiskUsed      uint64  `json:"disk_used"`
+	DiskPercent   float64 `json:"disk_percent"`
+	LoadAvg1      float64 `json:"load_avg_1"`
+	LoadAvg5      float64 `json:"load_avg_5"`
+	LoadAvg15     float64 `json:"load_avg_15"`
+	NetBytesIn    uint64  `json:"net_bytes_in"`
+	NetBytesOut   uint64  `json:"net_bytes_out"`
+}
+
 // HeartbeatRequest is sent every 60s.
 type HeartbeatRequest struct {
-	Status           string `json:"status"`
-	Version          string `json:"version"`
-	Timestamp        string `json:"timestamp"`
-	IPAddress        string `json:"ip_address,omitempty"`
-	ZombieCount      int    `json:"zombie_count"`
-	WebServer        string `json:"web_server,omitempty"`
-	WebServerVersion string `json:"web_server_version,omitempty"`
+	Status           string         `json:"status"`
+	Version          string         `json:"version"`
+	Timestamp        string         `json:"timestamp"`
+	IPAddress        string         `json:"ip_address,omitempty"`
+	ZombieCount      int            `json:"zombie_count"`
+	WebServer        string         `json:"web_server,omitempty"`
+	WebServerVersion string         `json:"web_server_version,omitempty"`
+	Metrics          *SystemMetrics `json:"metrics,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.
