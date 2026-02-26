@@ -44,6 +44,12 @@ func main() {
 	case "start":
 		runAgent()
 
+	case "check":
+		// Pre-flight self-test used by the auto-updater to verify the binary
+		// works before restarting the service. Exits 0 on success.
+		fmt.Printf("defensia-agent v%s OK\n", version)
+		os.Exit(0)
+
 	default:
 		printUsage()
 		os.Exit(1)
@@ -54,6 +60,7 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  defensia-agent register <server_url> <agent_name> <install_token>")
 	fmt.Println("  defensia-agent start")
+	fmt.Println("  defensia-agent check")
 }
 
 // runRegister performs first-boot registration and saves the config.

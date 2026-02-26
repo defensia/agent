@@ -17,9 +17,12 @@ import (
 
 var updateMu sync.Mutex
 
+const targetPath = "/usr/local/bin/defensia-agent"
+const backupPath = "/usr/local/bin/defensia-agent.bak"
+
 // CheckAndUpdate compares the current version with the latest version.
-// If a newer version is available, it downloads, verifies, and replaces the binary.
-// A mutex prevents concurrent calls (heartbeat + sync) from racing.
+// If a newer version is available, it downloads, verifies, runs a preflight
+// check, and only then replaces the binary with automatic rollback on failure.
 func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	if latestVersion == "" || downloadBaseURL == "" {
 		return
@@ -43,7 +46,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	binaryURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), binaryName)
 	checksumURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), checksumName)
 
-	// Download checksum
+	// 1. Download checksum
 	expectedHash, err := downloadText(checksumURL)
 	if err != nil {
 		log.Printf("[updater] failed to download checksum: %v", err)
@@ -51,7 +54,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 	}
 	expectedHash = strings.TrimSpace(strings.Fields(expectedHash)[0])
 
-	// Download binary to unique temp file to avoid conflicts
+	// 2. Download binary to temp file
 	tmpFile, err := os.CreateTemp("", "defensia-agent-update-*")
 	if err != nil {
 		log.Printf("[updater] failed to create temp file: %v", err)
@@ -66,7 +69,7 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 		return
 	}
 
-	// Verify checksum
+	// 3. Verify checksum
 	actualHash, err := fileHash(tmpPath)
 	if err != nil {
 		log.Printf("[updater] failed to hash downloaded binary: %v", err)
@@ -80,135 +83,119 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string) {
 		return
 	}
 
-	log.Printf("[updater] checksum verified, replacing binary...")
+	log.Printf("[updater] checksum verified")
 
-	// Replace the current binary
-	targetPath := "/usr/local/bin/defensia-agent"
+	// 4. Make downloaded binary executable
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		log.Printf("[updater] failed to chmod: %v", err)
 		os.Remove(tmpPath)
 		return
 	}
 
-	// Try atomic rename first (works if same filesystem)
+	// 5. PRE-FLIGHT CHECK: run the new binary with "check" to verify it works
+	out, err := exec.Command(tmpPath, "check").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "OK") {
+		log.Printf("[updater] pre-flight check FAILED (err=%v, output=%q) — aborting update", err, string(out))
+		os.Remove(tmpPath)
+		return
+	}
+	log.Printf("[updater] pre-flight check passed: %s", strings.TrimSpace(string(out)))
+
+	// 6. BACKUP current binary before replacing
+	if err := copyFile(targetPath, backupPath); err != nil {
+		log.Printf("[updater] failed to backup current binary: %v", err)
+		os.Remove(tmpPath)
+		return
+	}
+	log.Printf("[updater] backed up current binary to %s", backupPath)
+
+	// 7. Replace binary — unlink first (Linux allows unlinking a running executable),
+	// then rename the new file into place. This avoids "text file busy".
+	os.Remove(targetPath)
 	if err := os.Rename(tmpPath, targetPath); err != nil {
-		// Cross-device or "text file busy": copy to a staging path next to
-		// the target, then atomic-rename the staging file into place.
+		// Cross-device: copy + rename
 		stagingPath := targetPath + ".new"
 		if err := copyFile(tmpPath, stagingPath); err != nil {
-			log.Printf("[updater] failed to copy to staging: %v", err)
+			log.Printf("[updater] CRITICAL: failed to stage new binary: %v — rolling back", err)
+			rollback()
 			os.Remove(tmpPath)
-			os.Remove(stagingPath)
 			return
 		}
 		os.Remove(tmpPath)
-
-		// Remove old binary and rename staging into place.
-		// Linux allows unlinking a running executable — the old inode stays
-		// alive until the process exits, but the path becomes free.
-		os.Remove(targetPath)
 		if err := os.Rename(stagingPath, targetPath); err != nil {
-			log.Printf("[updater] failed to rename staging binary: %v", err)
+			log.Printf("[updater] CRITICAL: failed to rename staging binary: %v — rolling back", err)
 			os.Remove(stagingPath)
+			rollback()
 			return
 		}
 	}
 
-	// Final safety check: verify the target binary exists and is executable
+	// 8. Verify the target binary exists
 	if _, err := os.Stat(targetPath); err != nil {
-		log.Printf("[updater] CRITICAL: binary not found at %s after replace — not restarting", targetPath)
+		log.Printf("[updater] CRITICAL: binary not found at %s after replace — rolling back", targetPath)
+		rollback()
 		return
 	}
 
-	log.Printf("[updater] updated to %s, restarting...", latestVersion)
+	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
-	// Fix service file for old kernels before restarting
-	fixServiceFile()
+	// 9. Restart the service
+	if err := restartService(); err != nil {
+		log.Printf("[updater] restart failed: %v — rolling back", err)
+		rollback()
+		// Try restart again with the old binary
+		if err := restartService(); err != nil {
+			log.Printf("[updater] CRITICAL: rollback restart also failed: %v", err)
+		}
+	}
+}
 
-	// Restart the service — detect init system
-	restartService()
+// rollback restores the backup binary to the target path.
+func rollback() {
+	if _, err := os.Stat(backupPath); err != nil {
+		log.Printf("[updater] no backup found at %s — cannot rollback", backupPath)
+		return
+	}
+	os.Remove(targetPath)
+	if err := copyFile(backupPath, targetPath); err != nil {
+		log.Printf("[updater] CRITICAL: rollback copy failed: %v", err)
+		return
+	}
+	log.Printf("[updater] rolled back to previous version from %s", backupPath)
 }
 
 // restartService tries systemd, then upstart, then sysvinit.
-func restartService() {
+// Returns an error if all methods fail.
+func restartService() error {
 	// systemd
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		if err := exec.Command("systemctl", "restart", "defensia-agent").Run(); err == nil {
-			return
+			return nil
+		} else {
+			log.Printf("[updater] systemctl restart failed: %v", err)
 		}
-		log.Printf("[updater] systemctl restart failed, trying alternatives...")
 	}
 
 	// upstart
 	if _, err := exec.LookPath("initctl"); err == nil {
 		if err := exec.Command("initctl", "restart", "defensia-agent").Run(); err == nil {
-			return
+			return nil
+		} else {
+			log.Printf("[updater] initctl restart failed: %v", err)
 		}
-		log.Printf("[updater] initctl restart failed, trying alternatives...")
 	}
 
 	// sysvinit
 	initScript := "/etc/init.d/defensia-agent"
 	if _, err := os.Stat(initScript); err == nil {
 		if err := exec.Command(initScript, "restart").Run(); err == nil {
-			return
+			return nil
+		} else {
+			log.Printf("[updater] sysvinit restart failed: %v", err)
 		}
-		log.Printf("[updater] sysvinit restart failed")
 	}
 
-	log.Printf("[updater] could not restart service via any init system")
-}
-
-// fixServiceFile ensures the systemd unit is compatible with the running kernel.
-// Older kernels (< 4.x) don't support the mount namespaces required by
-// PrivateTmp/ProtectHome, which causes "Failed to run 'start' task: No such
-// file or directory" on systemd restart.
-func fixServiceFile() {
-	serviceFile := "/etc/systemd/system/defensia-agent.service"
-	data, err := os.ReadFile(serviceFile)
-	if err != nil {
-		return // not systemd or file doesn't exist
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "PrivateTmp=yes") {
-		return // already clean
-	}
-
-	// Check kernel major version
-	out, err := exec.Command("uname", "-r").Output()
-	if err != nil {
-		return
-	}
-	release := strings.TrimSpace(string(out))
-	major := 0
-	fmt.Sscanf(strings.SplitN(release, ".", 2)[0], "%d", &major)
-	if major >= 4 {
-		return // kernel supports mount namespaces fine
-	}
-
-	log.Printf("[updater] kernel %s detected — removing incompatible systemd directives", release)
-
-	// Remove hardening lines that require mount namespace support
-	lines := strings.Split(content, "\n")
-	var cleaned []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		switch trimmed {
-		case "PrivateTmp=yes", "ProtectHome=yes", "ProtectSystem=false",
-			"NoNewPrivileges=no", "# Security hardening":
-			continue
-		}
-		cleaned = append(cleaned, line)
-	}
-
-	if err := os.WriteFile(serviceFile, []byte(strings.Join(cleaned, "\n")), 0644); err != nil {
-		log.Printf("[updater] failed to update service file: %v", err)
-		return
-	}
-
-	exec.Command("systemctl", "daemon-reload").Run()
-	log.Printf("[updater] service file updated — removed PrivateTmp/ProtectHome for old kernel")
+	return fmt.Errorf("no init system could restart the service")
 }
 
 // isNewer returns true if latest > current using simple semver comparison.
