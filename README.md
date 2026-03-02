@@ -5,12 +5,12 @@ Lightweight Go agent for Linux servers. Monitors logs, detects threats, manages 
 ## Features
 
 - **Brute-force detection** — Monitors `auth.log` for failed SSH/login attempts, auto-bans via iptables
-- **Web threat detection** — Watches Nginx/Apache access logs for SQL injection, path traversal, RCE attempts, scanner bots, WordPress exploits, and more
+- **Web Application Firewall (WAF)** — Watches Nginx/Apache access logs for 15 OWASP attack types with instant-ban and threshold-based detection
+- **Per-server WAF configuration** — Enable/disable attack types, detect-only mode, and custom thresholds configurable from the dashboard
 - **Real-time firewall** — Apply block/allow rules from the dashboard instantly via WebSocket
 - **Network ban propagation** — Bans detected on one server are shared with all servers in the organization
 - **IP safety system** — Prevents banning reserved IPs, the server itself, org siblings, or the Defensia API
 - **Auto-update** — Agents update themselves from the admin panel with backup, preflight check, and rollback
-- **Update failure reporting** — Failed updates are reported back to the server with diagnostic logs
 - **Security scanner** — Detects vulnerable software versions and web server misconfigurations
 - **Software audit** — Collects installed packages and key software versions
 - **GeoIP blocking** — Block traffic by country (requires GeoLite2 database)
@@ -19,7 +19,7 @@ Lightweight Go agent for Linux servers. Monitors logs, detects threats, manages 
 
 ## Requirements
 
-- Linux (Ubuntu 20+, Debian 11+, CentOS 8+, RHEL 8+)
+- Linux (Ubuntu 20+, Debian 11+, CentOS 8+, RHEL 8+, Amazon Linux 2023)
 - `iptables`
 - `systemd` (or upstart/sysvinit)
 - Root access
@@ -57,18 +57,18 @@ auth.log / web access logs
     │
     ▼
 Watcher goroutines
-    │  Detect brute force, SQLi, path traversal, scanners, etc.
-    │  Threshold: 5 attempts in 5 min window
+    │  Detect brute force, SQLi, XSS, SSRF, path traversal, web shells...
+    │  Instant-ban or threshold (configurable per type from dashboard)
     ▼
 BanIP → iptables -I INPUT 1 -s <IP> -j DROP
-    │   (with IP safety checks)
+    │   (with IP safety checks + detect-only mode support)
     │
     ├──► POST /api/v1/agent/bans → server logs + propagates to org
     │
     └──► WebSocket receives ban.created from other servers → BanIP instantly
 
 Heartbeat:  POST /api/v1/agent/heartbeat  every 60s
-Sync:       GET  /api/v1/agent/sync        every 5min (fallback)
+Sync:       GET  /api/v1/agent/sync        every 5min (includes WAF config)
 ```
 
 ## IP Safety
@@ -116,30 +116,76 @@ Stored at `/etc/defensia/config.json` (mode 0600):
 5. Replaces binary, restarts via systemd
 6. On failure: rolls back to backup and reports failure with diagnostic logs
 
-## Web Threat Detection
+## Web Application Firewall (WAF)
 
-Monitors Nginx/Apache access logs for:
+Monitors Nginx/Apache access logs for 15 OWASP attack types across two detection modes:
 
-- SQL injection
-- Path traversal (`../../etc/passwd`)
-- Remote code execution (RCE)
-- Shellshock exploits
-- `.env` / config file probing
-- WordPress brute-force (`wp-login.php`)
-- XML-RPC abuse
-- Scanner/bot fingerprints
-- 404 flooding
+### Instant-ban attacks
+
+A single matching request triggers an immediate IP ban.
+
+| Type | What it detects |
+|------|----------------|
+| `sql_injection` | UNION SELECT, OR 1=1, sleep(), benchmark(), information_schema |
+| `xss_attempt` | `<script>`, `javascript:`, `onerror=`, `onload=` in URLs/headers |
+| `ssrf_attempt` | Requests targeting `169.254.169.254`, `localhost`, `127.0.0.1` |
+| `web_shell` | Access to known shell paths (`/shell.php`, `/c99.php`, `/r57.php`, etc.) |
+| `path_traversal` | `../`, `etc/passwd`, `proc/self`, URL-encoded variants |
+| `rce_attempt` | `eval(`, `exec(`, `system(`, `php://filter`, `${jndi:` (Log4Shell) |
+| `shellshock` | `() {` in Referer or User-Agent headers (CVE-2014-6271) |
+| `env_probe` | Requests to `/.env`, `/.env.local`, `/.env.production`, etc. |
+| `config_probe` | `wp-config.php`, `.git/config`, `web.config`, `/.htpasswd` |
+| `header_injection` | PHP execution functions in User-Agent; XSS in Referer; spoofed X-Forwarded-For |
+| `web_exploit` | Generic exploit patterns not covered by other rules |
+
+### Threshold-ban attacks
+
+Multiple requests within a time window trigger a ban.
+
+| Type | Default threshold | Window |
+|------|-------------------|--------|
+| `wp_bruteforce` | 10 failed logins | 2 min |
+| `xmlrpc_abuse` | 5 requests | 1 min |
+| `scanner_detected` | 5 plugin probes (404s on `wp-content/plugins/`) | 5 min |
+| `404_flood` | 30 not-found responses | 5 min |
+
+Scanner User-Agents (instant-ban): `sqlmap`, `nikto`, `nmap`, `masscan`, `dirbuster`, `wpscan`, `gobuster`, `nuclei`, `acunetix`, `nessus`, `openvas`, and more.
 
 Supports multi-vhost with automatic domain mapping from Nginx config.
+
+### Per-server WAF configuration *(v0.9.3+)*
+
+Each attack type can be independently configured from the Defensia dashboard (Server → WAF tab). Changes sync to the agent within 60 seconds via `GET /api/v1/agent/sync`.
+
+**Enable/disable types:** Disable rules irrelevant to your stack (e.g. `wp_bruteforce` on a non-WordPress server).
+
+**Detect-only mode:** Records the event in the dashboard without banning the IP. Useful for monitoring before enabling enforcement, or for audit-only policies.
+
+**Custom thresholds:** Override the default threshold for `wp_bruteforce`, `xmlrpc_abuse`, `scanner_detected`, and `404_flood`.
+
+```json
+// waf_config in sync response
+{
+  "enabled_types": ["sql_injection", "xss_attempt", "path_traversal"],
+  "detect_only_types": ["404_flood", "scanner_detected"],
+  "thresholds": {
+    "wp_bruteforce": 5,
+    "404_flood": 10
+  }
+}
+```
+
+- `null` → all 15 types active, no detect-only, default thresholds (backward compatible)
+- Agents < v0.9.3 ignore `waf_config` (unknown JSON field) — keep default behavior
 
 ## Architecture
 
 ```
 cmd/defensia-agent/
-└── main.go              # Entry point, heartbeat/sync loops
+└── main.go              # Entry point, heartbeat/sync loops, UpdateWAFConfig on sync
 
 internal/
-├── api/client.go        # HTTP client for all API calls
+├── api/client.go        # HTTP client; SyncConfig includes WAFConfig struct
 ├── collector/metrics.go # System metrics (CPU, memory, disk, network)
 ├── config/config.go     # Config file reader/writer
 ├── firewall/iptables.go # iptables management + IP safety
@@ -148,7 +194,7 @@ internal/
 ├── scanner/             # Security vulnerability scanner
 ├── updater/updater.go   # Auto-update with backup + rollback
 ├── watcher/authlog.go   # auth.log brute-force detection
-├── watcher/weblog.go    # Web access log threat detection
+├── watcher/weblog.go    # WAF: 15 attack patterns, UpdateWAFConfig(), detect-only support
 └── ws/client.go         # WebSocket client (Laravel Reverb)
 ```
 
@@ -172,10 +218,20 @@ make build-linux-arm  # arm64
 Tag push triggers GitHub Actions:
 
 ```bash
-git tag v0.9.0
+git tag v0.9.3
 git push --tags
 # → Builds linux/amd64 + linux/arm64 + SHA256 checksums → GitHub Release
 ```
+
+## Changelog
+
+| Version | Changes |
+|---------|---------|
+| v0.9.3 | Per-server WAF config from panel: enable/disable types, detect-only mode, custom thresholds |
+| v0.9.2 | +XSS, +SSRF, +web shell, +header injection detection |
+| v0.9.1 | Bug fixes |
+| v0.9.0 | Initial WAF: SQLi, path traversal, RCE, shellshock, env/config probe, wp_bruteforce, xmlrpc, 404_flood, scanner |
+| v0.6.x | Brute-force detection, GeoIP, zombie processes, auto-update, IP safety |
 
 ## License
 
