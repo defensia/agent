@@ -51,6 +51,11 @@ type WebWatcher struct {
 	// Parse failure tracking per log file
 	parseStats map[string]*parseFileStats
 
+	// WAF config from panel sync (nil = use defaults)
+	wafEnabled    map[string]bool
+	wafDetectOnly map[string]bool
+	wafThresholds map[string]int
+
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
 }
@@ -913,10 +918,15 @@ func (w *WebWatcher) processLine(logPath, line string) {
 
 	// ── Instant-ban: path traversal & SQL injection ──
 	for _, rule := range instantBanPatterns {
+		if !w.isTypeEnabled(rule.eventType) {
+			continue
+		}
 		for _, pat := range rule.patterns {
 			if strings.Contains(uriLower, pat) {
-				w.banned[ip] = true
-				go w.onBan(ip, rule.eventType, 1)
+				if !w.isDetectOnly(rule.eventType) {
+					w.banned[ip] = true
+					go w.onBan(ip, rule.eventType, 1)
+				}
 				go w.onEvent(ip, rule.eventType, "critical", w.enrichDetails(logPath, map[string]string{
 					"uri":        entry.uri,
 					"method":     entry.method,
@@ -929,23 +939,29 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	}
 
 	// ── Instant-ban: known scanner user-agents ──
-	for _, agent := range scannerAgents {
-		if strings.Contains(uaLower, agent) {
-			w.banned[ip] = true
-			go w.onBan(ip, "scanner_detected", 1)
-			go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, map[string]string{
-				"uri":        entry.uri,
-				"user_agent": entry.userAgent,
-				"scanner":    agent,
-			}))
-			return
+	if w.isTypeEnabled("scanner_detected") {
+		for _, agent := range scannerAgents {
+			if strings.Contains(uaLower, agent) {
+				if !w.isDetectOnly("scanner_detected") {
+					w.banned[ip] = true
+					go w.onBan(ip, "scanner_detected", 1)
+				}
+				go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, map[string]string{
+					"uri":        entry.uri,
+					"user_agent": entry.userAgent,
+					"scanner":    agent,
+				}))
+				return
+			}
 		}
 	}
 
 	// ── Instant-ban: Shellshock (CVE-2014-6271) in Referer or User-Agent ──
-	if strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {") {
-		w.banned[ip] = true
-		go w.onBan(ip, "shellshock", 1)
+	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
+		if !w.isDetectOnly("shellshock") {
+			w.banned[ip] = true
+			go w.onBan(ip, "shellshock", 1)
+		}
 		go w.onEvent(ip, "shellshock", "critical", w.enrichDetails(logPath, map[string]string{
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
@@ -955,17 +971,21 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	}
 
 	// ── Instant-ban: Header injection in User-Agent or Referer ──
-	for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
-		if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
-			w.banned[ip] = true
-			go w.onBan(ip, "header_injection", 1)
-			go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, map[string]string{
-				"uri":        entry.uri,
-				"user_agent": entry.userAgent,
-				"referer":    entry.referer,
-				"pattern":    pat,
-			}))
-			return
+	if w.isTypeEnabled("header_injection") {
+		for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
+			if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
+				if !w.isDetectOnly("header_injection") {
+					w.banned[ip] = true
+					go w.onBan(ip, "header_injection", 1)
+				}
+				go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, map[string]string{
+					"uri":        entry.uri,
+					"user_agent": entry.userAgent,
+					"referer":    entry.referer,
+					"pattern":    pat,
+				}))
+				return
+			}
 		}
 	}
 
@@ -993,48 +1013,61 @@ func (w *WebWatcher) processLine(logPath, line string) {
 
 	// ── Threshold: WP Login brute force ──
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
-		if w.checkThreshold(ip, ruleWPLogin, now) {
-			go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, map[string]string{
-				"uri": entry.uri,
-			}))
+		if w.isTypeEnabled("wp_bruteforce") {
+			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("wp_bruteforce")) {
+				go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, map[string]string{
+					"uri": entry.uri,
+				}))
+			}
 		}
 		return
 	}
 
 	// ── Threshold: XMLRPC abuse ──
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
-		if w.checkThreshold(ip, ruleXMLRPC, now) {
-			go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, map[string]string{
-				"uri": entry.uri,
-			}))
+		if w.isTypeEnabled("xmlrpc_abuse") {
+			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("xmlrpc_abuse")) {
+				go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, map[string]string{
+					"uri": entry.uri,
+				}))
+			}
 		}
 		return
 	}
 
 	// ── Threshold: plugin scanner ──
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
-		if w.checkThreshold(ip, rulePluginScan, now) {
-			go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, map[string]string{
-				"uri": entry.uri,
-			}))
+		if w.isTypeEnabled("scanner_detected") {
+			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("scanner_detected")) {
+				go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, map[string]string{
+					"uri": entry.uri,
+				}))
+			}
 		}
 		return
 	}
 
 	// ── Threshold: 404 flood ──
 	if entry.status == 404 {
-		if w.checkThreshold(ip, rule404Flood, now) {
-			go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, map[string]string{
-				"uri": entry.uri,
-			}))
+		if w.isTypeEnabled("404_flood") {
+			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("404_flood")) {
+				go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, map[string]string{
+					"uri": entry.uri,
+				}))
+			}
 		}
 		return
 	}
 }
 
 // checkThreshold increments the counter for a rule+IP and bans if threshold exceeded.
-// Returns true if the IP was banned. Caller must hold w.mu.
-func (w *WebWatcher) checkThreshold(ip string, rule thresholdRule, now time.Time) bool {
+// If detectOnly is true, tracks the attempt but does not ban.
+// Returns true if the threshold was crossed. Caller must hold w.mu.
+func (w *WebWatcher) checkThreshold(ip string, rule thresholdRule, now time.Time, detectOnly bool) bool {
 	key := rule.key + ":" + ip
 
 	// Clean old entries
@@ -1048,10 +1081,91 @@ func (w *WebWatcher) checkThreshold(ip string, rule thresholdRule, now time.Time
 	w.attempts[key] = recent
 
 	if len(recent) >= rule.threshold {
-		w.banned[ip] = true
-		count := len(recent)
-		go w.onBan(ip, rule.eventType, count)
+		if !detectOnly {
+			w.banned[ip] = true
+			count := len(recent)
+			go w.onBan(ip, rule.eventType, count)
+		}
 		return true
 	}
 	return false
+}
+
+// ── WAF Configuration ───────────────────────────────────────────────
+
+// WAFConfig holds the per-server WAF settings received from the panel sync.
+type WAFConfig struct {
+	EnabledTypes    []string       `json:"enabled_types"`
+	DetectOnlyTypes []string       `json:"detect_only_types"`
+	Thresholds      map[string]int `json:"thresholds"`
+}
+
+// UpdateWAFConfig applies WAF configuration from the panel.
+// Pass nil to reset all settings to defaults (all types enabled, hardcoded thresholds).
+func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if cfg == nil {
+		w.wafEnabled = nil
+		w.wafDetectOnly = nil
+		w.wafThresholds = nil
+		return
+	}
+
+	if len(cfg.EnabledTypes) > 0 {
+		m := make(map[string]bool, len(cfg.EnabledTypes))
+		for _, t := range cfg.EnabledTypes {
+			m[t] = true
+		}
+		w.wafEnabled = m
+	} else {
+		w.wafEnabled = nil
+	}
+
+	if len(cfg.DetectOnlyTypes) > 0 {
+		m := make(map[string]bool, len(cfg.DetectOnlyTypes))
+		for _, t := range cfg.DetectOnlyTypes {
+			m[t] = true
+		}
+		w.wafDetectOnly = m
+	} else {
+		w.wafDetectOnly = nil
+	}
+
+	if len(cfg.Thresholds) > 0 {
+		w.wafThresholds = cfg.Thresholds
+	} else {
+		w.wafThresholds = nil
+	}
+}
+
+// isTypeEnabled returns true if this attack type should be processed.
+// Must be called with w.mu held.
+func (w *WebWatcher) isTypeEnabled(eventType string) bool {
+	if w.wafEnabled == nil {
+		return true
+	}
+	return w.wafEnabled[eventType]
+}
+
+// isDetectOnly returns true if the type should only record an event, not ban.
+// Must be called with w.mu held.
+func (w *WebWatcher) isDetectOnly(eventType string) bool {
+	if w.wafDetectOnly == nil {
+		return false
+	}
+	return w.wafDetectOnly[eventType]
+}
+
+// wafThreshold returns the configured threshold for a rule, falling back to the default.
+// Must be called with w.mu held.
+func (w *WebWatcher) wafThreshold(key string, defaultVal int) int {
+	if w.wafThresholds == nil {
+		return defaultVal
+	}
+	if v, ok := w.wafThresholds[key]; ok && v > 0 {
+		return v
+	}
+	return defaultVal
 }

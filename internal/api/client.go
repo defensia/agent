@@ -109,9 +109,17 @@ type SyncResponse struct {
 }
 
 type SyncConfig struct {
+	BlockedCountries []string   `json:"blocked_countries"`
+	WAFConfig        *WAFConfig `json:"waf_config"`
 	BFThreshold   int  `json:"bf_threshold"`
 	BFWindow      int  `json:"bf_window"`
 	BFBanDuration *int `json:"bf_ban_duration"`
+}
+
+type WAFConfig struct {
+	EnabledTypes    []string       `json:"enabled_types"`
+	DetectOnlyTypes []string       `json:"detect_only_types"`
+	Thresholds      map[string]int `json:"thresholds"`
 }
 
 type Rule struct {

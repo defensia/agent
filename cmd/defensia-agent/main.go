@@ -24,7 +24,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.6.1"
+var version = "0.9.3"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -395,6 +395,16 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	w.UpdateWhitelist(wlIPs, wlCIDRs)
 	if webW != nil {
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
+		// Apply WAF config from panel
+		if sync.Config.WAFConfig != nil {
+			webW.UpdateWAFConfig(&watcher.WAFConfig{
+				EnabledTypes:    sync.Config.WAFConfig.EnabledTypes,
+				DetectOnlyTypes: sync.Config.WAFConfig.DetectOnlyTypes,
+				Thresholds:      sync.Config.WAFConfig.Thresholds,
+			})
+		} else {
+			webW.UpdateWAFConfig(nil)
+		}
 	}
 
 	// Extract blocked countries from rules and update GeoIP
