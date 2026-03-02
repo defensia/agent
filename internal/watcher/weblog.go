@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -854,7 +855,7 @@ var (
 	ruleWPLogin    = thresholdRule{"wp_login", "wp_bruteforce", 10, 2 * time.Minute}
 	ruleXMLRPC     = thresholdRule{"xmlrpc", "xmlrpc_abuse", 5, 1 * time.Minute}
 	rulePluginScan = thresholdRule{"plugin_scan", "scanner_detected", 5, 5 * time.Minute}
-	rule404Flood   = thresholdRule{"404_flood", "404_flood", 30, 5 * time.Minute}
+	rule404Flood   = thresholdRule{"404_flood", "404_flood", 15, 5 * time.Minute}
 )
 
 // ── Line processing ─────────────────────────────────────────────────
@@ -897,6 +898,13 @@ func (w *WebWatcher) processLine(logPath, line string) {
 
 	ip := entry.ip
 	uriLower := strings.ToLower(entry.uri)
+	// Double-decode URI to catch double URL-encoded attacks (%252fetc → %2fetc → /etc)
+	if decoded, err := url.QueryUnescape(uriLower); err == nil {
+		uriLower = decoded
+	}
+	if decoded, err := url.QueryUnescape(uriLower); err == nil {
+		uriLower = decoded
+	}
 	uaLower := strings.ToLower(entry.userAgent)
 	refLower := strings.ToLower(entry.referer)
 
