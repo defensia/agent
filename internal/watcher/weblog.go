@@ -810,6 +810,24 @@ var instantBanPatterns = []struct {
 		"phpinfo(", "php://input", "php://filter", "data://text",
 		"${jndi:",
 	}, "rce_attempt"},
+
+	// XSS attempts
+	{"xss_attempt", []string{
+		"<script", "javascript:", "onerror=", "onload=", "document.cookie",
+		"<img src=x", "<svg/onload", "onfocus=", "onmouseover=",
+		"%3cscript", "data:text/html", "vbscript:",
+	}, "xss_attempt"},
+
+	// SSRF attempts
+	{"ssrf_attempt", []string{
+		"169.254.169.254", "file://", "dict://", "gopher://",
+	}, "ssrf_attempt"},
+
+	// Web shell access attempts
+	{"web_shell", []string{
+		"/c99.php", "/r57.php", "/shell.php", "/webshell",
+		"cmd=whoami", "cmd=id", "cmd=ls",
+	}, "web_shell"},
 }
 
 var scannerAgents = []string{
@@ -934,6 +952,21 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			"referer":    entry.referer,
 		}))
 		return
+	}
+
+	// ── Instant-ban: Header injection in User-Agent or Referer ──
+	for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
+		if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
+			w.banned[ip] = true
+			go w.onBan(ip, "header_injection", 1)
+			go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, map[string]string{
+				"uri":        entry.uri,
+				"user_agent": entry.userAgent,
+				"referer":    entry.referer,
+				"pattern":    pat,
+			}))
+			return
+		}
 	}
 
 	// ── Pre-filter: only process suspicious requests beyond this point ──
