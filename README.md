@@ -104,6 +104,7 @@ Stored at `/etc/defensia/config.json` (mode 0600):
 |----------|-------------|---------|
 | `DEFENSIA_CONFIG` | Config file path | `/etc/defensia/config.json` |
 | `AUTH_LOG_PATH` | Auth log path | `/var/log/auth.log` (`/var/log/secure` for RHEL) |
+| `WEB_LOG_PATH` | Web access log path(s), comma-separated. Overrides auto-detection. | Auto-detected |
 | `GEOIP_DB_PATH` | GeoLite2 database path | — |
 | `AGENT_IP` | Manual IP override for NAT/multi-NIC | Auto-detected |
 
@@ -151,7 +152,49 @@ Multiple requests within a time window trigger a ban.
 
 Scanner User-Agents (instant-ban): `sqlmap`, `nikto`, `nmap`, `masscan`, `dirbuster`, `wpscan`, `gobuster`, `nuclei`, `acunetix`, `nessus`, `openvas`, and more.
 
-Supports multi-vhost with automatic domain mapping from Nginx config.
+### Log auto-detection *(v0.9.7+)*
+
+The agent automatically discovers web server log files at startup and every 5 minutes (hot-reload):
+
+1. `$WEB_LOG_PATH` env var — explicit override, comma-separated paths
+2. `nginx -T` on the host — finds all vhosts with their `access_log` paths and `server_name` values
+3. Apache config files — reads `/etc/apache2/sites-enabled/*.conf` for `CustomLog` + `ServerName`
+4. **Docker containers** — inspects running containers with nginx/apache/httpd/caddy/openresty images
+5. Well-known static paths — fallback (`/var/log/nginx/access.log`, etc.)
+
+Each log file is tailed in its own goroutine. Domain names are captured from the web server config and attached to every WAF event for filtering in the dashboard.
+
+#### WAF with Dockerized web servers
+
+If your web server runs inside Docker, the agent can monitor its logs **as long as the log directory is bind-mounted to the host**:
+
+```yaml
+# docker-compose.yml
+services:
+  nginx:
+    image: nginx
+    volumes:
+      - /var/log/nginx:/var/log/nginx   # ← required for WAF detection
+```
+
+With this mount in place, no additional configuration is needed — the agent automatically runs `nginx -T` inside the container, finds the `access_log` paths, maps them to host paths via the bind-mount table, and starts tailing them.
+
+If the log directory is **not** mounted to the host, use `WEB_LOG_PATH` in the agent's systemd unit to point directly at the container log paths (only works if the agent somehow has access, e.g. via a shared volume):
+
+```bash
+# /etc/systemd/system/defensia-agent.service
+[Service]
+Environment="WEB_LOG_PATH=/var/log/nginx/access.log"
+```
+
+To verify which logs the agent is currently monitoring:
+
+```bash
+journalctl -u defensia-agent | grep webwatcher
+# [webwatcher] watching /var/log/nginx/app.access.log (app.example.com)
+# [webwatcher] docker: watching /var/log/nginx/api.access.log from container nginx
+# [webwatcher] monitoring 2 log file(s) covering 3 domain(s)
+```
 
 ### Per-server WAF configuration *(v0.9.3+)*
 
@@ -227,6 +270,10 @@ git push --tags
 
 | Version | Changes |
 |---------|---------|
+| v0.9.7 | Docker container log detection: auto-discovers nginx/apache logs inside Docker via bind-mounts |
+| v0.9.6 | Added `web_exploit` detection (Spring4Shell, JBoss/Tomcat consoles, Struts OGNL, ThinkPHP RCE, Drupalgeddon2) |
+| v0.9.5 | Fix: atomic binary replacement + 15 s post-restart health check in auto-updater; rollback on crash |
+| v0.9.4 | Fix: double URL-decode bypass; lower 404-flood threshold |
 | v0.9.3 | Per-server WAF config from panel: enable/disable types, detect-only mode, custom thresholds |
 | v0.9.2 | +XSS, +SSRF, +web shell, +header injection detection |
 | v0.9.1 | Bug fixes |
