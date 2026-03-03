@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.14"
+var version = "0.9.15"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -125,6 +125,9 @@ func runAgent() {
 	}
 
 	log.Printf("Starting Defensia agent v%s (agent_id=%d)", version, cfg.AgentID)
+
+	// Remove any leftover staging files from a previous interrupted update/rollback.
+	updater.CleanupStagingFiles()
 
 	// Protect the API server IP from being banned (would cut off agent comms)
 	if u, err := url.Parse(cfg.ServerURL); err == nil {

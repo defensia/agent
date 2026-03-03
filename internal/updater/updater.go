@@ -180,8 +180,19 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
-	// 9. Restart the service
+	// 9. Restart the service.
+	// NOTE: on systemd, `systemctl restart` sends SIGTERM to the calling process
+	// as part of stopping the service. This causes exec.Command.Run() to return
+	// "signal: terminated" even though the restart succeeded. We must treat this
+	// as success to avoid a false rollback that would undo the just-completed update.
 	if err := restartService(); err != nil {
+		if isRestartInProgress(err) {
+			// systemd killed us as part of the restart — the new binary is starting.
+			// Report success and exit cleanly; systemd handles the rest.
+			log.Printf("[updater] restart in progress (process replaced by init system) — update to v%s complete", latestVersion)
+			reportEvent("update_completed", "info", versionDetails)
+			return
+		}
 		log.Printf("[updater] restart failed: %v — rolling back", err)
 		rollback()
 		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
@@ -262,6 +273,28 @@ func rollback() {
 		return
 	}
 	log.Printf("[updater] rolled back to previous version from %s", backupPath)
+}
+
+// isRestartInProgress returns true when a restart command failed because the
+// init system sent SIGTERM to the calling process as part of stopping it.
+// This is expected behaviour on systemd and upstart — the restart succeeded,
+// the process is simply being replaced. It must NOT trigger a rollback.
+func isRestartInProgress(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "signal: terminated") ||
+		strings.Contains(msg, "signal: killed")
+}
+
+// CleanupStagingFiles removes any leftover staging files from a previous
+// interrupted rollback or update. Safe to call at startup.
+func CleanupStagingFiles() {
+	for _, path := range []string{targetPath + ".new", targetPath + ".rollback"} {
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Remove(path); err == nil {
+				log.Printf("[updater] cleaned up leftover staging file: %s", path)
+			}
+		}
+	}
 }
 
 // isServiceActive returns true if the defensia-agent systemd service is
