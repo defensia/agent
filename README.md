@@ -343,6 +343,56 @@ git push --tags
 | v0.9.0 | Initial WAF: SQLi, path traversal, RCE, shellshock, env/config probe, wp_bruteforce, xmlrpc, 404_flood, scanner |
 | v0.6.x | Brute-force detection, GeoIP, zombie processes, auto-update, IP safety |
 
+## FAQ
+
+### "`Peer's Certificate issuer is not recognized`" during install
+
+**Affected systems:** CentOS 7, RHEL 7, and any Linux with `ca-certificates` not updated since 2024.
+
+**Why it happens — three layered reasons:**
+
+1. **Let's Encrypt changed intermediates in 2024.** The new intermediates (R10–R13 RSA, E5–E8 ECDSA) are not present in CA bundles shipped before 2024. Even updating to RSA (R13) doesn't help if the root isn't trusted.
+
+2. **`curl` on CentOS 7 is compiled against NSS, not OpenSSL.** NSS (Network Security Services) maintains its own certificate database independent of the system OpenSSL bundle. Running `update-ca-trust` updates the OpenSSL bundle but has no effect on what `curl` actually uses on CentOS 7.
+
+3. **CentOS 7 reached EOL in June 2024.** Its official YUM mirrors are dead, so `yum update ca-certificates` fails without first pointing to `vault.centos.org`. Even then, the update may not propagate to NSS.
+
+**Fix — one-time bootstrap:**
+
+```bash
+# 1. Download the Let's Encrypt root CA (using -k since curl can't verify LE yet)
+curl -sk https://letsencrypt.org/certs/isrgrootx1.pem \
+  -o /etc/pki/ca-trust/source/anchors/isrg-root-x1.pem
+
+# 2. Tell curl to use it for this session
+export CURL_CA_BUNDLE=/etc/pki/ca-trust/source/anchors/isrg-root-x1.pem
+
+# 3. Run the install normally
+curl -fsSL https://defensia.cloud/install.sh | bash -s -- --token <YOUR_TOKEN>
+```
+
+**Why `CURL_CA_BUNDLE` works:** This environment variable is supported by all `curl` versions since 7.10 (2002) and is respected regardless of whether curl is compiled against NSS or OpenSSL. It overrides the trust database entirely for that session.
+
+**Why the `-k` on step 1 is safe:** We're only downloading a CA certificate (public data, not a secret), and we're verifying its identity immediately after — the downloaded cert is used as the trust anchor for the actual install. An attacker intercepting step 1 would give you a bogus root cert, which curl would then use to verify defensia.cloud — and that verification would fail since they don't control our TLS certificate. The real risk window is effectively zero.
+
+**Permanent fix on the server:**
+
+```bash
+# Add ISRG Root X1 to the system trust store permanently
+curl -sk https://letsencrypt.org/certs/isrgrootx1.pem \
+  -o /etc/pki/ca-trust/source/anchors/isrg-root-x1.pem
+update-ca-trust force-enable
+update-ca-trust extract
+
+# For NSS-linked curl, also update the NSS database:
+certutil -d /etc/pki/nssdb -A -t "CT,," -n "ISRG Root X1" \
+  -i /etc/pki/ca-trust/source/anchors/isrg-root-x1.pem
+```
+
+After this, `CURL_CA_BUNDLE` is no longer needed — curl will trust Let's Encrypt globally on that server.
+
+---
+
 ## License
 
 MIT
