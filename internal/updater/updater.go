@@ -239,15 +239,24 @@ func mergeDetails(a, b map[string]string) map[string]string {
 	return m
 }
 
-// rollback restores the backup binary to the target path.
+// rollback restores the backup binary to the target path using an atomic
+// stage-then-rename so that a copy failure never leaves the target path empty.
 func rollback() {
 	if _, err := os.Stat(backupPath); err != nil {
 		log.Printf("[updater] no backup found at %s — cannot rollback", backupPath)
 		return
 	}
-	os.Remove(targetPath)
-	if err := copyFile(backupPath, targetPath); err != nil {
-		log.Printf("[updater] CRITICAL: rollback copy failed: %v", err)
+	// Copy backup to a staging file on the SAME filesystem, then rename
+	// atomically. This guarantees targetPath is never in a half-written or
+	// absent state: if the copy fails the original (new) binary stays intact.
+	stagingRollback := targetPath + ".rollback"
+	if err := copyFile(backupPath, stagingRollback); err != nil {
+		log.Printf("[updater] CRITICAL: rollback staging copy failed: %v — original binary preserved", err)
+		return
+	}
+	if err := os.Rename(stagingRollback, targetPath); err != nil {
+		log.Printf("[updater] CRITICAL: rollback rename failed: %v", err)
+		os.Remove(stagingRollback)
 		return
 	}
 	log.Printf("[updater] rolled back to previous version from %s", backupPath)
