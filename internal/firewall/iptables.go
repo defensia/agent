@@ -24,10 +24,9 @@ type RuleSpec struct {
 func ApplyRule(spec RuleSpec) error {
 	args := buildRuleArgs(spec)
 
-	// Check if rule already exists
+	// Check if rule already exists (silent — expected on restart with active bans)
 	checkArgs := append([]string{"-C", "INPUT"}, args...)
 	if exec.Command("iptables", checkArgs...).Run() == nil {
-		log.Printf("[firewall] rule already exists, skipping")
 		return nil
 	}
 

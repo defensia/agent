@@ -180,9 +180,6 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
-	// 9a. Update the systemd service file if needed (idempotent).
-	updateServiceFile()
-
 	// 9. Restart the service
 	if err := restartService(); err != nil {
 		log.Printf("[updater] restart failed: %v — rolling back", err)
@@ -265,78 +262,6 @@ func rollback() {
 		return
 	}
 	log.Printf("[updater] rolled back to previous version from %s", backupPath)
-}
-
-const servicePath = "/etc/systemd/system/defensia-agent.service"
-
-// updateServiceFile ensures critical directives are present in the systemd
-// unit file. It is idempotent and safe to call on every update.
-//
-// Key fixes applied:
-//   - StartLimitIntervalSec=0 in [Unit] (not [Service]) — older systemd
-//     versions silently ignore it in [Service], causing start-limit-hit.
-//   - ExecStartPre auto-restore script to recover from a missing binary.
-func updateServiceFile() {
-	data, err := os.ReadFile(servicePath)
-	if err != nil {
-		log.Printf("[updater] could not read service file: %v", err)
-		return
-	}
-	content := string(data)
-	changed := false
-
-	// 1. Ensure StartLimitIntervalSec=0 is in [Unit] section.
-	if !strings.Contains(content, "StartLimitIntervalSec=0") {
-		// Insert after the [Unit] header line.
-		content = strings.Replace(content,
-			"[Unit]\n",
-			"[Unit]\nStartLimitIntervalSec=0\n",
-			1)
-		changed = true
-	}
-	// Remove any stale StartLimitIntervalSec= lines that ended up in [Service].
-	// They are invalid there on older systemd and must be in [Unit].
-	if strings.Contains(content, "\nStartLimitIntervalSec=") {
-		// Keep only the one we ensured is in [Unit]; strip others.
-		lines := strings.Split(content, "\n")
-		inUnit := false
-		kept := lines[:0]
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "[Unit]" {
-				inUnit = true
-			} else if strings.HasPrefix(trimmed, "[") {
-				inUnit = false
-			}
-			if strings.HasPrefix(trimmed, "StartLimitIntervalSec=") && !inUnit {
-				changed = true
-				continue // drop from [Service] or other sections
-			}
-			kept = append(kept, line)
-		}
-		content = strings.Join(kept, "\n")
-	}
-
-	// 2. Ensure ExecStartPre auto-restore is present.
-	const autoRestore = `ExecStartPre=/bin/sh -c 'if { [ ! -s /usr/local/bin/defensia-agent ] || [ ! -x /usr/local/bin/defensia-agent ]; } && [ -s /usr/local/bin/defensia-agent.bak ]; then cp /usr/local/bin/defensia-agent.bak /usr/local/bin/defensia-agent && chmod 755 /usr/local/bin/defensia-agent && echo "defensia-agent: binary restored from backup" >&2; fi'`
-	if !strings.Contains(content, "ExecStartPre=") {
-		content = strings.Replace(content,
-			"ExecStart=",
-			autoRestore+"\nExecStart=",
-			1)
-		changed = true
-	}
-
-	if !changed {
-		return
-	}
-
-	if err := os.WriteFile(servicePath, []byte(content), 0644); err != nil {
-		log.Printf("[updater] failed to write updated service file: %v", err)
-		return
-	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
-	log.Printf("[updater] service file updated (StartLimitIntervalSec=0 in [Unit], ExecStartPre added)")
 }
 
 // isServiceActive returns true if the defensia-agent systemd service is
