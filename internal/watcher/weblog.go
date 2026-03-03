@@ -105,7 +105,13 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 4. Well-known static paths as fallback (only if nothing found from config)
+	// 4. Docker containers running web servers (always checked — a host may run
+	//    both a native web server and additional services inside Docker).
+	for _, info := range detectDockerLogInfo() {
+		add(info)
+	}
+
+	// 5. Well-known static paths as fallback (only if nothing found from config)
 	if len(infos) == 0 {
 		knownPaths := []string{
 			"/var/log/nginx/access.log",
@@ -139,47 +145,49 @@ func DetectWebLogPaths() []string {
 	return paths
 }
 
+// nginxBlock holds server_name and access_log directives from a single nginx server{} block.
+type nginxBlock struct {
+	serverNames []string
+	logPaths    []string
+}
+
 // detectNginxLogInfo parses nginx config to find ALL access_log paths with their server_names.
 func detectNginxLogInfo() []LogPathInfo {
 	out, err := exec.Command("nginx", "-T").CombinedOutput()
 	if err != nil {
 		return nil
 	}
+	return nginxBlocksToLogPathInfos(parseNginxBlocks(string(out)), nil)
+}
 
-	type serverBlock struct {
-		serverNames []string
-		logPaths    []string
-	}
-
-	var blocks []serverBlock
-	var current *serverBlock
+// parseNginxBlocks extracts server-block and http-level access_log entries from nginx -T output.
+// It does NOT check whether paths exist on disk.
+func parseNginxBlocks(output string) []nginxBlock {
+	var blocks []nginxBlock
+	var current *nginxBlock
 	inServer := false
-	braceDepth := 0       // depth within the current server block
-	serverStartDepth := 0 // global depth when server{ was encountered
-
-	// Track global brace depth for http-level access_log directives
+	braceDepth := 0
+	serverStartDepth := 0
 	globalDepth := 0
 
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(output, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 
-		// Count braces in this line
 		openBraces := strings.Count(trimmed, "{")
 		closeBraces := strings.Count(trimmed, "}")
 
 		prevGlobalDepth := globalDepth
 		globalDepth += openBraces - closeBraces
 
-		// Detect server block start: "server {" or "server\n{"
 		if !inServer && strings.HasPrefix(trimmed, "server") {
 			rest := strings.TrimPrefix(trimmed, "server")
 			rest = strings.TrimSpace(rest)
 			if rest == "{" || rest == "" || strings.HasPrefix(rest, "{") {
 				inServer = true
-				current = &serverBlock{}
+				current = &nginxBlock{}
 				serverStartDepth = prevGlobalDepth
 				braceDepth = openBraces - closeBraces
 				continue
@@ -189,7 +197,6 @@ func detectNginxLogInfo() []LogPathInfo {
 		if inServer {
 			braceDepth += openBraces - closeBraces
 
-			// Server block closed when braceDepth returns to 0
 			if braceDepth <= 0 {
 				if current != nil {
 					blocks = append(blocks, *current)
@@ -199,7 +206,6 @@ func detectNginxLogInfo() []LogPathInfo {
 				continue
 			}
 
-			// Inside server block — capture server_name
 			if strings.HasPrefix(trimmed, "server_name ") {
 				names := strings.TrimSuffix(strings.TrimPrefix(trimmed, "server_name "), ";")
 				for _, n := range strings.Fields(names) {
@@ -210,7 +216,6 @@ func detectNginxLogInfo() []LogPathInfo {
 				}
 			}
 
-			// Inside server block — capture access_log
 			if strings.HasPrefix(trimmed, "access_log ") {
 				parts := strings.Fields(trimmed)
 				if len(parts) >= 2 {
@@ -221,40 +226,49 @@ func detectNginxLogInfo() []LogPathInfo {
 				}
 			}
 		} else {
-			// Outside server blocks — http-level access_log (default for all vhosts)
 			if strings.HasPrefix(trimmed, "access_log ") && globalDepth >= 1 {
 				parts := strings.Fields(trimmed)
 				if len(parts) >= 2 {
 					path := strings.TrimSuffix(parts[1], ";")
 					if path != "off" && !strings.HasPrefix(path, "syslog:") && !strings.HasPrefix(path, "|") {
-						blocks = append(blocks, serverBlock{
-							logPaths: []string{path},
-						})
+						blocks = append(blocks, nginxBlock{logPaths: []string{path}})
 					}
 				}
 			}
 		}
 
-		_ = serverStartDepth // used for context, depth tracking is via braceDepth
+		_ = serverStartDepth
 	}
 
-	// If server block wasn't closed (malformed), still capture it
 	if current != nil && len(current.logPaths) > 0 {
 		blocks = append(blocks, *current)
 	}
 
-	// Build deduplicated LogPathInfo list
+	return blocks
+}
+
+// nginxBlocksToLogPathInfos converts parsed nginx blocks to []LogPathInfo.
+// If mountMap is non-nil, container-internal paths are first resolved to host paths via it.
+// Only paths that exist on the host filesystem are included.
+func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) []LogPathInfo {
 	pathDomains := make(map[string]map[string]bool)
 	for _, block := range blocks {
 		for _, lp := range block.logPaths {
-			if _, err := os.Stat(lp); err != nil {
+			hostPath := lp
+			if mountMap != nil {
+				hostPath = resolveDockerMount(lp, mountMap)
+				if hostPath == "" {
+					continue
+				}
+			}
+			if _, err := os.Stat(hostPath); err != nil {
 				continue
 			}
-			if pathDomains[lp] == nil {
-				pathDomains[lp] = make(map[string]bool)
+			if pathDomains[hostPath] == nil {
+				pathDomains[hostPath] = make(map[string]bool)
 			}
 			for _, name := range block.serverNames {
-				pathDomains[lp][name] = true
+				pathDomains[hostPath][name] = true
 			}
 		}
 	}
@@ -395,6 +409,127 @@ func parseApacheVhosts(content string) []apacheVhost {
 		}
 	}
 	return results
+}
+
+// ── Docker container log detection ──────────────────────────────────
+
+// detectDockerLogInfo finds web server access logs inside Docker containers.
+// For each running nginx/apache/caddy container it:
+//  1. Runs `nginx -T` inside the container and maps the log paths to host paths
+//     via bind-mount information from `docker inspect`.
+//  2. Falls back to scanning all bind-mounted host directories for *access*.log files.
+func detectDockerLogInfo() []LogPathInfo {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+
+	out, err := exec.Command("docker", "ps",
+		"--format", "{{.ID}}|{{.Image}}|{{.Names}}",
+		"--filter", "status=running",
+	).Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return nil
+	}
+
+	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik"}
+	seen := make(map[string]bool)
+	var result []LogPathInfo
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		id, image, name := parts[0], strings.ToLower(parts[1]), parts[2]
+
+		isWeb := false
+		for _, kw := range webKeywords {
+			if strings.Contains(image, kw) {
+				isWeb = true
+				break
+			}
+		}
+		if !isWeb {
+			continue
+		}
+
+		mounts := dockerBindMounts(id)
+
+		// Primary: run nginx -T inside the container to get precise paths + domain names.
+		if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
+			for _, info := range nginxBlocksToLogPathInfos(parseNginxBlocks(string(nginxOut)), mounts) {
+				if !seen[info.Path] {
+					seen[info.Path] = true
+					result = append(result, info)
+					log.Printf("[webwatcher] docker: watching %s from container %s", info.Path, name)
+				}
+			}
+			continue // nginx -T worked; skip the generic fallback below
+		}
+
+		// Fallback: scan host-side bind-mount directories for *access*.log files.
+		for _, hostDir := range mounts {
+			entries, err := os.ReadDir(hostDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				lower := strings.ToLower(e.Name())
+				if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
+					hostPath := filepath.Join(hostDir, e.Name())
+					if !seen[hostPath] {
+						seen[hostPath] = true
+						result = append(result, LogPathInfo{Path: hostPath})
+						log.Printf("[webwatcher] docker: watching %s (mount scan, container %s)", hostPath, name)
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// dockerBindMounts returns a containerPath→hostPath map for a container's bind mounts.
+func dockerBindMounts(containerID string) map[string]string {
+	out, err := exec.Command("docker", "inspect",
+		"--format", "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Destination}}|{{.Source}}\n{{end}}{{end}}",
+		containerID,
+	).Output()
+	if err != nil {
+		return nil
+	}
+	m := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		p := strings.SplitN(line, "|", 2)
+		if len(p) == 2 && p[0] != "" && p[1] != "" {
+			m[p[0]] = p[1]
+		}
+	}
+	return m
+}
+
+// resolveDockerMount translates a container-internal file path to its host bind-mount path.
+// Uses longest-prefix matching across the mount table. Returns "" if no mount covers the path.
+func resolveDockerMount(containerPath string, mounts map[string]string) string {
+	type kv struct{ k, v string }
+	pairs := make([]kv, 0, len(mounts))
+	for k, v := range mounts {
+		pairs = append(pairs, kv{k, v})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		return len(pairs[i].k) > len(pairs[j].k) // longest prefix first
+	})
+	for _, p := range pairs {
+		if containerPath == p.k || strings.HasPrefix(containerPath, p.k+"/") {
+			rel := strings.TrimPrefix(containerPath, p.k)
+			return filepath.Join(p.v, rel)
+		}
+	}
+	return ""
 }
 
 // ── WebWatcher lifecycle ────────────────────────────────────────────
