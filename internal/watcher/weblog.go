@@ -1310,10 +1310,11 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 }
 
 // isTypeEnabled returns true if this attack type should be processed.
+// When wafEnabled is nil (no config from panel yet), WAF is disabled by default.
 // Must be called with w.mu held.
 func (w *WebWatcher) isTypeEnabled(eventType string) bool {
 	if w.wafEnabled == nil {
-		return true
+		return false
 	}
 	return w.wafEnabled[eventType]
 }
