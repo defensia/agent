@@ -253,8 +253,10 @@ func rollback() {
 	// atomically. This guarantees targetPath is never in a half-written or
 	// absent state: if the copy fails the original (new) binary stays intact.
 	stagingRollback := targetPath + ".rollback"
+	os.Remove(stagingRollback) // clean up any leftover from a previous failed attempt
 	if err := copyFile(backupPath, stagingRollback); err != nil {
 		log.Printf("[updater] CRITICAL: rollback staging copy failed: %v — original binary preserved", err)
+		os.Remove(stagingRollback) // remove partial file
 		return
 	}
 	if err := os.Rename(stagingRollback, targetPath); err != nil {
