@@ -3,6 +3,10 @@ Description=Defensia Security Agent
 Documentation=https://defensia.com/docs/agent
 After=network-online.target
 Wants=network-online.target
+# Disable systemd's start rate-limit so rapid successive auto-updates never
+# leave the service stuck in start-limit-hit state.
+# NOTE: must be in [Unit], not [Service] — older systemd ignores it in [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,9 +16,6 @@ ExecStartPre=/bin/sh -c 'if [ ! -s /usr/local/bin/defensia-agent ] && [ -s /usr/
 ExecStart=/usr/local/bin/defensia-agent start
 Restart=always
 RestartSec=10
-# Disable systemd's start-limit so rapid successive auto-updates never
-# leave the service stuck in start-limit-hit state.
-StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=defensia-agent
