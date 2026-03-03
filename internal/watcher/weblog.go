@@ -834,6 +834,23 @@ var instantBanPatterns = []struct {
 		"/c99.php", "/r57.php", "/shell.php", "/webshell",
 		"cmd=whoami", "cmd=id", "cmd=ls",
 	}, "web_shell"},
+
+	// Known framework/server exploits (CVEs)
+	{"web_exploit", []string{
+		// Spring4Shell (CVE-2022-22965) — near-zero false positives
+		"class.module.classloader",
+		// JBoss / WildFly management consoles — never served by a legitimate app
+		"/jmx-console/", "/web-console/",
+		"/invoker/jmxinvokerservlet", "/invoker/readonly",
+		// Apache Tomcat manager (no legitimate public-facing app exposes this)
+		"/manager/html", "/manager/text",
+		// Apache Struts OGNL injection via redirect prefix
+		"redirect:${", "redirect:%24%7b",
+		// ThinkPHP RCE (widely exploited in Asia-Pacific traffic)
+		"invokefunction&function=call_user_func_array",
+		// Drupalgeddon2 (CVE-2018-7600)
+		"%23markup%5d", "element_parents%5d",
+	}, "web_exploit"},
 }
 
 var scannerAgents = []string{
