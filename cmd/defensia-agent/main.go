@@ -18,6 +18,7 @@ import (
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
 	"github.com/defensia/agent/internal/monitor"
+	"github.com/defensia/agent/internal/remediation"
 	"github.com/defensia/agent/internal/scanner"
 	"github.com/defensia/agent/internal/updater"
 	"github.com/defensia/agent/internal/watcher"
@@ -287,6 +288,10 @@ func runAgent() {
 					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 				}
 			},
+			OnRemediationRequested: func(p ws.RemediationRequestedPayload) {
+				log.Printf("[reverb] remediation.requested: job_id=%d check_id=%s", p.JobID, p.CheckID)
+				go runRemediation(apiClient, p.JobID, p.CheckID)
+			},
 		},
 	)
 	go wsClient.Run()
@@ -542,6 +547,31 @@ func runSoftwareAudit(client *api.Client, auditID int64) {
 
 	log.Printf("[collector] audit %d complete — %d packages, %d key software items",
 		auditID, result.Summary.TotalPackages, len(result.KeySoftware))
+}
+
+// runRemediation executes an automatic fix for the given check_id and reports the result.
+func runRemediation(client *api.Client, jobID int64, checkID string) {
+	fixer, ok := remediation.Fixers[checkID]
+	if !ok {
+		log.Printf("[remediation] no fixer for check_id=%s", checkID)
+		_ = client.ReportRemediationResult(jobID, "failed", "no fixer available for "+checkID)
+		return
+	}
+
+	log.Printf("[remediation] running fixer for job_id=%d check_id=%s", jobID, checkID)
+	output, err := fixer()
+
+	status := "completed"
+	if err != nil {
+		status = "failed"
+		output = err.Error() + "\n" + output
+	}
+
+	log.Printf("[remediation] job_id=%d status=%s", jobID, status)
+
+	if err := client.ReportRemediationResult(jobID, status, output); err != nil {
+		log.Printf("[remediation] failed to report result for job_id=%d: %v", jobID, err)
+	}
 }
 
 // applyAndAckRule applies a single firewall rule and sends the ack back to the server.

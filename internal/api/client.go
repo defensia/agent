@@ -267,6 +267,15 @@ func (c *Client) SubmitSoftwareAudit(req SoftwareAuditRequest) error {
 	return c.post("/api/v1/agent/software-audit-results", c.token, req, nil)
 }
 
+// ReportRemediationResult reports the outcome of a remediation job to the server.
+func (c *Client) ReportRemediationResult(jobID int64, status, output string) error {
+	return c.post("/api/v1/agent/remediation-results", c.token, map[string]any{
+		"job_id": jobID,
+		"status": status,
+		"output": output,
+	}, nil)
+}
+
 func (c *Client) post(path, token string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
