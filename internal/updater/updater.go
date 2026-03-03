@@ -138,60 +138,84 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	}
 	log.Printf("[updater] backed up current binary to %s", backupPath)
 
-	// 7. Replace binary — unlink first (Linux allows unlinking a running executable),
-	// then rename the new file into place. This avoids "text file busy".
-	os.Remove(targetPath)
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		// Cross-device: copy + rename
-		stagingPath := targetPath + ".new"
-		if err := copyFile(tmpPath, stagingPath); err != nil {
-			log.Printf("[updater] CRITICAL: failed to stage new binary: %v — rolling back", err)
-			rollback()
-			os.Remove(tmpPath)
-			reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
-				"reason": "replace_failed", "error": fmt.Sprintf("staging copy: %v", err),
-			}))
-			return
-		}
+	// 7. Replace binary atomically using a staging file on the SAME filesystem
+	// as the target. This avoids cross-device rename failures and ensures the
+	// old binary is never removed before the new one is safely in place.
+	stagingPath := targetPath + ".new"
+	if err := copyFile(tmpPath, stagingPath); err != nil {
+		log.Printf("[updater] CRITICAL: failed to stage new binary: %v — aborting", err)
 		os.Remove(tmpPath)
-		if err := os.Rename(stagingPath, targetPath); err != nil {
-			log.Printf("[updater] CRITICAL: failed to rename staging binary: %v — rolling back", err)
-			os.Remove(stagingPath)
-			rollback()
-			reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
-				"reason": "replace_failed", "error": fmt.Sprintf("staging rename: %v", err),
-			}))
-			return
-		}
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "replace_failed", "error": fmt.Sprintf("staging copy: %v", err),
+		}))
+		return
+	}
+	os.Remove(tmpPath)
+
+	// Atomic rename: on Linux this replaces the target even if it is a
+	// currently-running executable (the old inode is unlinked, running
+	// processes keep their fd). No Remove beforehand needed.
+	if err := os.Rename(stagingPath, targetPath); err != nil {
+		log.Printf("[updater] CRITICAL: failed to rename staging binary: %v — aborting", err)
+		os.Remove(stagingPath)
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "replace_failed", "error": fmt.Sprintf("rename: %v", err),
+		}))
+		return
 	}
 
-	// 8. Verify the target binary exists
-	if _, err := os.Stat(targetPath); err != nil {
+	// 8. Verify the target binary exists and is non-empty
+	if fi, err := os.Stat(targetPath); err != nil || fi.Size() == 0 {
+		errMsg := "missing or empty after replace"
+		if err != nil {
+			errMsg = err.Error()
+		}
 		log.Printf("[updater] CRITICAL: binary not found at %s after replace — rolling back", targetPath)
 		rollback()
 		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
-			"reason": "binary_missing_after_replace", "error": err.Error(),
+			"reason": "binary_missing_after_replace", "error": errMsg,
 		}))
 		return
 	}
 
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
-	// 9. Report success BEFORE restart (restart kills the current process)
-	reportEvent("update_completed", "info", versionDetails)
-
-	// 10. Restart the service
+	// 9. Restart the service
 	if err := restartService(); err != nil {
 		log.Printf("[updater] restart failed: %v — rolling back", err)
 		rollback()
 		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
 			"reason": "restart_failed", "error": err.Error(),
 		}))
-		// Try restart again with the old binary
 		if err := restartService(); err != nil {
 			log.Printf("[updater] CRITICAL: rollback restart also failed: %v", err)
 		}
+		return
 	}
+
+	// 10. Health check: wait 15s and verify the service is still active.
+	// systemctl restart returns 0 even if the new binary crashes immediately,
+	// so we must explicitly confirm the process survived.
+	log.Printf("[updater] waiting 15s for health check...")
+	time.Sleep(15 * time.Second)
+
+	if !isServiceActive() {
+		log.Printf("[updater] health check FAILED — new binary crashed after restart, rolling back")
+		rollback()
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "post_restart_crash",
+			"error":  "service not active 15s after restart",
+			"logs":   recentLogs(30),
+		}))
+		if err := restartService(); err != nil {
+			log.Printf("[updater] CRITICAL: rollback restart failed: %v", err)
+		}
+		return
+	}
+
+	// 11. Report success only after confirming the service is healthy
+	log.Printf("[updater] health check passed — v%s is running", latestVersion)
+	reportEvent("update_completed", "info", versionDetails)
 }
 
 // reportFailure is a convenience wrapper that attaches recent service logs
@@ -227,6 +251,16 @@ func rollback() {
 		return
 	}
 	log.Printf("[updater] rolled back to previous version from %s", backupPath)
+}
+
+// isServiceActive returns true if the defensia-agent systemd service is
+// currently in the "active" state (i.e. the process is running).
+func isServiceActive() bool {
+	out, err := exec.Command("systemctl", "is-active", "defensia-agent").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "active"
 }
 
 // restartService tries systemd, then upstart, then sysvinit.
