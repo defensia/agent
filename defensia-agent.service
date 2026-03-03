@@ -9,6 +9,9 @@ Type=simple
 ExecStart=/usr/local/bin/defensia-agent start
 Restart=always
 RestartSec=10
+# Disable systemd's start-limit so rapid successive auto-updates never
+# leave the service stuck in start-limit-hit state.
+StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=defensia-agent

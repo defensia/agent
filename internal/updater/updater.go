@@ -268,6 +268,11 @@ func isServiceActive() bool {
 func restartService() error {
 	// systemd
 	if _, err := exec.LookPath("systemctl"); err == nil {
+		// Clear any start-limit-hit state before restarting. After rapid
+		// successive updates the systemd start counter can be exhausted,
+		// causing `systemctl restart` to silently succeed (exit 0) while
+		// the service stays dead. reset-failed clears the counter.
+		_ = exec.Command("systemctl", "reset-failed", "defensia-agent").Run()
 		if err := exec.Command("systemctl", "restart", "defensia-agent").Run(); err == nil {
 			return nil
 		} else {
