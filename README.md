@@ -110,12 +110,67 @@ Stored at `/etc/defensia/config.json` (mode 0600):
 
 ## Auto-Update
 
-1. Admin sets new version in the panel
-2. Heartbeat response includes the new version + download URL
-3. Agent downloads binary + SHA256 checksum, verifies integrity
-4. Creates backup (`.bak`), runs preflight check on new binary
-5. Replaces binary, restarts via systemd
-6. On failure: rolls back to backup and reports failure with diagnostic logs
+The agent self-updates without manual intervention. The full pipeline:
+
+1. Admin sets `latest_agent_version` + `agent_download_base_url` in the panel settings
+2. Each heartbeat response (every 60 s) includes these values
+3. Agent compares versions with semver; if newer → begins update
+4. Downloads SHA256 checksum file, then binary to a temp file
+5. Verifies checksum — aborts + reports failure if mismatch
+6. Runs preflight check: `<tmp-binary> check` must print `OK` — aborts if not
+7. Copies current binary to `/usr/local/bin/defensia-agent.bak` (backup)
+8. Copies temp binary to `/usr/local/bin/defensia-agent.new` (staging), then **atomically renames** it to `/usr/local/bin/defensia-agent` — the target is never in an absent state
+9. Restarts via systemd (`systemctl restart defensia-agent`) — which sends SIGTERM to the calling process as part of the stop sequence
+10. If `restartService()` returns `"signal: terminated"` or `"signal: killed"`, that means **systemd killed us as part of the restart** — this is normal, NOT a failure. The update is reported as success and the process exits cleanly. The new binary is already running.
+11. If restart genuinely fails (e.g. no init system), rolls back atomically via a `.rollback` staging file, then reports failure with recent journal logs
+12. If restart succeeds but service crashes within 15 s (`systemctl is-active` check), rolls back and reports `post_restart_crash`
+
+**Startup cleanup:** At every start, `CleanupStagingFiles()` removes any leftover `.new` or `.rollback` staging files from an interrupted previous update or rollback — these are harmless but noisy.
+
+**File layout on disk:**
+
+| File | Purpose |
+|------|---------|
+| `/usr/local/bin/defensia-agent` | Active binary |
+| `/usr/local/bin/defensia-agent.bak` | Backup of previous version (used for rollback) |
+| `/usr/local/bin/defensia-agent.new` | Staging file during update (renamed atomically, then removed) |
+| `/usr/local/bin/defensia-agent.rollback` | Staging file during rollback (renamed atomically, then removed) |
+
+**Panel requirements:** Both `latest_agent_version` and `agent_download_base_url` **must** be updated together via `SettingsService::set()` (or manually followed by a `Cache::forget()` for both keys). Updating the DB directly without clearing the Redis cache leaves agents on the old version for up to 1 hour.
+
+## Agent Recovery (Operational Runbook)
+
+If an agent shows **203/EXEC** in the dashboard (binary missing or not executable):
+
+```bash
+# On the affected server:
+cd /usr/local/bin
+
+# Check what's there
+ls -la defensia-agent*
+
+# If .bak exists and is ~6 MB, restore from it:
+cp defensia-agent.bak defensia-agent
+chmod 755 defensia-agent
+systemctl reset-failed defensia-agent
+systemctl start defensia-agent
+
+# Verify
+systemctl status defensia-agent
+journalctl -u defensia-agent -n 20
+```
+
+The agent will auto-update to the current `latest_agent_version` within a few seconds of its first heartbeat.
+
+**If `systemctl start` fails with start-limit-hit:**
+```bash
+# Add StartLimitIntervalSec=0 to [Unit] section if missing:
+grep -q StartLimitIntervalSec /etc/systemd/system/defensia-agent.service || \
+  sed -i '/^\[Unit\]/a StartLimitIntervalSec=0' /etc/systemd/system/defensia-agent.service
+systemctl daemon-reload
+systemctl reset-failed defensia-agent
+systemctl start defensia-agent
+```
 
 ## Web Application Firewall (WAF)
 
@@ -270,6 +325,14 @@ git push --tags
 
 | Version | Changes |
 |---------|---------|
+| v0.9.15 | Fix: false rollback on `"signal: terminated"` — when systemd restarts the agent it sends SIGTERM to the running process; `isRestartInProgress()` now detects this and treats it as success instead of triggering a rollback. Added `CleanupStagingFiles()` at startup to remove leftover `.new`/`.rollback` staging files from any interrupted previous update |
+| v0.9.14 | Fix: removed `updateServiceFile()` from updater and `ExecStartPre` from service file template — these caused a regression loop where every update rewrote the service file and triggered a second restart. Also silenced iptables "rule already exists" noise in logs |
+| v0.9.13 | Fix: `StartLimitIntervalSec=0` moved to `[Unit]` section (systemd ignores it in `[Service]`) to prevent start-limit-hit after rapid successive updates |
+| v0.9.12 | Internal: improved updater diagnostics; added `recent_logs` to failure event payloads |
+| v0.9.11 | Updater: service file patching via `updateServiceFile()` (reverted in v0.9.14) |
+| v0.9.10 | Fix: health-check window extended; stale ban cleanup on sync |
+| v0.9.9 | Fix: cross-device rename failure — updater now stages new binary on the same filesystem before atomic rename |
+| v0.9.8 | Fix: updater preflight check uses `check` subcommand; rollback uses atomic stage-then-rename |
 | v0.9.7 | Docker container log detection: auto-discovers nginx/apache logs inside Docker via bind-mounts |
 | v0.9.6 | Added `web_exploit` detection (Spring4Shell, JBoss/Tomcat consoles, Struts OGNL, ThinkPHP RCE, Drupalgeddon2) |
 | v0.9.5 | Fix: atomic binary replacement + 15 s post-restart health check in auto-updater; rollback on crash |
