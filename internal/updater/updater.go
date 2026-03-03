@@ -316,7 +316,7 @@ func updateServiceFile() {
 	}
 
 	// 2. Ensure ExecStartPre auto-restore is present.
-	const autoRestore = `ExecStartPre=/bin/sh -c 'if [ ! -s /usr/local/bin/defensia-agent ] && [ -s /usr/local/bin/defensia-agent.bak ]; then cp /usr/local/bin/defensia-agent.bak /usr/local/bin/defensia-agent && chmod 755 /usr/local/bin/defensia-agent && echo "defensia-agent: binary restored from backup" >&2; fi'`
+	const autoRestore = `ExecStartPre=/bin/sh -c 'if { [ ! -s /usr/local/bin/defensia-agent ] || [ ! -x /usr/local/bin/defensia-agent ]; } && [ -s /usr/local/bin/defensia-agent.bak ]; then cp /usr/local/bin/defensia-agent.bak /usr/local/bin/defensia-agent && chmod 755 /usr/local/bin/defensia-agent && echo "defensia-agent: binary restored from backup" >&2; fi'`
 	if !strings.Contains(content, "ExecStartPre=") {
 		content = strings.Replace(content,
 			"ExecStart=",

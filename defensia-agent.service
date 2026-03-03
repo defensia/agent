@@ -12,7 +12,7 @@ StartLimitIntervalSec=0
 Type=simple
 # Auto-restore the binary from backup if it is missing or empty.
 # This ensures a failed update never permanently kills the service.
-ExecStartPre=/bin/sh -c 'if [ ! -s /usr/local/bin/defensia-agent ] && [ -s /usr/local/bin/defensia-agent.bak ]; then cp /usr/local/bin/defensia-agent.bak /usr/local/bin/defensia-agent && chmod 755 /usr/local/bin/defensia-agent && echo "defensia-agent: binary restored from backup" >&2; fi'
+ExecStartPre=/bin/sh -c 'if { [ ! -s /usr/local/bin/defensia-agent ] || [ ! -x /usr/local/bin/defensia-agent ]; } && [ -s /usr/local/bin/defensia-agent.bak ]; then cp /usr/local/bin/defensia-agent.bak /usr/local/bin/defensia-agent && chmod 755 /usr/local/bin/defensia-agent && echo "defensia-agent: binary restored from backup" >&2; fi'
 ExecStart=/usr/local/bin/defensia-agent start
 Restart=always
 RestartSec=10
