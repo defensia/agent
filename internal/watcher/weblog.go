@@ -597,7 +597,16 @@ func (w *WebWatcher) isWhitelisted(ip string) bool {
 // Run starts tailing all access logs. Blocks indefinitely.
 func (w *WebWatcher) Run() {
 	if len(w.logPaths) == 0 {
-		log.Printf("[webwatcher] no web server logs found — disabled")
+		log.Printf("[webwatcher] no web server logs found — WAF disabled")
+		log.Printf("[webwatcher] hint: if your web server runs in Docker, mount the log directory to the host:")
+		log.Printf("[webwatcher]   volumes:")
+		log.Printf("[webwatcher]     - /var/log/nginx:/var/log/nginx")
+		log.Printf("[webwatcher] hint: or set WEB_LOG_PATH=/path/to/access.log in the systemd unit")
+		// Report to the panel so users can see the issue without SSH access.
+		go w.onEvent("0.0.0.0", "waf_disabled", "warning", map[string]string{
+			"reason": "no_web_logs_found",
+			"hint":   "Mount your container log directory to the host (e.g. /var/log/nginx:/var/log/nginx) or set WEB_LOG_PATH in the agent systemd unit",
+		})
 		return
 	}
 
