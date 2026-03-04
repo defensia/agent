@@ -21,6 +21,20 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 
 ---
 
+## Screenshots
+
+![Dashboard](docs/01-dashboard.png)
+
+<details>
+<summary>Events feed & WAF analytics</summary>
+
+![Events](docs/02-events.png)
+![WAF](docs/04-waf.png)
+
+</details>
+
+---
+
 ## Why Defensia
 
 | | fail2ban | CrowdSec | Defensia |
