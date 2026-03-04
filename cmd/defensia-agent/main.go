@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.15"
+var version = "0.9.16"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -270,6 +270,14 @@ func runAgent() {
 			OnImportRequested: func(p ws.ImportRequestedPayload) {
 				log.Printf("[reverb] import.requested: agent_id=%d", p.AgentID)
 				go importExistingRules(apiClient)
+			},
+			OnSyncRequested: func(p ws.SyncRequestedPayload) {
+				log.Printf("[reverb] sync.requested: agent_id=%d", p.AgentID)
+				go func() {
+					if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent); err != nil {
+						log.Printf("[sync] sync.requested failed: %v", err)
+					}
+				}()
 			},
 			OnAuditRequested: func(p ws.AuditRequestedPayload) {
 				log.Printf("[reverb] audit.requested: audit_id=%d", p.AuditID)

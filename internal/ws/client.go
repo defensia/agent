@@ -71,6 +71,11 @@ type AuditRequestedPayload struct {
 	AuditID int64 `json:"audit_id"`
 }
 
+// SyncRequestedPayload matches the broadcastWith() from SyncRequested event.
+type SyncRequestedPayload struct {
+	AgentID int64 `json:"agent_id"`
+}
+
 // UpdateRequestedPayload matches the broadcastWith() from UpdateRequested event.
 type UpdateRequestedPayload struct {
 	AgentID int64 `json:"agent_id"`
@@ -91,6 +96,7 @@ type Handlers struct {
 	OnScanRequested          func(ScanRequestedPayload)
 	OnImportRequested        func(ImportRequestedPayload)
 	OnAuditRequested         func(AuditRequestedPayload)
+	OnSyncRequested          func(SyncRequestedPayload)
 	OnUpdateRequested        func(UpdateRequestedPayload)
 	OnRemediationRequested   func(RemediationRequestedPayload)
 }
@@ -360,6 +366,14 @@ func (c *Client) dispatch(event string, rawData json.RawMessage) {
 			var p AuditRequestedPayload
 			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
 				c.handlers.OnAuditRequested(p)
+			}
+		}
+
+	case "sync.requested":
+		if c.handlers.OnSyncRequested != nil {
+			var p SyncRequestedPayload
+			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
+				c.handlers.OnSyncRequested(p)
 			}
 		}
 
