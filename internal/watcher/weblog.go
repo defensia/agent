@@ -516,9 +516,9 @@ func detectDockerLogInfo() []LogPathInfo {
 			}
 		}
 
-		// Check exposed ports as heuristic (80, 443, 8080)
+		// Check exposed ports as heuristic — match container port (->80/tcp) not host port
 		if !isWeb && ports != "" {
-			for _, webPort := range []string{":80->", ":443->", ":8080->"} {
+			for _, webPort := range []string{"->80/", "->443/", "->8080/", "->8000/"} {
 				if strings.Contains(ports, webPort) {
 					isWeb = true
 					break

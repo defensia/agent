@@ -840,7 +840,8 @@ func collectDockerInfo() (string, []api.DockerContainer) {
 			}
 		}
 		if !isWeb && ports != "" {
-			for _, wp := range []string{":80->", ":443->", ":8080->"} {
+			// Match container port (e.g. "->80/tcp") not host port (":80->")
+			for _, wp := range []string{"->80/", "->443/", "->8080/", "->8000/"} {
 				if strings.Contains(ports, wp) {
 					isWeb = true
 					break
