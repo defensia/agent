@@ -358,21 +358,82 @@ func detectApacheLogInfo() []LogPathInfo {
 		return nil
 	}
 
-	configFiles := []string{
-		"/etc/apache2/apache2.conf",
+	// Detect ServerRoot from main config (CentOS: /etc/httpd, Debian: /etc/apache2)
+	serverRoot := ""
+	mainConfigs := []string{
 		"/etc/httpd/conf/httpd.conf",
+		"/etc/apache2/apache2.conf",
 		"/usr/local/apache/conf/httpd.conf",
 	}
-	vhostFiles, _ := filepath.Glob("/etc/apache2/sites-enabled/*.conf")
-	configFiles = append(configFiles, vhostFiles...)
-	vhostFiles2, _ := filepath.Glob("/etc/httpd/conf.d/*.conf")
-	configFiles = append(configFiles, vhostFiles2...)
-	confFiles, _ := filepath.Glob("/etc/apache2/conf-enabled/*.conf")
-	configFiles = append(configFiles, confFiles...)
+	for _, mc := range mainConfigs {
+		if data, err := os.ReadFile(mc); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if strings.HasPrefix(strings.ToLower(trimmed), "serverroot ") {
+					parts := strings.Fields(trimmed)
+					if len(parts) >= 2 {
+						serverRoot = strings.Trim(parts[1], "\"")
+					}
+				}
+			}
+			if serverRoot != "" {
+				break
+			}
+		}
+	}
+
+	configFiles := make([]string, len(mainConfigs))
+	copy(configFiles, mainConfigs)
+
+	// Debian/Ubuntu vhost patterns
+	vhostGlobs := []string{
+		"/etc/apache2/sites-enabled/*.conf",
+		"/etc/apache2/conf-enabled/*.conf",
+		// CentOS/RHEL vhost patterns
+		"/etc/httpd/conf.d/*.conf",
+		"/etc/httpd/conf.modules.d/*.conf",
+	}
+	for _, pattern := range vhostGlobs {
+		if matches, _ := filepath.Glob(pattern); matches != nil {
+			configFiles = append(configFiles, matches...)
+		}
+	}
+
+	// Also try apachectl -S to discover included config files
+	for _, cmd := range []string{"apachectl", "apache2ctl", "httpd"} {
+		if out, err := exec.Command(cmd, "-S").CombinedOutput(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				line = strings.TrimSpace(line)
+				// Lines like: port 80 namevhost domain.com (/etc/httpd/conf.d/vhost.conf:1)
+				if idx := strings.Index(line, "("); idx != -1 {
+					if end := strings.Index(line[idx:], ":"); end != -1 {
+						cf := line[idx+1 : idx+end]
+						if _, err := os.Stat(cf); err == nil {
+							configFiles = append(configFiles, cf)
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	// Dedup config files
+	cfSeen := make(map[string]bool)
+	var uniqueConfigFiles []string
+	for _, cf := range configFiles {
+		if !cfSeen[cf] {
+			cfSeen[cf] = true
+			uniqueConfigFiles = append(uniqueConfigFiles, cf)
+		}
+	}
 
 	pathDomains := make(map[string]map[string]bool)
 
-	for _, cf := range configFiles {
+	for _, cf := range uniqueConfigFiles {
 		data, err := os.ReadFile(cf)
 		if err != nil {
 			continue
@@ -380,6 +441,14 @@ func detectApacheLogInfo() []LogPathInfo {
 		for _, vhost := range parseApacheVhosts(string(data)) {
 			for _, lp := range vhost.logPaths {
 				lp = resolveApacheEnvVars(lp)
+				// Resolve relative paths using ServerRoot (CentOS: "logs/access_log" → "/etc/httpd/logs/access_log")
+				if !filepath.IsAbs(lp) && serverRoot != "" {
+					lp = filepath.Join(serverRoot, lp)
+				}
+				// Follow symlinks (CentOS: /etc/httpd/logs → /var/log/httpd)
+				if resolved, err := filepath.EvalSymlinks(lp); err == nil {
+					lp = resolved
+				}
 				if _, err := os.Stat(lp); err != nil {
 					continue
 				}
@@ -389,6 +458,24 @@ func detectApacheLogInfo() []LogPathInfo {
 				for _, d := range vhost.serverNames {
 					pathDomains[lp][d] = true
 				}
+			}
+		}
+	}
+
+	// Well-known RHEL/CentOS log paths as extra fallback when Apache is installed
+	// but config parsing found nothing (e.g. piped logs only, or unusual config)
+	if len(pathDomains) == 0 {
+		rhelPaths := []string{
+			"/var/log/httpd/access_log",
+			"/var/log/httpd/ssl_access_log",
+			"/var/log/httpd/access.log",
+			"/var/log/apache2/access.log",
+			"/var/log/apache2/other_vhosts_access.log",
+		}
+		for _, p := range rhelPaths {
+			if _, err := os.Stat(p); err == nil {
+				pathDomains[p] = make(map[string]bool)
+				log.Printf("[webwatcher] apache: found well-known log path %s", p)
 			}
 		}
 	}
@@ -435,8 +522,8 @@ func parseApacheVhosts(content string) []apacheVhost {
 		}
 
 		if current == nil {
-			// Outside VirtualHost — capture global CustomLog
-			if strings.HasPrefix(trimmed, "CustomLog ") {
+			// Outside VirtualHost — capture global CustomLog (case-insensitive)
+			if strings.HasPrefix(lower, "customlog ") {
 				parts := strings.Fields(trimmed)
 				if len(parts) >= 2 {
 					path := strings.Trim(parts[1], "\"")
@@ -460,7 +547,8 @@ func parseApacheVhosts(content string) []apacheVhost {
 				current.serverNames = append(current.serverNames, alias)
 			}
 		}
-		if strings.HasPrefix(trimmed, "CustomLog ") {
+		// CustomLog — case-insensitive match
+		if strings.HasPrefix(lower, "customlog ") {
 			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
 				path := strings.Trim(parts[1], "\"")
