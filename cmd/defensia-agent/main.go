@@ -327,6 +327,12 @@ func runAgent() {
 		log.Printf("[webserver] detected %s %s", wsName, wsVersion)
 	}
 
+	// Detect Docker info at startup
+	dockerVersion, dockerContainers := collectDockerInfo()
+	if dockerVersion != "" {
+		log.Printf("[docker] detected Docker %s with %d container(s)", dockerVersion, len(dockerContainers))
+	}
+
 	// Metrics collector
 	metricsCollector := monitor.NewMetricsCollector()
 
@@ -338,6 +344,9 @@ func runAgent() {
 		for range ticker.C {
 			zReport := monitor.ScanZombies()
 			sysMetrics := metricsCollector.Collect()
+
+			// Refresh Docker info (containers can start/stop)
+			dockerVersion, dockerContainers = collectDockerInfo()
 
 			hbReq := api.HeartbeatRequest{
 				Status:           "online",
@@ -363,6 +372,8 @@ func runAgent() {
 				},
 				MonitoredDomains:  monitoredDomains,
 				MonitoredLogPaths: monitoredLogPaths,
+				DockerVersion:     dockerVersion,
+				DockerContainers:  dockerContainers,
 			}
 
 			resp, err := apiClient.Heartbeat(hbReq)
@@ -777,6 +788,77 @@ func parseApacheVersion(output string) string {
 		}
 	}
 	return ""
+}
+
+// collectDockerInfo returns the Docker version and a list of running containers.
+func collectDockerInfo() (string, []api.DockerContainer) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "", nil
+	}
+
+	// Docker version
+	var dockerVersion string
+	if out, err := exec.Command("docker", "--version").Output(); err == nil {
+		raw := string(out)
+		if idx := strings.Index(raw, "version "); idx != -1 {
+			rest := raw[idx+8:]
+			if comma := strings.Index(rest, ","); comma != -1 {
+				dockerVersion = strings.TrimSpace(rest[:comma])
+			}
+		}
+	}
+
+	// Running containers
+	out, err := exec.Command("docker", "ps",
+		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Status}}|{{.Ports}}",
+		"--filter", "status=running",
+	).Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return dockerVersion, nil
+	}
+
+	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik"}
+	var containers []api.DockerContainer
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 5)
+		if len(parts) < 4 {
+			continue
+		}
+		id, image, name, status := parts[0], parts[1], parts[2], parts[3]
+		ports := ""
+		if len(parts) >= 5 {
+			ports = parts[4]
+		}
+
+		isWeb := false
+		imageLower := strings.ToLower(image)
+		for _, kw := range webKeywords {
+			if strings.Contains(imageLower, kw) {
+				isWeb = true
+				break
+			}
+		}
+		if !isWeb && ports != "" {
+			for _, wp := range []string{":80->", ":443->", ":8080->"} {
+				if strings.Contains(ports, wp) {
+					isWeb = true
+					break
+				}
+			}
+		}
+
+		containers = append(containers, api.DockerContainer{
+			ID:     id,
+			Name:   name,
+			Image:  image,
+			Status: status,
+			Ports:  ports,
+			IsWeb:  isWeb,
+		})
+	}
+
+	return dockerVersion, containers
 }
 
 // runZombieMonitor periodically scans for zombie processes and reports events when threshold is exceeded.

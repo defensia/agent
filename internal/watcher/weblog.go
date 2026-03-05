@@ -1,13 +1,14 @@
 package watcher
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
-	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -59,6 +60,9 @@ type WebWatcher struct {
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
+
+	// Docker log reader processes
+	dockerCmds []*exec.Cmd
 }
 
 // ── Log path detection ──────────────────────────────────────────────
@@ -482,7 +486,7 @@ func detectDockerLogInfo() []LogPathInfo {
 	}
 
 	out, err := exec.Command("docker", "ps",
-		"--format", "{{.ID}}|{{.Image}}|{{.Names}}",
+		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Ports}}",
 		"--filter", "status=running",
 	).Output()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
@@ -494,11 +498,15 @@ func detectDockerLogInfo() []LogPathInfo {
 	var result []LogPathInfo
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
 		if len(parts) < 3 {
 			continue
 		}
 		id, image, name := parts[0], strings.ToLower(parts[1]), parts[2]
+		ports := ""
+		if len(parts) >= 4 {
+			ports = parts[3]
+		}
 
 		isWeb := false
 		for _, kw := range webKeywords {
@@ -507,11 +515,36 @@ func detectDockerLogInfo() []LogPathInfo {
 				break
 			}
 		}
+
+		// Check exposed ports as heuristic (80, 443, 8080)
+		if !isWeb && ports != "" {
+			for _, webPort := range []string{":80->", ":443->", ":8080->"} {
+				if strings.Contains(ports, webPort) {
+					isWeb = true
+					break
+				}
+			}
+		}
+
+		// Check docker-compose service label
+		if !isWeb {
+			if svc := dockerComposeService(id); svc != "" {
+				svcLower := strings.ToLower(svc)
+				for _, kw := range append(webKeywords, "web", "proxy", "frontend") {
+					if strings.Contains(svcLower, kw) {
+						isWeb = true
+						break
+					}
+				}
+			}
+		}
+
 		if !isWeb {
 			continue
 		}
 
-		mounts := dockerBindMounts(id)
+		mounts := dockerMounts(id)
+		foundLogs := false
 
 		// Primary: run nginx -T inside the container to get precise paths + domain names.
 		if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
@@ -519,30 +552,53 @@ func detectDockerLogInfo() []LogPathInfo {
 				if !seen[info.Path] {
 					seen[info.Path] = true
 					result = append(result, info)
+					foundLogs = true
 					log.Printf("[webwatcher] docker: watching %s from container %s", info.Path, name)
 				}
 			}
-			continue // nginx -T worked; skip the generic fallback below
 		}
 
-		// Fallback: scan host-side bind-mount directories for *access*.log files.
-		for _, hostDir := range mounts {
-			entries, err := os.ReadDir(hostDir)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if e.IsDir() {
+		// Fallback: scan host-side mount directories for *access*.log files.
+		if !foundLogs {
+			for _, hostDir := range mounts {
+				entries, err := os.ReadDir(hostDir)
+				if err != nil {
 					continue
 				}
-				lower := strings.ToLower(e.Name())
-				if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
-					hostPath := filepath.Join(hostDir, e.Name())
-					if !seen[hostPath] {
-						seen[hostPath] = true
-						result = append(result, LogPathInfo{Path: hostPath})
-						log.Printf("[webwatcher] docker: watching %s (mount scan, container %s)", hostPath, name)
+				for _, e := range entries {
+					if e.IsDir() {
+						continue
 					}
+					lower := strings.ToLower(e.Name())
+					if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
+						hostPath := filepath.Join(hostDir, e.Name())
+						if !seen[hostPath] {
+							seen[hostPath] = true
+							result = append(result, LogPathInfo{Path: hostPath})
+							foundLogs = true
+							log.Printf("[webwatcher] docker: watching %s (mount scan, container %s)", hostPath, name)
+						}
+					}
+				}
+			}
+		}
+
+		// Stdout fallback: container logs to stdout (e.g. default Docker nginx)
+		if !foundLogs {
+			if isDockerStdoutAccessLog(name) {
+				dockerPath := "docker://" + name
+				if !seen[dockerPath] {
+					// Try to get domains from nginx config inside the container
+					var domains []string
+					if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
+						blocks := parseNginxBlocks(string(nginxOut))
+						for _, b := range blocks {
+							domains = append(domains, b.serverNames...)
+						}
+					}
+					seen[dockerPath] = true
+					result = append(result, LogPathInfo{Path: dockerPath, Domains: domains})
+					log.Printf("[webwatcher] docker: watching stdout from container %s (domains: %v)", name, domains)
 				}
 			}
 		}
@@ -551,10 +607,50 @@ func detectDockerLogInfo() []LogPathInfo {
 	return result
 }
 
-// dockerBindMounts returns a containerPath→hostPath map for a container's bind mounts.
-func dockerBindMounts(containerID string) map[string]string {
+// dockerComposeService returns the docker-compose service name for a container, or "".
+func dockerComposeService(containerID string) string {
 	out, err := exec.Command("docker", "inspect",
-		"--format", "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Destination}}|{{.Source}}\n{{end}}{{end}}",
+		"--format", "{{index .Config.Labels \"com.docker.compose.service\"}}",
+		containerID,
+	).Output()
+	if err != nil {
+		return ""
+	}
+	svc := strings.TrimSpace(string(out))
+	if svc == "<no value>" || svc == "" {
+		return ""
+	}
+	return svc
+}
+
+// isDockerStdoutAccessLog checks if a container's stdout looks like an access log (combined/common format).
+func isDockerStdoutAccessLog(containerName string) bool {
+	out, err := exec.Command("docker", "logs", "--tail", "5", containerName).CombinedOutput()
+	if err != nil || len(out) == 0 {
+		return false
+	}
+	// Check if any line looks like combined/common log format: IP - - [date] "METHOD ..."
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 20 {
+			continue
+		}
+		// Basic heuristic: starts with IP-like pattern and contains HTTP method
+		if (line[0] >= '0' && line[0] <= '9') &&
+			strings.Contains(line, " - ") &&
+			(strings.Contains(line, "\"GET ") || strings.Contains(line, "\"POST ") ||
+				strings.Contains(line, "\"HEAD ") || strings.Contains(line, "\"PUT ") ||
+				strings.Contains(line, "\"OPTIONS ")) {
+			return true
+		}
+	}
+	return false
+}
+
+// dockerMounts returns a containerPath→hostPath map for a container's bind mounts AND volume mounts.
+func dockerMounts(containerID string) map[string]string {
+	out, err := exec.Command("docker", "inspect",
+		"--format", "{{range .Mounts}}{{.Destination}}|{{.Source}}\n{{end}}",
 		containerID,
 	).Output()
 	if err != nil {
@@ -688,9 +784,14 @@ func (w *WebWatcher) Run() {
 	// Hot-reload of new log files every 5 minutes
 	go w.hotReloadLoop()
 
-	// Start a goroutine per log file
+	// Start a goroutine per log source
 	for _, p := range w.logPaths {
-		w.startTailGoroutine(p)
+		if strings.HasPrefix(p, "docker://") {
+			containerName := strings.TrimPrefix(p, "docker://")
+			w.startDockerLogReader(p, containerName)
+		} else {
+			w.startTailGoroutine(p)
+		}
 	}
 
 	// Block forever
@@ -729,6 +830,71 @@ func (w *WebWatcher) startTailGoroutine(path string) {
 				log.Printf("[webwatcher] %s error: %v — retrying in 5s", filepath.Base(path), err)
 				time.Sleep(5 * time.Second)
 			}
+		}
+	}()
+}
+
+// startDockerLogReader launches a goroutine that reads access logs from a Docker container's stdout.
+func (w *WebWatcher) startDockerLogReader(logPath, containerName string) {
+	w.mu.Lock()
+	if _, exists := w.activePaths[logPath]; exists {
+		w.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.activePaths[logPath] = cancel
+	w.mu.Unlock()
+
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			delete(w.activePaths, logPath)
+			w.mu.Unlock()
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--since", time.Now().Format(time.RFC3339), "--tail", "0", containerName)
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				log.Printf("[webwatcher] docker logs pipe error for %s: %v — retrying in 10s", containerName, err)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+
+			if err := cmd.Start(); err != nil {
+				log.Printf("[webwatcher] docker logs start error for %s: %v — retrying in 10s", containerName, err)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+
+			w.mu.Lock()
+			w.dockerCmds = append(w.dockerCmds, cmd)
+			w.mu.Unlock()
+
+			log.Printf("[webwatcher] docker: reading stdout from container %s", containerName)
+
+			scanner := bufio.NewScanner(stdout)
+			scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
+			for scanner.Scan() {
+				line := scanner.Text()
+				w.mu.Lock()
+				w.processLine(logPath, line)
+				w.mu.Unlock()
+			}
+
+			_ = cmd.Wait()
+
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[webwatcher] docker logs stream ended for %s — retrying in 5s", containerName)
+			time.Sleep(5 * time.Second)
 		}
 	}()
 }
@@ -779,7 +945,11 @@ func (w *WebWatcher) hotReloadLoop() {
 				domainStr = " (" + strings.Join(domains, ", ") + ")"
 			}
 			log.Printf("[webwatcher] new log detected: %s%s", path, domainStr)
-			w.startTailGoroutine(path)
+			if strings.HasPrefix(path, "docker://") {
+				w.startDockerLogReader(path, strings.TrimPrefix(path, "docker://"))
+			} else {
+				w.startTailGoroutine(path)
+			}
 		}
 
 		for _, path := range toStop {

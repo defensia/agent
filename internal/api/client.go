@@ -65,18 +65,30 @@ type SystemMetrics struct {
 	NetBytesOut   uint64  `json:"net_bytes_out"`
 }
 
+// DockerContainer holds info about a running Docker container.
+type DockerContainer struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Status string `json:"status"`
+	Ports  string `json:"ports"`
+	IsWeb  bool   `json:"is_web"`
+}
+
 // HeartbeatRequest is sent every 60s.
 type HeartbeatRequest struct {
-	Status           string         `json:"status"`
-	Version          string         `json:"version"`
-	Timestamp        string         `json:"timestamp"`
-	IPAddress        string         `json:"ip_address,omitempty"`
-	ZombieCount      int            `json:"zombie_count"`
-	WebServer        string         `json:"web_server,omitempty"`
-	WebServerVersion string         `json:"web_server_version,omitempty"`
-	Metrics          *SystemMetrics `json:"metrics,omitempty"`
-	MonitoredDomains  []string      `json:"monitored_domains,omitempty"`
-	MonitoredLogPaths []string      `json:"monitored_log_paths,omitempty"`
+	Status            string             `json:"status"`
+	Version           string             `json:"version"`
+	Timestamp         string             `json:"timestamp"`
+	IPAddress         string             `json:"ip_address,omitempty"`
+	ZombieCount       int                `json:"zombie_count"`
+	WebServer         string             `json:"web_server,omitempty"`
+	WebServerVersion  string             `json:"web_server_version,omitempty"`
+	Metrics           *SystemMetrics     `json:"metrics,omitempty"`
+	MonitoredDomains  []string           `json:"monitored_domains,omitempty"`
+	MonitoredLogPaths []string           `json:"monitored_log_paths,omitempty"`
+	DockerVersion     string             `json:"docker_version,omitempty"`
+	DockerContainers  []DockerContainer  `json:"docker_containers,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.
