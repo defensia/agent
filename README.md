@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.15-brightgreen)](https://github.com/defensia/agent/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.23-brightgreen)](https://github.com/defensia/agent/releases)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 
 **Your server is being attacked right now. You just don't know it.**
@@ -76,6 +76,8 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 | 404 flood | Threshold (30 req / 5 min) |
 | Known scanner User-Agents (sqlmap, nikto, nmap...) | Instant ban |
 
+**Docker-aware** — auto-detects web servers inside Docker containers, reads logs via bind mounts, volumes, or container stdout
+
 **GeoIP blocking** — block entire countries from the dashboard
 **Network propagation** — bans detected on one server instantly applied to all your servers
 **Security scanner** — detects vulnerable software versions and misconfigurations
@@ -103,8 +105,12 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --uninstall
 ## How it works
 
 ```
-auth.log / web access logs
+auth.log / web access logs / Docker container logs
     │
+    ▼
+Log auto-detection
+    │  nginx -T / apachectl -S / docker inspect / docker logs
+    │  Resolves bind mounts, volumes, symlinks, relative paths
     ▼
 Watcher goroutines
     │  Detect brute force, SQLi, XSS, SSRF, path traversal, web shells...
@@ -133,26 +139,57 @@ Each attack type can be independently configured from the dashboard (Server → 
 
 ---
 
-## WAF with Dockerized web servers
+## Docker support *(v0.9.20+)*
 
-If your web server runs inside Docker, bind-mount the log directory to the host:
+The agent **automatically detects Docker** and reports all running containers to the dashboard. Web containers (nginx, apache, caddy, or any container exposing ports 80/443/8080) get special treatment:
+
+1. Runs `nginx -T` or `apachectl -S` **inside** the container to discover log paths and domain names
+2. Maps container log paths to host paths via bind mounts and Docker volumes
+3. Falls back to scanning mount directories for `*access*.log` files
+4. Last resort: reads container stdout via `docker logs -f` if logs go to stdout (common with official nginx image)
+
+**Best practice** — bind-mount the log directory to the host for fastest detection:
 
 ```yaml
 services:
   nginx:
     image: nginx
     volumes:
-      - /var/log/nginx:/var/log/nginx   # ← required for WAF detection
+      - /var/log/nginx:/var/log/nginx
 ```
 
-The agent automatically discovers logs via `nginx -T` inside the container, maps them to host paths, and starts tailing them. No additional configuration needed.
+**Dashboard** — the server detail page shows a dedicated Docker tab with all containers, web detection status, and the WAF tab shows which log sources are being monitored.
 
 ```bash
 journalctl -u defensia-agent | grep webwatcher
-# [webwatcher] watching /var/log/nginx/app.access.log (app.example.com)
-# [webwatcher] docker: watching /var/log/nginx/api.access.log from container nginx
-# [webwatcher] monitoring 2 log file(s) covering 3 domain(s)
+# [webwatcher] docker: watching /var/log/nginx/access.log from container my-nginx
+# [webwatcher] detected 3 access log(s), 5 domain(s)
 ```
+
+---
+
+## Manual log path configuration
+
+If auto-detection doesn't find your logs (custom paths, piped logs, non-standard setups), set the `WEB_LOG_PATH` environment variable:
+
+```bash
+sudo systemctl edit defensia-agent
+```
+
+Add:
+
+```ini
+[Service]
+Environment="WEB_LOG_PATH=/var/log/httpd/access_log,/var/log/nginx/custom-access.log"
+```
+
+Then restart:
+
+```bash
+sudo systemctl restart defensia-agent
+```
+
+`WEB_LOG_PATH` overrides all auto-detection. Multiple paths are comma-separated.
 
 ---
 
@@ -193,6 +230,14 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.23 | Fix: nginx global `access_log` with `server_name` in server blocks now correctly associates domains with log paths |
+| v0.9.22 | Improved Apache detection for CentOS/RHEL: ServerRoot resolution, symlink following, `apachectl -S` discovery, well-known RHEL paths fallback |
+| v0.9.21 | Fix: web container detection matches container port (`->80/tcp`) not host port (`:80->`) |
+| v0.9.20 | Docker container detection, stdout log reader, Docker info in heartbeat, bind mount + volume log discovery |
+| v0.9.19 | Whitelisted IPs are detected (events reported) but never banned |
+| v0.9.18 | Raw access log line included in event details for attack evidence |
+| v0.9.17 | Fix: Apache `${APACHE_LOG_DIR}` resolution, monitored domains/log paths reported in heartbeat |
+| v0.9.16 | Instant whitelist propagation via `sync.requested` WebSocket event |
 | v0.9.15 | Fix: false rollback on `"signal: terminated"` — systemd kills the calling process on restart, now correctly treated as success |
 | v0.9.14 | Fix: removed `updateServiceFile()` from updater — caused a regression loop on every update |
 | v0.9.13 | Fix: `StartLimitIntervalSec=0` moved to `[Unit]` section to prevent start-limit-hit |
