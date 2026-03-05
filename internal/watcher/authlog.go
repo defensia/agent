@@ -2,18 +2,26 @@ package watcher
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const defaultLogPath = "/var/log/auth.log"
+
+// cPHulk SQLite paths (cPanel v62+)
+const (
+	cpHulkDB     = "/var/cpanel/hulkd/cphulk.sqlite"
+	cpHulkSQLite = "/usr/local/cpanel/3rdparty/bin/sqlite3"
+)
 
 // failedPattern matches SSH authentication failure lines from /var/log/auth.log
 // and /var/log/secure. Covers both password-based and key-only SSH configs:
@@ -145,33 +153,49 @@ func (w *Watcher) isWhitelisted(ip string) bool {
 	return false
 }
 
-// logFileEmpty returns true if the log path doesn't exist or has no content.
+// ── Detection helpers ────────────────────────────────────────────────
+
+func (w *Watcher) hasCPHulk() bool {
+	if _, err := os.Stat(cpHulkDB); err != nil {
+		return false
+	}
+	if _, err := os.Stat(cpHulkSQLite); err != nil {
+		return false
+	}
+	return true
+}
+
 func (w *Watcher) logFileEmpty() bool {
 	fi, err := os.Stat(w.logPath)
 	return err != nil || fi.Size() == 0
 }
 
-// hasJournald returns true if journalctl is available on this system.
 func (w *Watcher) hasJournald() bool {
 	_, err := exec.LookPath("journalctl")
 	return err == nil
 }
 
-// Run starts monitoring SSH auth events. Blocks indefinitely.
-// On systems where sshd logs only to journald (e.g. CloudLinux 8/9 without
-// rsyslog), it falls back to streaming journalctl output automatically.
-func (w *Watcher) Run() {
-	log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
+// ── Run — routing logic ──────────────────────────────────────────────
 
-	// If the configured log path is missing or empty, fall back to journald.
-	// This handles CloudLinux 8/9 and other RHEL-based systems where sshd logs
-	// only to systemd journal and /var/log/secure is absent or unpopulated.
+// Run starts monitoring SSH auth events. Blocks indefinitely.
+// Detection order:
+//  1. cPHulk SQLite (cPanel/CloudLinux) — if database and sqlite3 binary found
+//  2. journald — if log file is missing/empty and journalctl is available
+//  3. File tail — default (Debian/Ubuntu auth.log, RHEL/CentOS /var/log/secure)
+func (w *Watcher) Run() {
+	if w.hasCPHulk() {
+		log.Printf("[watcher] cPHulk detected — polling %s every 30s", cpHulkDB)
+		w.runCPHulk()
+		return
+	}
+
 	if w.logFileEmpty() && w.hasJournald() {
 		log.Printf("[watcher] %s missing or empty — falling back to journald", w.logPath)
 		w.runJournald()
 		return
 	}
 
+	log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
 	for {
 		if err := w.tail(); err != nil {
 			log.Printf("[watcher] error: %v — retrying in 5s", err)
@@ -179,6 +203,103 @@ func (w *Watcher) Run() {
 		}
 	}
 }
+
+// ── cPHulk SQLite polling ────────────────────────────────────────────
+
+// runCPHulk polls the cPHulk SQLite database every 30 seconds.
+// It reads from two tables:
+//   - login_log (status=0): failed login attempts → threshold-based banning
+//   - blocked_ips: IPs already blocked by cPHulk → immediate ban in Defensia
+func (w *Watcher) runCPHulk() {
+	lastLoginTime := time.Now().Unix()
+	lastBlockTime := time.Now().Unix()
+
+	for {
+		time.Sleep(30 * time.Second)
+		w.pollCPHulkLogins(&lastLoginTime)
+		w.pollCPHulkBlocked(&lastBlockTime)
+	}
+}
+
+// pollCPHulkLogins reads new failed login entries from login_log since lastSeen.
+func (w *Watcher) pollCPHulkLogins(lastSeen *int64) {
+	query := fmt.Sprintf(
+		"SELECT ip, login_time FROM login_log WHERE status=0 AND login_time>%d ORDER BY login_time ASC;",
+		*lastSeen,
+	)
+	out, err := exec.Command(cpHulkSQLite, cpHulkDB, query).Output()
+	if err != nil {
+		log.Printf("[cphulk] login_log query error: %v", err)
+		return
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) < 2 {
+			continue
+		}
+		ip := strings.TrimSpace(parts[0])
+		ts, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if ts > *lastSeen {
+			*lastSeen = ts
+		}
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+		w.recordAttempt(ip)
+	}
+}
+
+// pollCPHulkBlocked reads new entries from blocked_ips since lastSeen.
+// These are IPs that cPHulk has already decided to block — Defensia bans them
+// immediately without waiting for the threshold.
+func (w *Watcher) pollCPHulkBlocked(lastSeen *int64) {
+	query := fmt.Sprintf(
+		"SELECT ip, block_time, reason FROM blocked_ips WHERE block_time>%d ORDER BY block_time ASC;",
+		*lastSeen,
+	)
+	out, err := exec.Command(cpHulkSQLite, cpHulkDB, query).Output()
+	if err != nil {
+		log.Printf("[cphulk] blocked_ips query error: %v", err)
+		return
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) < 2 {
+			continue
+		}
+		ip := strings.TrimSpace(parts[0])
+		ts, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		if ts > *lastSeen {
+			*lastSeen = ts
+		}
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+
+		w.mu.Lock()
+		alreadyBanned := w.banned[ip]
+		whitelisted := w.isWhitelisted(ip)
+		if !alreadyBanned && !whitelisted {
+			w.banned[ip] = true
+		}
+		w.mu.Unlock()
+
+		if !alreadyBanned && !whitelisted {
+			log.Printf("[cphulk] banned by cPHulk: %s", ip)
+			go w.onBan(ip, "brute_force_cpanel", 1)
+		}
+	}
+}
+
+// ── journald fallback ────────────────────────────────────────────────
 
 // runJournald streams SSH events from the systemd journal. Used on systems
 // where sshd logs only to journald (CloudLinux 8/9, RHEL 9 minimal, etc.).
@@ -208,6 +329,8 @@ func (w *Watcher) runJournald() {
 		time.Sleep(5 * time.Second)
 	}
 }
+
+// ── File tail ────────────────────────────────────────────────────────
 
 func (w *Watcher) tail() error {
 	f, err := os.Open(w.logPath)
@@ -278,13 +401,19 @@ func (w *Watcher) tail() error {
 	return nil
 }
 
+// ── Line / attempt processing ────────────────────────────────────────
+
 func (w *Watcher) processLine(line string) {
 	matches := failedPattern.FindStringSubmatch(line)
 	if len(matches) < 2 {
 		return
 	}
+	w.recordAttempt(matches[1])
+}
 
-	ip := matches[1]
+// recordAttempt applies threshold logic for a given IP.
+// Called by processLine (file/journald) and pollCPHulkLogins.
+func (w *Watcher) recordAttempt(ip string) {
 	now := time.Now()
 
 	w.mu.Lock()
