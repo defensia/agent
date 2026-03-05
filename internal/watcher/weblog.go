@@ -1134,12 +1134,10 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if w.banned[ip] {
 		return
 	}
-	if w.isWhitelisted(ip) {
-		return
-	}
+	whitelisted := w.isWhitelisted(ip)
 
-	// Geoblocking callback
-	if w.checkIP != nil {
+	// Geoblocking callback (skip for whitelisted IPs)
+	if !whitelisted && w.checkIP != nil {
 		if reason := w.checkIP(ip); reason != "" {
 			w.banned[ip] = true
 			go w.onBan(ip, reason, 1)
@@ -1154,7 +1152,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 		for _, pat := range rule.patterns {
 			if strings.Contains(uriLower, pat) {
-				if !w.isDetectOnly(rule.eventType) {
+				if !whitelisted && !w.isDetectOnly(rule.eventType) {
 					w.banned[ip] = true
 					go w.onBan(ip, rule.eventType, 1)
 				}
@@ -1173,7 +1171,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if w.isTypeEnabled("scanner_detected") {
 		for _, agent := range scannerAgents {
 			if strings.Contains(uaLower, agent) {
-				if !w.isDetectOnly("scanner_detected") {
+				if !whitelisted && !w.isDetectOnly("scanner_detected") {
 					w.banned[ip] = true
 					go w.onBan(ip, "scanner_detected", 1)
 				}
@@ -1189,7 +1187,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 
 	// ── Instant-ban: Shellshock (CVE-2014-6271) in Referer or User-Agent ──
 	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
-		if !w.isDetectOnly("shellshock") {
+		if !whitelisted && !w.isDetectOnly("shellshock") {
 			w.banned[ip] = true
 			go w.onBan(ip, "shellshock", 1)
 		}
@@ -1205,7 +1203,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if w.isTypeEnabled("header_injection") {
 		for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
 			if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
-				if !w.isDetectOnly("header_injection") {
+				if !whitelisted && !w.isDetectOnly("header_injection") {
 					w.banned[ip] = true
 					go w.onBan(ip, "header_injection", 1)
 				}
@@ -1246,7 +1244,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
 		if w.isTypeEnabled("wp_bruteforce") {
 			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("wp_bruteforce")) {
+			if w.checkThreshold(ip, rule, now, whitelisted || w.isDetectOnly("wp_bruteforce")) {
 				go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
@@ -1259,7 +1257,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
 		if w.isTypeEnabled("xmlrpc_abuse") {
 			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("xmlrpc_abuse")) {
+			if w.checkThreshold(ip, rule, now, whitelisted || w.isDetectOnly("xmlrpc_abuse")) {
 				go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
@@ -1272,7 +1270,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
 		if w.isTypeEnabled("scanner_detected") {
 			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("scanner_detected")) {
+			if w.checkThreshold(ip, rule, now, whitelisted || w.isDetectOnly("scanner_detected")) {
 				go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
@@ -1285,7 +1283,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if entry.status == 404 {
 		if w.isTypeEnabled("404_flood") {
 			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("404_flood")) {
+			if w.checkThreshold(ip, rule, now, whitelisted || w.isDetectOnly("404_flood")) {
 				go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
