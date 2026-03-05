@@ -286,6 +286,61 @@ func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) 
 	return result
 }
 
+// resolveApacheEnvVars expands ${APACHE_LOG_DIR} in a path by parsing /etc/apache2/envvars.
+func resolveApacheEnvVars(path string) string {
+	if !strings.Contains(path, "${") && !strings.Contains(path, "$APACHE") {
+		return path
+	}
+
+	logDir := ""
+	for _, envFile := range []string{"/etc/apache2/envvars", "/etc/sysconfig/httpd"} {
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			line = strings.TrimPrefix(line, "export ")
+			if strings.HasPrefix(line, "APACHE_LOG_DIR=") {
+				val := strings.TrimPrefix(line, "APACHE_LOG_DIR=")
+				val = strings.Trim(val, "\"'")
+				// Handle ${var:-default} syntax
+				if strings.Contains(val, ":-") {
+					if idx := strings.Index(val, ":-"); idx >= 0 {
+						end := strings.Index(val[idx:], "}")
+						if end > 0 {
+							val = val[idx+2 : idx+end]
+						}
+					}
+				}
+				if val != "" && !strings.Contains(val, "$") {
+					logDir = val
+				}
+			}
+		}
+		if logDir != "" {
+			break
+		}
+	}
+
+	if logDir == "" {
+		for _, candidate := range []string{"/var/log/apache2", "/var/log/httpd"} {
+			if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+				logDir = candidate
+				break
+			}
+		}
+	}
+
+	if logDir == "" {
+		return path
+	}
+
+	path = strings.ReplaceAll(path, "${APACHE_LOG_DIR}", logDir)
+	path = strings.ReplaceAll(path, "$APACHE_LOG_DIR", logDir)
+	return path
+}
+
 // detectApacheLogInfo parses apache config to find ALL CustomLog paths with their ServerNames.
 func detectApacheLogInfo() []LogPathInfo {
 	apacheInstalled := false
@@ -308,6 +363,8 @@ func detectApacheLogInfo() []LogPathInfo {
 	configFiles = append(configFiles, vhostFiles...)
 	vhostFiles2, _ := filepath.Glob("/etc/httpd/conf.d/*.conf")
 	configFiles = append(configFiles, vhostFiles2...)
+	confFiles, _ := filepath.Glob("/etc/apache2/conf-enabled/*.conf")
+	configFiles = append(configFiles, confFiles...)
 
 	pathDomains := make(map[string]map[string]bool)
 
@@ -318,6 +375,7 @@ func detectApacheLogInfo() []LogPathInfo {
 		}
 		for _, vhost := range parseApacheVhosts(string(data)) {
 			for _, lp := range vhost.logPaths {
+				lp = resolveApacheEnvVars(lp)
 				if _, err := os.Stat(lp); err != nil {
 					continue
 				}

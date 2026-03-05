@@ -75,6 +75,8 @@ type HeartbeatRequest struct {
 	WebServer        string         `json:"web_server,omitempty"`
 	WebServerVersion string         `json:"web_server_version,omitempty"`
 	Metrics          *SystemMetrics `json:"metrics,omitempty"`
+	MonitoredDomains  []string      `json:"monitored_domains,omitempty"`
+	MonitoredLogPaths []string      `json:"monitored_log_paths,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.

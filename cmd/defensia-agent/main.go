@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -172,12 +173,25 @@ func runAgent() {
 
 	// Start web log watcher (if web server access logs found)
 	var webW *watcher.WebWatcher
+	var monitoredDomains []string
+	var monitoredLogPaths []string
 	if webLogInfos, domainMap := watcher.DetectWebLogInfo(); len(webLogInfos) > 0 {
 		webLogPaths := make([]string, len(webLogInfos))
 		for i, info := range webLogInfos {
 			webLogPaths[i] = info.Path
 		}
-		log.Printf("[webwatcher] detected %d access log(s)", len(webLogPaths))
+		monitoredLogPaths = webLogPaths
+		domainSet := make(map[string]bool)
+		for _, domains := range domainMap {
+			for _, d := range domains {
+				domainSet[d] = true
+			}
+		}
+		for d := range domainSet {
+			monitoredDomains = append(monitoredDomains, d)
+		}
+		sort.Strings(monitoredDomains)
+		log.Printf("[webwatcher] detected %d access log(s), %d domain(s)", len(webLogPaths), len(monitoredDomains))
 		webW = watcher.NewWebWatcher(
 			webLogPaths,
 			domainMap,
@@ -347,6 +361,8 @@ func runAgent() {
 					NetBytesIn:    sysMetrics.NetBytesIn,
 					NetBytesOut:   sysMetrics.NetBytesOut,
 				},
+				MonitoredDomains:  monitoredDomains,
+				MonitoredLogPaths: monitoredLogPaths,
 			}
 
 			resp, err := apiClient.Heartbeat(hbReq)
