@@ -254,8 +254,17 @@ func parseNginxBlocks(output string) []nginxBlock {
 // nginxBlocksToLogPathInfos converts parsed nginx blocks to []LogPathInfo.
 // If mountMap is non-nil, container-internal paths are first resolved to host paths via it.
 // Only paths that exist on the host filesystem are included.
+//
+// When server blocks inherit a global access_log (i.e. they have server_name but no
+// access_log directive), their domains are associated with the global log path.
 func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) []LogPathInfo {
 	pathDomains := make(map[string]map[string]bool)
+
+	// Collect global log paths (blocks with logPaths but no serverNames)
+	// and orphan domains (blocks with serverNames but no logPaths).
+	var globalLogPaths []string
+	var orphanDomains []string
+
 	for _, block := range blocks {
 		for _, lp := range block.logPaths {
 			hostPath := lp
@@ -273,6 +282,32 @@ func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) 
 			}
 			for _, name := range block.serverNames {
 				pathDomains[hostPath][name] = true
+			}
+			// Track global log paths (from http-level, no server_name)
+			if len(block.serverNames) == 0 {
+				globalLogPaths = append(globalLogPaths, hostPath)
+			}
+		}
+		// Server blocks that inherit access_log from http level
+		if len(block.logPaths) == 0 && len(block.serverNames) > 0 {
+			orphanDomains = append(orphanDomains, block.serverNames...)
+		}
+	}
+
+	// Associate orphan domains with global log paths.
+	// This handles the common case: access_log at http{} level + server blocks with only server_name.
+	if len(orphanDomains) > 0 && len(globalLogPaths) > 0 {
+		// Dedup global log paths
+		seen := make(map[string]bool)
+		for _, gp := range globalLogPaths {
+			if !seen[gp] {
+				seen[gp] = true
+				if pathDomains[gp] == nil {
+					pathDomains[gp] = make(map[string]bool)
+				}
+				for _, d := range orphanDomains {
+					pathDomains[gp][d] = true
+				}
 			}
 		}
 	}
