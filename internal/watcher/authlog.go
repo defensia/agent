@@ -1,10 +1,12 @@
 package watcher
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -13,8 +15,13 @@ import (
 
 const defaultLogPath = "/var/log/auth.log"
 
+// failedPattern matches SSH authentication failure lines from /var/log/auth.log
+// and /var/log/secure. Covers both password-based and key-only SSH configs:
+//   - "Failed password for root from X.X.X.X"             (password auth)
+//   - "Failed password for invalid user foo from X.X.X.X" (password auth, bad user)
+//   - "Invalid user foo from X.X.X.X"                     (key-only auth / PasswordAuthentication no)
 var failedPattern = regexp.MustCompile(
-	`Failed password for (?:invalid user )?\S+ from ([\d.]+)`,
+	`(?:Failed password for (?:invalid user )?\S+ from|Invalid user \S+ from)\s*([\d.]+)`,
 )
 
 // BanFunc is called when an IP exceeds the threshold.
@@ -138,15 +145,67 @@ func (w *Watcher) isWhitelisted(ip string) bool {
 	return false
 }
 
-// Run starts tailing the log file. Blocks indefinitely.
+// logFileEmpty returns true if the log path doesn't exist or has no content.
+func (w *Watcher) logFileEmpty() bool {
+	fi, err := os.Stat(w.logPath)
+	return err != nil || fi.Size() == 0
+}
+
+// hasJournald returns true if journalctl is available on this system.
+func (w *Watcher) hasJournald() bool {
+	_, err := exec.LookPath("journalctl")
+	return err == nil
+}
+
+// Run starts monitoring SSH auth events. Blocks indefinitely.
+// On systems where sshd logs only to journald (e.g. CloudLinux 8/9 without
+// rsyslog), it falls back to streaming journalctl output automatically.
 func (w *Watcher) Run() {
 	log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
+
+	// If the configured log path is missing or empty, fall back to journald.
+	// This handles CloudLinux 8/9 and other RHEL-based systems where sshd logs
+	// only to systemd journal and /var/log/secure is absent or unpopulated.
+	if w.logFileEmpty() && w.hasJournald() {
+		log.Printf("[watcher] %s missing or empty — falling back to journald", w.logPath)
+		w.runJournald()
+		return
+	}
 
 	for {
 		if err := w.tail(); err != nil {
 			log.Printf("[watcher] error: %v — retrying in 5s", err)
 			time.Sleep(5 * time.Second)
 		}
+	}
+}
+
+// runJournald streams SSH events from the systemd journal. Used on systems
+// where sshd logs only to journald (CloudLinux 8/9, RHEL 9 minimal, etc.).
+func (w *Watcher) runJournald() {
+	for {
+		// Watch both sshd and ssh units to cover different distro naming
+		cmd := exec.Command("journalctl", "-f",
+			"-u", "sshd", "-u", "ssh",
+			"--output=short", "--no-pager")
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("[watcher] journald pipe: %v — retrying in 5s", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		if err := cmd.Start(); err != nil {
+			log.Printf("[watcher] journald start: %v — retrying in 5s", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			w.processLine(scanner.Text())
+		}
+		cmd.Wait()
+		log.Printf("[watcher] journald exited — retrying in 5s")
+		time.Sleep(5 * time.Second)
 	}
 }
 

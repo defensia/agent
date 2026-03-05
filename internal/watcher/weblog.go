@@ -115,7 +115,14 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 5. Well-known static paths as fallback (only if nothing found from config)
+	// 5. cPanel/CloudLinux per-vhost logs in domlogs directory (always checked).
+	// Files are named by domain (e.g. domain.com, domain.com-ssl_log) with no
+	// standard extension. The main access_log is already covered below.
+	for _, info := range detectCpanelDomlogInfo() {
+		add(info)
+	}
+
+	// 6. Well-known static paths as fallback (only if nothing found from config)
 	if len(infos) == 0 {
 		knownPaths := []string{
 			"/var/log/nginx/access.log",
@@ -389,6 +396,12 @@ func detectApacheLogInfo() []LogPathInfo {
 			break
 		}
 	}
+	// cPanel installs Apache at a non-standard path not in $PATH
+	if !apacheInstalled {
+		if _, err := os.Stat("/usr/local/apache/bin/apachectl"); err == nil {
+			apacheInstalled = true
+		}
+	}
 	if !apacheInstalled {
 		return nil
 	}
@@ -438,7 +451,8 @@ func detectApacheLogInfo() []LogPathInfo {
 	}
 
 	// Also try apachectl -S to discover included config files
-	for _, cmd := range []string{"apachectl", "apache2ctl", "httpd"} {
+	// Include cPanel's non-standard binary path
+	for _, cmd := range []string{"apachectl", "apache2ctl", "httpd", "/usr/local/apache/bin/apachectl"} {
 		if out, err := exec.Command(cmd, "-S").CombinedOutput(); err == nil {
 			for _, line := range strings.Split(string(out), "\n") {
 				line = strings.TrimSpace(line)
@@ -597,6 +611,36 @@ func parseApacheVhosts(content string) []apacheVhost {
 }
 
 // ── Docker container log detection ──────────────────────────────────
+
+// detectCpanelDomlogInfo scans cPanel's per-vhost access log directory.
+// cPanel stores per-domain Apache logs in /usr/local/apache/logs/domlogs/
+// as plain files named by domain (e.g. "domain.com", "domain.com-ssl_log").
+func detectCpanelDomlogInfo() []LogPathInfo {
+	domlogDir := "/usr/local/apache/logs/domlogs"
+	entries, err := os.ReadDir(domlogDir)
+	if err != nil {
+		return nil
+	}
+	var infos []LogPathInfo
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Skip byte-log variants (bandwidth tracking, not access logs)
+		if strings.HasSuffix(name, "-bytes_log") {
+			continue
+		}
+		p := domlogDir + "/" + name
+		// Extract domain name: strip -ssl_log suffix if present
+		domain := strings.TrimSuffix(name, "-ssl_log")
+		infos = append(infos, LogPathInfo{Path: p, Domains: []string{domain}})
+	}
+	if len(infos) > 0 {
+		log.Printf("[webwatcher] cPanel domlogs: found %d log files in %s", len(infos), domlogDir)
+	}
+	return infos
+}
 
 // detectDockerLogInfo finds web server access logs inside Docker containers.
 // For each running nginx/apache/caddy container it:
