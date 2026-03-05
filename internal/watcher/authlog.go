@@ -175,13 +175,33 @@ func (w *Watcher) hasJournald() bool {
 	return err == nil
 }
 
+// shouldUseJournald returns true when journald is the better SSH log source.
+// On RHEL-family systems (/var/log/secure), cPanel may disable rsyslog's auth
+// facility so sshd logs go exclusively to journald even when the file exists.
+// We always prefer journald on those systems when journalctl is available.
+func (w *Watcher) shouldUseJournald() bool {
+	if !w.hasJournald() {
+		return false
+	}
+	// File missing or empty → always use journald
+	if w.logFileEmpty() {
+		return true
+	}
+	// On RHEL-family (/var/log/secure), prefer journald — cPanel/CloudLinux
+	// may suppress sshd output to the file even when it exists.
+	if w.logPath == "/var/log/secure" {
+		return true
+	}
+	return false
+}
+
 // ── Run — routing logic ──────────────────────────────────────────────
 
 // Run starts monitoring SSH auth events. Blocks indefinitely.
 // Detection order:
 //  1. cPHulk SQLite (cPanel/CloudLinux) — if database and sqlite3 binary found
-//  2. journald — if log file is missing/empty and journalctl is available
-//  3. File tail — default (Debian/Ubuntu auth.log, RHEL/CentOS /var/log/secure)
+//  2. journald — if journalctl available AND (file empty OR RHEL-family path)
+//  3. File tail — default (Debian/Ubuntu auth.log)
 func (w *Watcher) Run() {
 	if w.hasCPHulk() {
 		log.Printf("[watcher] cPHulk detected — polling %s every 30s", cpHulkDB)
@@ -189,8 +209,8 @@ func (w *Watcher) Run() {
 		return
 	}
 
-	if w.logFileEmpty() && w.hasJournald() {
-		log.Printf("[watcher] %s missing or empty — falling back to journald", w.logPath)
+	if w.shouldUseJournald() {
+		log.Printf("[watcher] using journald for SSH monitoring (path: %s)", w.logPath)
 		w.runJournald()
 		return
 	}
