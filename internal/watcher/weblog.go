@@ -1079,12 +1079,16 @@ var (
 
 // ── Line processing ─────────────────────────────────────────────────
 
-// enrichDetails adds domain and log_file info to event details.
-func (w *WebWatcher) enrichDetails(logPath string, details map[string]string) map[string]string {
+// enrichDetails adds domain, log_file, and raw log line to event details.
+func (w *WebWatcher) enrichDetails(logPath, rawLine string, details map[string]string) map[string]string {
 	if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
 		details["domain"] = strings.Join(domains, ",")
 	}
 	details["log_file"] = filepath.Base(logPath)
+	if len(rawLine) > 2000 {
+		rawLine = rawLine[:2000]
+	}
+	details["raw_line"] = rawLine
 	return details
 }
 
@@ -1154,7 +1158,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 					w.banned[ip] = true
 					go w.onBan(ip, rule.eventType, 1)
 				}
-				go w.onEvent(ip, rule.eventType, "critical", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, rule.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"method":     entry.method,
 					"user_agent": entry.userAgent,
@@ -1173,7 +1177,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 					w.banned[ip] = true
 					go w.onBan(ip, "scanner_detected", 1)
 				}
-				go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"scanner":    agent,
@@ -1189,7 +1193,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			w.banned[ip] = true
 			go w.onBan(ip, "shellshock", 1)
 		}
-		go w.onEvent(ip, "shellshock", "critical", w.enrichDetails(logPath, map[string]string{
+		go w.onEvent(ip, "shellshock", "critical", w.enrichDetails(logPath, line, map[string]string{
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
 			"referer":    entry.referer,
@@ -1205,7 +1209,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 					w.banned[ip] = true
 					go w.onBan(ip, "header_injection", 1)
 				}
-				go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"referer":    entry.referer,
@@ -1243,7 +1247,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		if w.isTypeEnabled("wp_bruteforce") {
 			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
 			if w.checkThreshold(ip, rule, now, w.isDetectOnly("wp_bruteforce")) {
-				go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
 			}
@@ -1256,7 +1260,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		if w.isTypeEnabled("xmlrpc_abuse") {
 			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
 			if w.checkThreshold(ip, rule, now, w.isDetectOnly("xmlrpc_abuse")) {
-				go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
 			}
@@ -1269,7 +1273,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		if w.isTypeEnabled("scanner_detected") {
 			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
 			if w.checkThreshold(ip, rule, now, w.isDetectOnly("scanner_detected")) {
-				go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
 			}
@@ -1282,7 +1286,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		if w.isTypeEnabled("404_flood") {
 			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
 			if w.checkThreshold(ip, rule, now, w.isDetectOnly("404_flood")) {
-				go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, map[string]string{
+				go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
 					"uri": entry.uri,
 				}))
 			}
