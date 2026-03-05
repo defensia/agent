@@ -4,11 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v0.9.25)"
-        required: true
 
 permissions:
   contents: write
@@ -30,10 +25,7 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build binaries
         env:
