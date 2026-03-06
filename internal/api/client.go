@@ -282,6 +282,19 @@ func (c *Client) ReportEvents(events []EventRequest) error {
 	return c.post("/api/v1/agent/events", c.token, map[string]any{"events": events}, nil)
 }
 
+// MonitorRunRequest reports a single monitor scan execution.
+type MonitorRunRequest struct {
+	Monitor    string            `json:"monitor"`
+	Detections int               `json:"detections"`
+	Summary    map[string]string `json:"summary"`
+	RanAt      string            `json:"ran_at"`
+}
+
+// ReportMonitorRun sends a monitor scan summary to the server.
+func (c *Client) ReportMonitorRun(run MonitorRunRequest) error {
+	return c.post("/api/v1/agent/monitor-runs", c.token, run, nil)
+}
+
 // SoftwareAuditRequest sends software audit results to the server.
 type SoftwareAuditRequest struct {
 	AuditID     int64       `json:"audit_id"`

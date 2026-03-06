@@ -980,6 +980,27 @@ func getWhitelistIPs() []string {
 	return cp
 }
 
+func reportScanResult(client *api.Client, monitorName string, result monitor.ScanResult) {
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	if len(result.Events) > 0 {
+		log.Printf("[%s] detected %d event(s)", monitorName, len(result.Events))
+		if err := client.ReportEvents(result.Events); err != nil {
+			log.Printf("[%s] failed to report events: %v", monitorName, err)
+		}
+	}
+
+	run := api.MonitorRunRequest{
+		Monitor:    monitorName,
+		Detections: len(result.Events),
+		Summary:    result.Summary,
+		RanAt:      now,
+	}
+	if err := client.ReportMonitorRun(run); err != nil {
+		log.Printf("[%s] failed to report run: %v", monitorName, err)
+	}
+}
+
 func runPortScanMonitor(client *api.Client) {
 	detector := monitor.NewPortScanDetector()
 	ticker := time.NewTicker(5 * time.Second)
@@ -993,15 +1014,8 @@ func runPortScanMonitor(client *api.Client) {
 		ticker.Reset(interval)
 
 		detector.SetWhitelists(getWhitelistIPs())
-		events := detector.Scan()
-		if len(events) == 0 {
-			continue
-		}
-
-		log.Printf("[portscan] detected %d port scan event(s)", len(events))
-		if err := client.ReportEvents(events); err != nil {
-			log.Printf("[portscan] failed to report: %v", err)
-		}
+		result := detector.Scan()
+		reportScanResult(client, "port_scan", result)
 	}
 }
 
@@ -1018,15 +1032,8 @@ func runFloodMonitor(client *api.Client) {
 		ticker.Reset(interval)
 
 		detector.SetWhitelists(getWhitelistIPs())
-		events := detector.Scan()
-		if len(events) == 0 {
-			continue
-		}
-
-		log.Printf("[flood] detected %d flood event(s)", len(events))
-		if err := client.ReportEvents(events); err != nil {
-			log.Printf("[flood] failed to report: %v", err)
-		}
+		result := detector.Scan()
+		reportScanResult(client, "flood", result)
 	}
 }
 
@@ -1042,15 +1049,8 @@ func runIntegrityMonitor(client *api.Client) {
 		}
 		ticker.Reset(interval)
 
-		events := detector.Scan()
-		if len(events) == 0 {
-			continue
-		}
-
-		log.Printf("[integrity] detected %d file change(s)", len(events))
-		if err := client.ReportEvents(events); err != nil {
-			log.Printf("[integrity] failed to report: %v", err)
-		}
+		result := detector.Scan()
+		reportScanResult(client, "integrity_change", result)
 	}
 }
 
@@ -1059,13 +1059,8 @@ func runMalwareMonitor(client *api.Client) {
 
 	// First web shell scan after 5 min delay
 	time.AfterFunc(5*time.Minute, func() {
-		events := detector.ScanWebShellsNow()
-		if len(events) > 0 {
-			log.Printf("[malware] initial web shell scan found %d finding(s)", len(events))
-			if err := client.ReportEvents(events); err != nil {
-				log.Printf("[malware] failed to report: %v", err)
-			}
-		}
+		result := detector.ScanWebShellsNow()
+		reportScanResult(client, "malware", result)
 	})
 
 	ticker := time.NewTicker(5 * time.Minute)
@@ -1078,14 +1073,7 @@ func runMalwareMonitor(client *api.Client) {
 		}
 		ticker.Reset(interval)
 
-		events := detector.Scan()
-		if len(events) == 0 {
-			continue
-		}
-
-		log.Printf("[malware] detected %d finding(s)", len(events))
-		if err := client.ReportEvents(events); err != nil {
-			log.Printf("[malware] failed to report: %v", err)
-		}
+		result := detector.Scan()
+		reportScanResult(client, "malware", result)
 	}
 }

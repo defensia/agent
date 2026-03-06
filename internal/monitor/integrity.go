@@ -55,7 +55,7 @@ func NewIntegrityDetector() *IntegrityDetector {
 	}
 }
 
-func (d *IntegrityDetector) Scan() []api.EventRequest {
+func (d *IntegrityDetector) Scan() ScanResult {
 	now := time.Now()
 
 	// Prune expired cooldowns
@@ -74,11 +74,12 @@ func (d *IntegrityDetector) Scan() []api.EventRequest {
 	}
 
 	var events []api.EventRequest
+	filesChecked := 0
+	filesChanged := 0
 
 	for _, path := range files {
 		info, err := os.Stat(path)
 		if err != nil {
-			// File doesn't exist or not accessible — remove baseline if had one
 			if _, had := d.baselines[path]; had {
 				delete(d.baselines, path)
 			}
@@ -93,12 +94,12 @@ func (d *IntegrityDetector) Scan() []api.EventRequest {
 		if err != nil {
 			continue
 		}
+		filesChecked++
 
 		current := fileBaseline{hash: hash, size: info.Size()}
 		prev, exists := d.baselines[path]
 
 		if !exists {
-			// First time seeing this file — set baseline
 			d.baselines[path] = current
 			continue
 		}
@@ -108,6 +109,7 @@ func (d *IntegrityDetector) Scan() []api.EventRequest {
 		}
 
 		// Hash changed
+		filesChanged++
 		d.baselines[path] = current
 
 		if d.firstRun {
@@ -136,7 +138,15 @@ func (d *IntegrityDetector) Scan() []api.EventRequest {
 	}
 
 	d.firstRun = false
-	return events
+	return ScanResult{
+		Events: events,
+		Summary: map[string]string{
+			"files_monitored": fmt.Sprintf("%d", len(files)),
+			"files_checked":   fmt.Sprintf("%d", filesChecked),
+			"files_changed":   fmt.Sprintf("%d", filesChanged),
+			"baselines":       fmt.Sprintf("%d", len(d.baselines)),
+		},
+	}
 }
 
 func hashFile(path string) (string, error) {

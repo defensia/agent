@@ -32,21 +32,26 @@ func (d *PortScanDetector) SetWhitelists(ips []string) {
 	d.whitelists = ips
 }
 
-func (d *PortScanDetector) Scan() []api.EventRequest {
+func (d *PortScanDetector) Scan() ScanResult {
 	conns, err := ParseProcNetTCP()
 	if err != nil {
 		log.Printf("[portscan] error reading /proc/net/tcp: %v", err)
-		return nil
+		return ScanResult{Summary: map[string]string{"error": err.Error()}}
 	}
 
 	now := time.Now()
+
+	synRecvCount := 0
+	uniqueIPs := make(map[string]bool)
 
 	// Collect SYN_RECV connections grouped by source IP
 	for _, c := range conns {
 		if c.State != TCPSynRecv {
 			continue
 		}
+		synRecvCount++
 		srcIP := c.RemoteIP.String()
+		uniqueIPs[srcIP] = true
 		if d.shouldSkip(c.RemoteIP, srcIP) {
 			continue
 		}
@@ -108,7 +113,15 @@ func (d *PortScanDetector) Scan() []api.EventRequest {
 		delete(d.targets, srcIP)
 	}
 
-	return events
+	return ScanResult{
+		Events: events,
+		Summary: map[string]string{
+			"connections_checked": fmt.Sprintf("%d", len(conns)),
+			"syn_recv":           fmt.Sprintf("%d", synRecvCount),
+			"unique_ips":         fmt.Sprintf("%d", len(uniqueIPs)),
+			"tracked_ips":        fmt.Sprintf("%d", len(d.targets)),
+		},
+	}
 }
 
 func (d *PortScanDetector) shouldSkip(ip net.IP, ipStr string) bool {
