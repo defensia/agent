@@ -26,7 +26,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.27"
+var version = "0.9.28"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -374,6 +374,7 @@ func runAgent() {
 				MonitoredLogPaths: monitoredLogPaths,
 				DockerVersion:     dockerVersion,
 				DockerContainers:  dockerContainers,
+				AuthWatcherMethod: w.Method,
 			}
 
 			resp, err := apiClient.Heartbeat(hbReq)

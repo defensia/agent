@@ -50,6 +50,7 @@ type Watcher struct {
 	logPath string
 	onBan   BanFunc
 	checkIP CheckIPFunc
+	Method  string // "cphulk", "journald", "file_tail", "none"
 
 	mu        sync.Mutex
 	threshold int
@@ -204,15 +205,24 @@ func (w *Watcher) shouldUseJournald() bool {
 //  3. File tail — default (Debian/Ubuntu auth.log)
 func (w *Watcher) Run() {
 	if w.hasCPHulk() {
+		w.Method = "cphulk"
 		log.Printf("[watcher] cPHulk detected — polling %s every 30s", cpHulkDB)
 		w.runCPHulk()
 		return
 	}
 
 	if w.shouldUseJournald() {
+		w.Method = "journald"
 		log.Printf("[watcher] using journald for SSH monitoring (path: %s)", w.logPath)
 		w.runJournald()
 		return
+	}
+
+	if w.logFileEmpty() {
+		w.Method = "none"
+		log.Printf("[watcher] no auth log source found (file: %s empty/missing, no journald, no cphulk)", w.logPath)
+	} else {
+		w.Method = "file_tail"
 	}
 
 	log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)

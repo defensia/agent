@@ -89,6 +89,7 @@ type HeartbeatRequest struct {
 	MonitoredLogPaths []string           `json:"monitored_log_paths,omitempty"`
 	DockerVersion     string             `json:"docker_version,omitempty"`
 	DockerContainers  []DockerContainer  `json:"docker_containers,omitempty"`
+	AuthWatcherMethod string             `json:"auth_watcher_method,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.
