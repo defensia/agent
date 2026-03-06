@@ -35,6 +35,9 @@ var failedPattern = regexp.MustCompile(
 // BanFunc is called when an IP exceeds the threshold.
 type BanFunc func(ip, reason string, count int)
 
+// BanWithDurationFunc is called when a ban should be applied with a specific duration.
+type BanWithDurationFunc func(ip, reason string, count int, duration time.Duration)
+
 // CheckIPFunc is called for every detected IP. If it returns a non-empty reason,
 // the IP is banned immediately (used for geoblocking).
 type CheckIPFunc func(ip string) (banReason string)

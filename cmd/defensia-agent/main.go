@@ -233,6 +233,21 @@ func runAgent() {
 			}
 			return ""
 		})
+		webW.SetBanTimed(func(ip, reason string, count int, duration time.Duration) {
+			log.Printf("[webwatcher] banning %s: %s (count=%d, duration=%s)", ip, reason, count, duration)
+			if err := firewall.BanIP(ip); err != nil {
+				log.Printf("[firewall] error: %v", err)
+			}
+			expiresAt := time.Now().UTC().Add(duration).Format(time.RFC3339)
+			if err := apiClient.ReportBan(api.BanRequest{
+				IPAddress: ip,
+				Reason:    reason,
+				BanCount:  count,
+				ExpiresAt: &expiresAt,
+			}); err != nil {
+				log.Printf("[api] failed to report ban: %v", err)
+			}
+		})
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
@@ -405,7 +420,6 @@ func runAgent() {
 	go runPortScanMonitor(apiClient)
 	go runFloodMonitor(apiClient)
 	go runIntegrityMonitor(apiClient)
-	go runMalwareMonitor(apiClient)
 
 	// Fallback sync ticker (every 5min, in case WS misses something)
 	go func() {
@@ -936,7 +950,6 @@ func getMonitorSetting(name string) (enabled bool, interval time.Duration) {
 		"port_scan":        5 * time.Second,
 		"flood":            10 * time.Second,
 		"integrity_change": 5 * time.Minute,
-		"malware":          5 * time.Minute,
 	}
 
 	monitorConfigMu.RLock()
@@ -957,8 +970,6 @@ func getMonitorSetting(name string) (enabled bool, interval time.Duration) {
 		setting = cfg.Flood
 	case "integrity_change":
 		setting = cfg.IntegrityChange
-	case "malware":
-		setting = cfg.Malware
 	}
 
 	if setting == nil {
@@ -1054,26 +1065,3 @@ func runIntegrityMonitor(client *api.Client) {
 	}
 }
 
-func runMalwareMonitor(client *api.Client) {
-	detector := monitor.NewMalwareDetector()
-
-	// First web shell scan after 5 min delay
-	time.AfterFunc(5*time.Minute, func() {
-		result := detector.ScanWebShellsNow()
-		reportScanResult(client, "malware", result)
-	})
-
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		enabled, interval := getMonitorSetting("malware")
-		if !enabled {
-			continue
-		}
-		ticker.Reset(interval)
-
-		result := detector.Scan()
-		reportScanResult(client, "malware", result)
-	}
-}

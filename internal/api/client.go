@@ -136,7 +136,6 @@ type MonitorConfig struct {
 	PortScan        *MonitorSetting `json:"port_scan,omitempty"`
 	Flood           *MonitorSetting `json:"flood,omitempty"`
 	IntegrityChange *MonitorSetting `json:"integrity_change,omitempty"`
-	Malware         *MonitorSetting `json:"malware,omitempty"`
 }
 
 type MonitorSetting struct {
