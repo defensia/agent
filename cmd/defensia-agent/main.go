@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,7 +27,14 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.28"
+var version = "0.9.29"
+
+var (
+	monitorConfigMu sync.RWMutex
+	monitorCfg      *api.MonitorConfig
+	whitelistIPs    []string
+	whitelistMu     sync.RWMutex
+)
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -393,6 +401,12 @@ func runAgent() {
 	// Zombie process monitor (check every 60s, report events when threshold exceeded)
 	go runZombieMonitor(apiClient)
 
+	// Security monitors (configurable per-server via panel)
+	go runPortScanMonitor(apiClient)
+	go runFloodMonitor(apiClient)
+	go runIntegrityMonitor(apiClient)
+	go runMalwareMonitor(apiClient)
+
 	// Fallback sync ticker (every 5min, in case WS misses something)
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
@@ -437,6 +451,19 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	w.UpdateWhitelist(wlIPs, wlCIDRs)
+
+	// Store whitelist IPs for monitor exclusions
+	whitelistMu.Lock()
+	whitelistIPs = wlIPs
+	whitelistMu.Unlock()
+
+	// Store monitor config for detector goroutines
+	if sync.Config.MonitorConfig != nil {
+		monitorConfigMu.Lock()
+		monitorCfg = sync.Config.MonitorConfig
+		monitorConfigMu.Unlock()
+	}
+
 	if webW != nil {
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
 		// Apply WAF config from panel
@@ -901,5 +928,164 @@ func runZombieMonitor(client *api.Client) {
 		}
 
 		lastReported = report.Count
+	}
+}
+
+func getMonitorSetting(name string) (enabled bool, interval time.Duration) {
+	defaults := map[string]time.Duration{
+		"port_scan":        5 * time.Second,
+		"flood":            10 * time.Second,
+		"integrity_change": 5 * time.Minute,
+		"malware":          5 * time.Minute,
+	}
+
+	monitorConfigMu.RLock()
+	cfg := monitorCfg
+	monitorConfigMu.RUnlock()
+
+	defaultInterval := defaults[name]
+
+	if cfg == nil {
+		return true, defaultInterval
+	}
+
+	var setting *api.MonitorSetting
+	switch name {
+	case "port_scan":
+		setting = cfg.PortScan
+	case "flood":
+		setting = cfg.Flood
+	case "integrity_change":
+		setting = cfg.IntegrityChange
+	case "malware":
+		setting = cfg.Malware
+	}
+
+	if setting == nil {
+		return true, defaultInterval
+	}
+
+	iv := defaultInterval
+	if setting.Interval > 0 {
+		iv = time.Duration(setting.Interval) * time.Second
+	}
+	return setting.Enabled, iv
+}
+
+func getWhitelistIPs() []string {
+	whitelistMu.RLock()
+	defer whitelistMu.RUnlock()
+	cp := make([]string, len(whitelistIPs))
+	copy(cp, whitelistIPs)
+	return cp
+}
+
+func runPortScanMonitor(client *api.Client) {
+	detector := monitor.NewPortScanDetector()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		enabled, interval := getMonitorSetting("port_scan")
+		if !enabled {
+			continue
+		}
+		ticker.Reset(interval)
+
+		detector.SetWhitelists(getWhitelistIPs())
+		events := detector.Scan()
+		if len(events) == 0 {
+			continue
+		}
+
+		log.Printf("[portscan] detected %d port scan event(s)", len(events))
+		if err := client.ReportEvents(events); err != nil {
+			log.Printf("[portscan] failed to report: %v", err)
+		}
+	}
+}
+
+func runFloodMonitor(client *api.Client) {
+	detector := monitor.NewFloodDetector()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		enabled, interval := getMonitorSetting("flood")
+		if !enabled {
+			continue
+		}
+		ticker.Reset(interval)
+
+		detector.SetWhitelists(getWhitelistIPs())
+		events := detector.Scan()
+		if len(events) == 0 {
+			continue
+		}
+
+		log.Printf("[flood] detected %d flood event(s)", len(events))
+		if err := client.ReportEvents(events); err != nil {
+			log.Printf("[flood] failed to report: %v", err)
+		}
+	}
+}
+
+func runIntegrityMonitor(client *api.Client) {
+	detector := monitor.NewIntegrityDetector()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		enabled, interval := getMonitorSetting("integrity_change")
+		if !enabled {
+			continue
+		}
+		ticker.Reset(interval)
+
+		events := detector.Scan()
+		if len(events) == 0 {
+			continue
+		}
+
+		log.Printf("[integrity] detected %d file change(s)", len(events))
+		if err := client.ReportEvents(events); err != nil {
+			log.Printf("[integrity] failed to report: %v", err)
+		}
+	}
+}
+
+func runMalwareMonitor(client *api.Client) {
+	detector := monitor.NewMalwareDetector()
+
+	// First web shell scan after 5 min delay
+	time.AfterFunc(5*time.Minute, func() {
+		events := detector.ScanWebShellsNow()
+		if len(events) > 0 {
+			log.Printf("[malware] initial web shell scan found %d finding(s)", len(events))
+			if err := client.ReportEvents(events); err != nil {
+				log.Printf("[malware] failed to report: %v", err)
+			}
+		}
+	})
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		enabled, interval := getMonitorSetting("malware")
+		if !enabled {
+			continue
+		}
+		ticker.Reset(interval)
+
+		events := detector.Scan()
+		if len(events) == 0 {
+			continue
+		}
+
+		log.Printf("[malware] detected %d finding(s)", len(events))
+		if err := client.ReportEvents(events); err != nil {
+			log.Printf("[malware] failed to report: %v", err)
+		}
 	}
 }

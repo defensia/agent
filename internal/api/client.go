@@ -124,11 +124,24 @@ type SyncResponse struct {
 }
 
 type SyncConfig struct {
-	BlockedCountries []string   `json:"blocked_countries"`
-	WAFConfig        *WAFConfig `json:"waf_config"`
-	BFThreshold   int  `json:"bf_threshold"`
-	BFWindow      int  `json:"bf_window"`
-	BFBanDuration *int `json:"bf_ban_duration"`
+	BlockedCountries []string       `json:"blocked_countries"`
+	WAFConfig        *WAFConfig     `json:"waf_config"`
+	MonitorConfig    *MonitorConfig `json:"monitor_config,omitempty"`
+	BFThreshold      int            `json:"bf_threshold"`
+	BFWindow         int            `json:"bf_window"`
+	BFBanDuration    *int           `json:"bf_ban_duration"`
+}
+
+type MonitorConfig struct {
+	PortScan        *MonitorSetting `json:"port_scan,omitempty"`
+	Flood           *MonitorSetting `json:"flood,omitempty"`
+	IntegrityChange *MonitorSetting `json:"integrity_change,omitempty"`
+	Malware         *MonitorSetting `json:"malware,omitempty"`
+}
+
+type MonitorSetting struct {
+	Enabled  bool `json:"enabled"`
+	Interval int  `json:"interval"`
 }
 
 type WAFConfig struct {
