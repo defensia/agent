@@ -111,16 +111,27 @@ Log auto-detection
     ▼
 Watcher goroutines
     │  Detect brute force, SQLi, XSS, SSRF, path traversal, web shells...
-    │  Instant-ban or threshold (configurable per type from dashboard)
     ▼
-BanIP → ipset add defensia-bans <IP>  (or iptables -I INPUT -s <IP> -j DROP)
+Bot Scoring Engine
+    │  Each detection adds points to per-IP score (decay: -5 pts/min)
+    │  Score weights configurable per server from dashboard
     │
-    ├──► POST /api/v1/agent/bans → dashboard + propagates to all your servers
-    │
-    └──► WebSocket receives ban.created from other servers → BanIP instantly
+    ├─ < 30 pts  → observe (log only)
+    ├─ ≥ 30 pts  → throttle
+    ├─ ≥ 80 pts  → block 1h
+    └─ ≥ 100 pts → blacklist 24h
+            │
+            ▼
+    BanIP → ipset add defensia-bans <IP>
+            │  Falls back to iptables -I INPUT -s <IP> -j DROP
+            │  ipset: 65K+ IPs  ·  iptables fallback: 500 (FIFO rotation)
+            │
+            ├──► POST /api/v1/agent/bans → dashboard + propagates to all servers
+            │
+            └──► WebSocket receives ban.created from other servers → BanIP
 ```
 
-The agent never bans reserved IPs (`127.x`, `10.x`, `192.168.x`), your own server's IPs, or the Defensia API endpoint — even if the backend somehow sends a bad rule.
+The agent never bans reserved IPs (`127.x`, `10.x`, `192.168.x`), your own server's IPs, or the Defensia API endpoint — even if the backend somehow sends a bad rule. Bans use `ipset` when available (65K+ capacity); without it, falls back to iptables with automatic FIFO rotation at 500 rules.
 
 ---
 
