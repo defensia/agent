@@ -90,6 +90,9 @@ type HeartbeatRequest struct {
 	DockerVersion     string             `json:"docker_version,omitempty"`
 	DockerContainers  []DockerContainer  `json:"docker_containers,omitempty"`
 	AuthWatcherMethod string             `json:"auth_watcher_method,omitempty"`
+	FirewallMode      string             `json:"firewall_mode,omitempty"`
+	BanCapacity       int                `json:"ban_capacity,omitempty"`
+	ActiveBans        int                `json:"active_bans,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.

@@ -27,7 +27,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.29"
+var version = "0.9.33"
 
 var (
 	monitorConfigMu sync.RWMutex
@@ -147,6 +147,9 @@ func runAgent() {
 			log.Printf("[main] warning: could not resolve API host %s: %v", host, err)
 		}
 	}
+
+	// Initialize firewall backend (ipset or iptables with FIFO rotation)
+	firewall.Init()
 
 	// Initialize GeoIP lookup
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
@@ -371,6 +374,8 @@ func runAgent() {
 			// Refresh Docker info (containers can start/stop)
 			dockerVersion, dockerContainers = collectDockerInfo()
 
+			fwStatus := firewall.FirewallStatus()
+
 			hbReq := api.HeartbeatRequest{
 				Status:           "online",
 				Version:          version,
@@ -398,6 +403,9 @@ func runAgent() {
 				DockerVersion:     dockerVersion,
 				DockerContainers:  dockerContainers,
 				AuthWatcherMethod: w.Method,
+				FirewallMode:      fwStatus.Mode,
+				BanCapacity:       fwStatus.Capacity,
+				ActiveBans:        fwStatus.ActiveBans,
 			}
 
 			resp, err := apiClient.Heartbeat(hbReq)
