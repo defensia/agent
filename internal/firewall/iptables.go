@@ -138,6 +138,7 @@ func populateBanSetFromIPSet() {
 }
 
 // populateBanSetFromIPTables reads current iptables DROP rules into banSet/banOrder.
+// If there are more bans than maxBans, trims the oldest to stay within capacity.
 func populateBanSetFromIPTables() {
 	rules, err := listRulesLocked()
 	if err != nil {
@@ -153,7 +154,23 @@ func populateBanSetFromIPTables() {
 			}
 		}
 	}
-	log.Printf("[firewall] loaded %d existing bans from iptables", len(banSet))
+
+	loaded := len(banSet)
+	log.Printf("[firewall] loaded %d existing bans from iptables", loaded)
+
+	// Trim to capacity: remove oldest bans (first in FIFO) to stay within maxBans.
+	// The newest bans (most recent threats) are kept.
+	if loaded > maxBans {
+		excess := loaded - maxBans
+		log.Printf("[firewall] trimming %d oldest bans to fit within %d capacity", excess, maxBans)
+		for i := 0; i < excess && len(banOrder) > 0; i++ {
+			evicted := banOrder[0]
+			banOrder = banOrder[1:]
+			delete(banSet, evicted)
+			exec.Command("iptables", "-D", "INPUT", "-s", evicted, "-j", "DROP").Run()
+		}
+		log.Printf("[firewall] trimmed to %d bans", len(banSet))
+	}
 }
 
 // FirewallStatus returns the current firewall backend status.
