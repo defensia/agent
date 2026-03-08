@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.23-brightgreen)](https://github.com/defensia/agent/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.34-brightgreen)](https://github.com/defensia/agent/releases)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 
 **Your server is being attacked right now. You just don't know it.**
@@ -58,23 +58,19 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 
 **Web Application Firewall (WAF)** — 15 OWASP attack types across Nginx/Apache logs:
 
-| Attack type | Mode |
-|-------------|------|
-| SQL injection | Instant ban |
-| XSS attempt | Instant ban |
-| Path traversal | Instant ban |
-| RCE attempt (incl. Log4Shell) | Instant ban |
-| Web shell access | Instant ban |
-| SSRF attempt | Instant ban |
-| ShellShock (CVE-2014-6271) | Instant ban |
-| `.env` / config probing | Instant ban |
-| Header injection | Instant ban |
-| Generic web exploits | Instant ban |
-| WordPress brute force | Threshold (10 req / 2 min) |
-| xmlrpc abuse | Threshold (5 req / 1 min) |
-| Scanner bots | Threshold (5 req / 5 min) |
-| 404 flood | Threshold (30 req / 5 min) |
-| Known scanner User-Agents (sqlmap, nikto, nmap...) | Instant ban |
+| Attack type | Default score | Mode |
+|-------------|:---:|------|
+| RCE / Web shell / Shellshock | +50 | Score-based |
+| Scanner User-Agent (sqlmap, nikto, nmap...) | +50 | Score-based |
+| SQL injection / SSRF / Web exploit | +40 | Score-based |
+| Honeypot trap | +40 | Score-based |
+| Path traversal / Header injection | +30 | Score-based |
+| WordPress brute force | +30 | Threshold (10 req / 2 min) |
+| XSS / `.env` probe / XMLRPC | +25 | Score-based |
+| Config probing / Scanner pattern | +20 | Score-based |
+| 404 flood | +15 | Threshold (30 req / 5 min) |
+
+**Bot Scoring Engine** — each detection adds points to a per-IP score. Scores decay at 5 pts/min when idle. Thresholds: observe (30) → throttle (60) → block/1h (80) → blacklist/24h (100+). Score weights are configurable per server from the dashboard.
 
 **Docker-aware** — auto-detects web servers inside Docker containers, reads logs via bind mounts, volumes, or container stdout
 
@@ -99,6 +95,7 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --uninstall
 **Supported systems:** Ubuntu 20+, Debian 11+, CentOS 7+, RHEL 8+, Amazon Linux 2023
 
 **Requirements:** `iptables`, `systemd` (or upstart/sysvinit), root access
+**Recommended:** `ipset` (auto-detected — increases ban capacity from 500 to 65,000+)
 
 ---
 
@@ -116,7 +113,7 @@ Watcher goroutines
     │  Detect brute force, SQLi, XSS, SSRF, path traversal, web shells...
     │  Instant-ban or threshold (configurable per type from dashboard)
     ▼
-BanIP → iptables -I INPUT 1 -s <IP> -j DROP
+BanIP → ipset add defensia-bans <IP>  (or iptables -I INPUT -s <IP> -j DROP)
     │
     ├──► POST /api/v1/agent/bans → dashboard + propagates to all your servers
     │
@@ -134,8 +131,9 @@ Each attack type can be independently configured from the dashboard (Server → 
 - **Enable/disable types** — disable rules irrelevant to your stack (e.g. `wp_bruteforce` on a non-WordPress server)
 - **Detect-only mode** — record events without banning. Useful for audit-only policies or testing before enforcement
 - **Custom thresholds** — override defaults for `wp_bruteforce`, `xmlrpc_abuse`, `scanner_detected`, `404_flood`
+- **Custom score weights** *(v0.9.34+)* — adjust points per detection type. E.g. set `404_flood` to 0 to ignore in scoring, or increase `sql_injection` to 80 for instant blocking on first detection
 
-`null` WAF config → all 15 types active, default thresholds (fully backward compatible).
+`null` WAF config → all 15 types active, default thresholds and score weights (fully backward compatible).
 
 ---
 
@@ -230,6 +228,17 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.34 | Configurable score weights per server via WAF config from dashboard |
+| v0.9.33 | ipset firewall backend (65K+ ban capacity) with iptables FIFO fallback (500 bans, auto-rotation); startup trim for existing rules exceeding capacity |
+| v0.9.32 | Malware detection expansion: cryptominers, rootkits, web shells (60+ signatures) |
+| v0.9.31 | Bot scoring engine: per-IP cumulative scoring with decay, 4 action levels (observe/throttle/block/blacklist), category classification |
+| v0.9.30 | File integrity monitoring, port scan detection, SYN flood monitoring |
+| v0.9.29 | Fix: auto-update download URL constructed from target_version (prevents update loop) |
+| v0.9.28 | Honeypot trap detection (50+ decoy endpoints) |
+| v0.9.27 | Security scanner: 30+ hardening checks (SSH, web server, file permissions, CVEs) |
+| v0.9.26 | Auto-remediation: agent can fix 12 security findings on demand from dashboard |
+| v0.9.25 | Timed bans via iptables with auto-expiry; ban duration from WAF score action |
+| v0.9.24 | CloudLinux/cPanel: cPHulk SQLite polling, journald fallback, extended SSH regex |
 | v0.9.23 | Fix: nginx global `access_log` with `server_name` in server blocks now correctly associates domains with log paths |
 | v0.9.22 | Improved Apache detection for CentOS/RHEL: ServerRoot resolution, symlink following, `apachectl -S` discovery, well-known RHEL paths fallback |
 | v0.9.21 | Fix: web container detection matches container port (`->80/tcp`) not host port (`:80->`) |
