@@ -27,7 +27,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.33"
+var version = "0.9.34"
 
 var (
 	monitorConfigMu sync.RWMutex
@@ -494,6 +494,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				EnabledTypes:    sync.Config.WAFConfig.EnabledTypes,
 				DetectOnlyTypes: sync.Config.WAFConfig.DetectOnlyTypes,
 				Thresholds:      sync.Config.WAFConfig.Thresholds,
+				ScorePoints:     sync.Config.WAFConfig.ScorePoints,
 			})
 		} else {
 			webW.UpdateWAFConfig(nil)

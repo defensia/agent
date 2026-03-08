@@ -57,7 +57,8 @@ type WebWatcher struct {
 	// WAF config from panel sync (nil = use defaults)
 	wafEnabled    map[string]bool
 	wafDetectOnly map[string]bool
-	wafThresholds map[string]int
+	wafThresholds   map[string]int
+	wafScorePoints  map[string]int
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
@@ -1694,7 +1695,13 @@ func (w *WebWatcher) handleDetection(ip, eventType string, whitelisted bool, log
 	detectOnly := w.isDetectOnly(eventType)
 
 	// Get score points for this detection type
-	points := scorePoints[eventType]
+	points := 0
+	if w.wafScorePoints != nil {
+		points = w.wafScorePoints[eventType]
+	}
+	if points == 0 {
+		points = scorePoints[eventType]
+	}
 	if points == 0 {
 		points = 20 // default fallback
 	}
@@ -1777,6 +1784,7 @@ type WAFConfig struct {
 	EnabledTypes    []string       `json:"enabled_types"`
 	DetectOnlyTypes []string       `json:"detect_only_types"`
 	Thresholds      map[string]int `json:"thresholds"`
+	ScorePoints     map[string]int `json:"score_points"`
 }
 
 // UpdateWAFConfig applies WAF configuration from the panel.
@@ -1789,6 +1797,7 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		w.wafEnabled = nil
 		w.wafDetectOnly = nil
 		w.wafThresholds = nil
+		w.wafScorePoints = nil
 		return
 	}
 
@@ -1816,6 +1825,12 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		w.wafThresholds = cfg.Thresholds
 	} else {
 		w.wafThresholds = nil
+	}
+
+	if len(cfg.ScorePoints) > 0 {
+		w.wafScorePoints = cfg.ScorePoints
+	} else {
+		w.wafScorePoints = nil
 	}
 }
 

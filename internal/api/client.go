@@ -150,6 +150,7 @@ type WAFConfig struct {
 	EnabledTypes    []string       `json:"enabled_types"`
 	DetectOnlyTypes []string       `json:"detect_only_types"`
 	Thresholds      map[string]int `json:"thresholds"`
+	ScorePoints     map[string]int `json:"score_points"`
 }
 
 type Rule struct {
