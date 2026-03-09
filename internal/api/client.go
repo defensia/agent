@@ -117,12 +117,21 @@ type AgentUpdateInfo struct {
 	DownloadBaseURL string `json:"download_base_url"`
 }
 
+// WafRule is a single dynamic WAF detection pattern from the panel.
+type WafRule struct {
+	ID       int64  `json:"id"`
+	Category string `json:"category"` // event type: sql_injection, path_traversal, etc.
+	Pattern  string `json:"pattern"`
+	Target   string `json:"target"` // "uri", "ua", "referer", "honeypot"
+}
+
 // SyncResponse is the initial state fetched at startup.
 type SyncResponse struct {
 	Config      SyncConfig       `json:"config"`
 	Rules       []Rule           `json:"rules"`
 	Bans        []Ban            `json:"bans"`
 	Whitelists  []WhitelistEntry `json:"whitelists"`
+	WafRules    []WafRule        `json:"waf_rules,omitempty"`
 	AgentUpdate *AgentUpdateInfo `json:"agent_update,omitempty"`
 }
 

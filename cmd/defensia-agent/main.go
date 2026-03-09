@@ -251,6 +251,8 @@ func runAgent() {
 				log.Printf("[api] failed to report ban: %v", err)
 			}
 		})
+		// Restore dynamic WAF rules from disk cache (populated on previous sync)
+		webW.LoadWAFRulesCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
@@ -498,6 +500,19 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			})
 		} else {
 			webW.UpdateWAFConfig(nil)
+		}
+		// Apply dynamic WAF rules from panel
+		if len(sync.WafRules) > 0 {
+			entries := make([]watcher.WafRuleEntry, len(sync.WafRules))
+			for i, r := range sync.WafRules {
+				entries[i] = watcher.WafRuleEntry{
+					ID:       r.ID,
+					Category: r.Category,
+					Pattern:  r.Pattern,
+					Target:   r.Target,
+				}
+			}
+			webW.UpdateWAFRules(entries)
 		}
 	}
 
