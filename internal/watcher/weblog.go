@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +24,24 @@ type WafRuleEntry struct {
 	ID       int64  `json:"id"`
 	Category string `json:"category"`
 	Pattern  string `json:"pattern"`
-	Target   string `json:"target"` // "uri", "ua", "referer", "honeypot"
+	Target   string `json:"target"`   // "uri", "ua", "referer", "honeypot"
+	IsRegex  bool   `json:"is_regex"` // true = use compiled regexp, false = strings.Contains
+}
+
+// compiledWafRule is a ready-to-match rule — either a pre-compiled regex or a literal string.
+type compiledWafRule struct {
+	EventType string
+	Literal   string          // used when IsRegex=false
+	Compiled  *regexp.Regexp  // used when IsRegex=true (nil for literals)
+	IsRegex   bool
+}
+
+// matches reports whether this rule matches the given (lowercased) input string.
+func (r *compiledWafRule) matches(s string) bool {
+	if r.IsRegex {
+		return r.Compiled.MatchString(s)
+	}
+	return strings.Contains(s, r.Literal)
 }
 
 // EventFunc is called when a suspicious event is detected (may or may not result in a ban).
@@ -70,9 +88,10 @@ type WebWatcher struct {
 	wafScorePoints  map[string]int
 
 	// Dynamic WAF rules from panel (nil = use hardcoded defaults)
-	wafDynURIRules  []dynPatternGroup // replaces instantBanPatterns for URI
-	wafDynUARules   []string          // replaces scannerAgents for UA
-	wafDynHoneypots []string          // replaces honeypotPaths
+	// Each compiledWafRule is a single pattern (literal or compiled regex).
+	wafDynURIRules  []compiledWafRule // replaces instantBanPatterns for URI
+	wafDynUARules   []compiledWafRule // replaces scannerAgents for UA
+	wafDynHoneypots []string          // replaces honeypotPaths (always literals)
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
@@ -1570,32 +1589,38 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
-	// ── Instant-detection: URI patterns ──
-	for _, rule := range w.getURIPatterns() {
+	// ── Instant-detection: URI patterns (literal and regex) ──
+	for _, rule := range w.getURIRules() {
 		if !w.isTypeEnabled(rule.EventType) {
 			continue
 		}
-		for _, pat := range rule.Patterns {
-			if strings.Contains(uriLower, pat) {
-				w.handleDetection(ip, rule.EventType, whitelisted, logPath, line, map[string]string{
-					"uri":        entry.uri,
-					"method":     entry.method,
-					"user_agent": entry.userAgent,
-					"pattern":    pat,
-				})
-				return
+		if rule.matches(uriLower) {
+			pat := rule.Literal
+			if rule.IsRegex {
+				pat = rule.Compiled.String()
 			}
+			w.handleDetection(ip, rule.EventType, whitelisted, logPath, line, map[string]string{
+				"uri":        entry.uri,
+				"method":     entry.method,
+				"user_agent": entry.userAgent,
+				"pattern":    pat,
+			})
+			return
 		}
 	}
 
-	// ── Detection: known scanner user-agents ──
+	// ── Detection: known scanner user-agents (literal and regex) ──
 	if w.isTypeEnabled("scanner_detected") {
-		for _, agent := range w.getUAPatterns() {
-			if strings.Contains(uaLower, agent) {
+		for _, rule := range w.getUARules() {
+			if rule.matches(uaLower) {
+				scanner := rule.Literal
+				if rule.IsRegex {
+					scanner = rule.Compiled.String()
+				}
 				w.handleDetection(ip, "scanner_ua", whitelisted, logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
-					"scanner":    agent,
+					"scanner":    scanner,
 				})
 				return
 			}
@@ -1793,71 +1818,70 @@ func (w *WebWatcher) checkThresholdScored(ip string, rule thresholdRule, now tim
 
 // ── Dynamic WAF Rules ────────────────────────────────────────────────
 
-// dynPatternGroup groups patterns by event type (mirrors instantBanPatterns structure).
-type dynPatternGroup struct {
-	Name      string   `json:"name"`
-	Patterns  []string `json:"patterns"`
-	EventType string   `json:"event_type"`
-}
-
 const wafRulesCachePath = "/etc/defensia/waf_rules.json"
 
-// dynWafRulesCache is the on-disk format for persisting rules across restarts.
-type dynWafRulesCache struct {
-	URIRules  []dynPatternGroup `json:"uri_rules"`
-	UARules   []string          `json:"ua_rules"`
-	Honeypots []string          `json:"honeypots"`
-}
-
-// UpdateWAFRules applies dynamic WAF rules received from the panel sync.
-// When rules is empty, falls back to hardcoded defaults.
-// Persists the rule set to disk so it survives agent restarts without panel connectivity.
-func (w *WebWatcher) UpdateWAFRules(rules []WafRuleEntry) {
-	if len(rules) == 0 {
-		return // keep existing dynamic rules (or hardcoded defaults if none loaded yet)
-	}
-
-	// Group rules by target
-	uriMap := make(map[string]*dynPatternGroup)
-	var uaPatterns []string
-	var honeypots []string
-
-	for _, r := range rules {
+// compileRules converts WafRuleEntry slices into ready-to-match compiledWafRule slices.
+// Invalid regex patterns are silently skipped (logged).
+func compileRules(entries []WafRuleEntry) (uriRules, uaRules []compiledWafRule, honeypots []string) {
+	for _, r := range entries {
+		if r.Pattern == "" {
+			continue
+		}
 		switch r.Target {
 		case "uri":
-			if _, ok := uriMap[r.Category]; !ok {
-				uriMap[r.Category] = &dynPatternGroup{
-					Name:      r.Category,
-					EventType: r.Category,
-				}
+			if cr, ok := buildCompiledRule(r); ok {
+				uriRules = append(uriRules, cr)
 			}
-			uriMap[r.Category].Patterns = append(uriMap[r.Category].Patterns, r.Pattern)
 		case "ua":
-			uaPatterns = append(uaPatterns, r.Pattern)
+			if cr, ok := buildCompiledRule(r); ok {
+				uaRules = append(uaRules, cr)
+			}
 		case "honeypot":
 			honeypots = append(honeypots, r.Pattern)
 		}
 	}
+	return
+}
 
-	var uriRules []dynPatternGroup
-	for _, g := range uriMap {
-		uriRules = append(uriRules, *g)
+func buildCompiledRule(r WafRuleEntry) (compiledWafRule, bool) {
+	if r.IsRegex {
+		// CRS patterns are case-insensitive — wrap with (?i) if not already present
+		pat := r.Pattern
+		if !strings.HasPrefix(pat, "(?i)") && !strings.HasPrefix(pat, "(?-i)") {
+			pat = "(?i)" + pat
+		}
+		compiled, err := regexp.Compile(pat)
+		if err != nil {
+			log.Printf("[webwatcher] invalid regex in WAF rule %d, skipping: %v", r.ID, err)
+			return compiledWafRule{}, false
+		}
+		return compiledWafRule{EventType: r.Category, Compiled: compiled, IsRegex: true}, true
 	}
+	return compiledWafRule{EventType: r.Category, Literal: r.Pattern, IsRegex: false}, true
+}
+
+// UpdateWAFRules applies dynamic WAF rules received from the panel sync.
+// When rules is empty, keeps existing rules (panel may send empty on error).
+// Persists the rule set to disk so it survives restarts without panel connectivity.
+func (w *WebWatcher) UpdateWAFRules(rules []WafRuleEntry) {
+	if len(rules) == 0 {
+		return
+	}
+
+	uriRules, uaRules, honeypots := compileRules(rules)
 
 	w.mu.Lock()
 	w.wafDynURIRules = uriRules
-	w.wafDynUARules = uaPatterns
+	w.wafDynUARules = uaRules
 	w.wafDynHoneypots = honeypots
 	w.mu.Unlock()
 
-	// Persist to disk cache (best-effort, do not block)
+	log.Printf("[webwatcher] dynamic WAF rules: %d URI rules, %d UA rules, %d honeypots",
+		len(uriRules), len(uaRules), len(honeypots))
+
+	// Persist raw entries to disk (best-effort, recompiled on load)
 	go func() {
-		cache := dynWafRulesCache{
-			URIRules:  uriRules,
-			UARules:   uaPatterns,
-			Honeypots: honeypots,
-		}
-		data, err := json.Marshal(cache)
+		data, err := json.Marshal(rules)
 		if err != nil {
 			return
 		}
@@ -1866,56 +1890,63 @@ func (w *WebWatcher) UpdateWAFRules(rules []WafRuleEntry) {
 		}
 		_ = os.WriteFile(wafRulesCachePath, data, 0o600)
 	}()
-
-	log.Printf("[webwatcher] dynamic WAF rules loaded: %d URI groups, %d UA patterns, %d honeypots",
-		len(uriRules), len(uaPatterns), len(honeypots))
 }
 
 // LoadWAFRulesCache restores dynamic rules from disk (called at startup before first sync).
 func (w *WebWatcher) LoadWAFRulesCache() {
 	data, err := os.ReadFile(wafRulesCachePath)
 	if err != nil {
-		return // no cache yet, use hardcoded defaults
+		return
 	}
-	var cache dynWafRulesCache
-	if err := json.Unmarshal(data, &cache); err != nil {
+	var entries []WafRuleEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
 		log.Printf("[webwatcher] waf_rules cache corrupt, ignoring: %v", err)
 		return
 	}
-	if len(cache.URIRules) == 0 && len(cache.UARules) == 0 {
+	if len(entries) == 0 {
 		return
 	}
+
+	uriRules, uaRules, honeypots := compileRules(entries)
+
 	w.mu.Lock()
-	w.wafDynURIRules = cache.URIRules
-	w.wafDynUARules = cache.UARules
-	w.wafDynHoneypots = cache.Honeypots
+	w.wafDynURIRules = uriRules
+	w.wafDynUARules = uaRules
+	w.wafDynHoneypots = honeypots
 	w.mu.Unlock()
-	log.Printf("[webwatcher] restored WAF rules from cache: %d URI groups, %d UA patterns, %d honeypots",
-		len(cache.URIRules), len(cache.UARules), len(cache.Honeypots))
+
+	log.Printf("[webwatcher] restored WAF rules from cache: %d URI, %d UA, %d honeypots",
+		len(uriRules), len(uaRules), len(honeypots))
 }
 
-// getURIPatterns returns the active URI instant-ban pattern groups.
-// Uses dynamic rules from panel when available, otherwise falls back to hardcoded.
+// getURIRules returns the active URI rules (dynamic or hardcoded fallback).
 // Must be called with w.mu held.
-func (w *WebWatcher) getURIPatterns() []dynPatternGroup {
+func (w *WebWatcher) getURIRules() []compiledWafRule {
 	if w.wafDynURIRules != nil {
 		return w.wafDynURIRules
 	}
-	// Convert hardcoded instantBanPatterns to []dynPatternGroup
-	result := make([]dynPatternGroup, len(instantBanPatterns))
-	for i, p := range instantBanPatterns {
-		result[i] = dynPatternGroup{Name: p.name, Patterns: p.patterns, EventType: p.eventType}
+	// Fallback: convert hardcoded instantBanPatterns to compiledWafRule (all literals)
+	var result []compiledWafRule
+	for _, p := range instantBanPatterns {
+		for _, pat := range p.patterns {
+			result = append(result, compiledWafRule{EventType: p.eventType, Literal: pat})
+		}
 	}
 	return result
 }
 
-// getUAPatterns returns the active scanner user-agent patterns.
+// getUARules returns the active UA rules (dynamic or hardcoded fallback).
 // Must be called with w.mu held.
-func (w *WebWatcher) getUAPatterns() []string {
+func (w *WebWatcher) getUARules() []compiledWafRule {
 	if w.wafDynUARules != nil {
 		return w.wafDynUARules
 	}
-	return scannerAgents
+	// Fallback: hardcoded scanner agents as literals
+	result := make([]compiledWafRule, len(scannerAgents))
+	for i, agent := range scannerAgents {
+		result[i] = compiledWafRule{EventType: "scanner_ua", Literal: agent}
+	}
+	return result
 }
 
 // getHoneypotPatterns returns the active honeypot paths.

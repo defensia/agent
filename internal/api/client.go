@@ -122,7 +122,8 @@ type WafRule struct {
 	ID       int64  `json:"id"`
 	Category string `json:"category"` // event type: sql_injection, path_traversal, etc.
 	Pattern  string `json:"pattern"`
-	Target   string `json:"target"` // "uri", "ua", "referer", "honeypot"
+	Target   string `json:"target"`   // "uri", "ua", "referer", "honeypot"
+	IsRegex  bool   `json:"is_regex"` // true = regexp, false = strings.Contains
 }
 
 // SyncResponse is the initial state fetched at startup.
