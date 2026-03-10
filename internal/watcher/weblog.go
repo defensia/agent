@@ -44,6 +44,34 @@ func (r *compiledWafRule) matches(s string) bool {
 	return strings.Contains(s, r.Literal)
 }
 
+// BotFingerprintEntry is the agent-side representation of a bot fingerprint from the panel.
+type BotFingerprintEntry struct {
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	UAPattern string `json:"ua_pattern"`
+	IsRegex   bool   `json:"is_regex"`
+	Category  string `json:"category"`
+	Action    string `json:"action"` // "allow" | "log" | "block"
+}
+
+// compiledBotRule is a pre-compiled bot fingerprint ready for matching.
+type compiledBotRule struct {
+	Slug     string
+	Name     string
+	Category string
+	Action   string
+	Literal  string
+	Compiled *regexp.Regexp
+	IsRegex  bool
+}
+
+func (r *compiledBotRule) matches(s string) bool {
+	if r.IsRegex {
+		return r.Compiled.MatchString(s)
+	}
+	return strings.Contains(s, r.Literal)
+}
+
 // EventFunc is called when a suspicious event is detected (may or may not result in a ban).
 // Severity must be one of: "info", "warning", "critical" (matching the API validation).
 type EventFunc func(ip, eventType, severity string, details map[string]string)
@@ -92,6 +120,9 @@ type WebWatcher struct {
 	wafDynURIRules  []compiledWafRule // replaces instantBanPatterns for URI
 	wafDynUARules   []compiledWafRule // replaces scannerAgents for UA
 	wafDynHoneypots []string          // replaces honeypotPaths (always literals)
+
+	// Bot fingerprints from panel (pre-filter gate before WAF scoring)
+	botRules []compiledBotRule
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
@@ -1574,6 +1605,43 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
+	// ── Bot fingerprint pre-filter (runs before WAF scoring) ──
+	if len(w.botRules) > 0 {
+		for i := range w.botRules {
+			rule := &w.botRules[i]
+			if !rule.matches(uaLower) {
+				continue
+			}
+			switch rule.Action {
+			case "allow":
+				return // silencioso, sin evento
+			case "log":
+				go w.onEvent(ip, "bot_crawl", "info", map[string]string{
+					"bot_slug":     rule.Slug,
+					"bot_name":     rule.Name,
+					"bot_category": rule.Category,
+					"user_agent":   entry.userAgent,
+					"uri":          entry.uri,
+				})
+				return
+			case "block":
+				go w.onEvent(ip, "bot_detected", "warning", map[string]string{
+					"bot_slug":     rule.Slug,
+					"bot_name":     rule.Name,
+					"bot_category": rule.Category,
+					"user_agent":   entry.userAgent,
+					"uri":          entry.uri,
+				})
+				if !whitelisted && !w.banned[ip] {
+					w.banned[ip] = true
+					go w.onBan(ip, "bot_blocked_"+rule.Slug, 1)
+				}
+				return
+			}
+			break
+		}
+	}
+
 	// ── Honeypot paths (checked before instant-ban, after whitelist) ──
 	if w.isTypeEnabled("honeypot_triggered") {
 		for _, hp := range w.getHoneypotPatterns() {
@@ -2044,4 +2112,89 @@ func (w *WebWatcher) wafThreshold(key string, defaultVal int) int {
 		return v
 	}
 	return defaultVal
+}
+
+const botFingerprintsCachePath = "/etc/defensia/bot_fingerprints.json"
+
+// compileBotRules converts BotFingerprintEntry slices into ready-to-match compiledBotRule slices.
+func compileBotRules(entries []BotFingerprintEntry) []compiledBotRule {
+	var result []compiledBotRule
+	for _, e := range entries {
+		if e.UAPattern == "" {
+			continue
+		}
+		cr := compiledBotRule{
+			Slug:     e.Slug,
+			Name:     e.Name,
+			Category: e.Category,
+			Action:   e.Action,
+			IsRegex:  e.IsRegex,
+		}
+		if e.IsRegex {
+			pat := e.UAPattern
+			if !strings.HasPrefix(pat, "(?i)") && !strings.HasPrefix(pat, "(?-i)") {
+				pat = "(?i)" + pat
+			}
+			compiled, err := regexp.Compile(pat)
+			if err != nil {
+				log.Printf("[webwatcher] invalid bot regex for %s, skipping: %v", e.Slug, err)
+				continue
+			}
+			cr.Compiled = compiled
+		} else {
+			cr.Literal = strings.ToLower(e.UAPattern)
+		}
+		result = append(result, cr)
+	}
+	return result
+}
+
+// UpdateBotFingerprints applies bot fingerprints received from the panel sync.
+func (w *WebWatcher) UpdateBotFingerprints(entries []BotFingerprintEntry) {
+	if len(entries) == 0 {
+		return
+	}
+
+	rules := compileBotRules(entries)
+
+	w.mu.Lock()
+	w.botRules = rules
+	w.mu.Unlock()
+
+	log.Printf("[webwatcher] bot fingerprints loaded: %d rules", len(rules))
+
+	go func() {
+		data, err := json.Marshal(entries)
+		if err != nil {
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(botFingerprintsCachePath), 0o750); err != nil {
+			return
+		}
+		_ = os.WriteFile(botFingerprintsCachePath, data, 0o600)
+	}()
+}
+
+// LoadBotFingerprintsCache restores bot fingerprints from disk (called at startup before first sync).
+func (w *WebWatcher) LoadBotFingerprintsCache() {
+	data, err := os.ReadFile(botFingerprintsCachePath)
+	if err != nil {
+		return
+	}
+	var entries []BotFingerprintEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		log.Printf("[webwatcher] bot_fingerprints cache corrupt, ignoring: %v", err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+
+	rules := compileBotRules(entries)
+
+	w.mu.Lock()
+	w.botRules = rules
+	w.mu.Unlock()
+
+	log.Printf("[webwatcher] restored bot fingerprints from cache: %d rules", len(rules))
 }

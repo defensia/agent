@@ -27,7 +27,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.34"
+var version = "0.9.35"
 
 var (
 	monitorConfigMu sync.RWMutex
@@ -253,6 +253,8 @@ func runAgent() {
 		})
 		// Restore dynamic WAF rules from disk cache (populated on previous sync)
 		webW.LoadWAFRulesCache()
+		// Restore bot fingerprints from disk cache
+		webW.LoadBotFingerprintsCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
@@ -514,6 +516,21 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			}
 			webW.UpdateWAFRules(entries)
 		}
+	}
+	// Apply bot fingerprints from panel
+	if len(sync.BotFingerprints) > 0 {
+		entries := make([]watcher.BotFingerprintEntry, len(sync.BotFingerprints))
+		for i, fp := range sync.BotFingerprints {
+			entries[i] = watcher.BotFingerprintEntry{
+				Slug:      fp.Slug,
+				Name:      fp.Name,
+				UAPattern: fp.UAPattern,
+				IsRegex:   fp.IsRegex,
+				Category:  fp.Category,
+				Action:    fp.Action,
+			}
+		}
+		webW.UpdateBotFingerprints(entries)
 	}
 
 	// Extract blocked countries from rules and update GeoIP

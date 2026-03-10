@@ -126,14 +126,25 @@ type WafRule struct {
 	IsRegex  bool   `json:"is_regex"` // true = regexp, false = strings.Contains
 }
 
+// BotFingerprint is a single bot detection entry from the panel (with resolved action).
+type BotFingerprint struct {
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	UAPattern string `json:"ua_pattern"`
+	IsRegex   bool   `json:"is_regex"`
+	Category  string `json:"category"`
+	Action    string `json:"action"` // "allow" | "log" | "block"
+}
+
 // SyncResponse is the initial state fetched at startup.
 type SyncResponse struct {
-	Config      SyncConfig       `json:"config"`
-	Rules       []Rule           `json:"rules"`
-	Bans        []Ban            `json:"bans"`
-	Whitelists  []WhitelistEntry `json:"whitelists"`
-	WafRules    []WafRule        `json:"waf_rules,omitempty"`
-	AgentUpdate *AgentUpdateInfo `json:"agent_update,omitempty"`
+	Config          SyncConfig       `json:"config"`
+	Rules           []Rule           `json:"rules"`
+	Bans            []Ban            `json:"bans"`
+	Whitelists      []WhitelistEntry `json:"whitelists"`
+	WafRules        []WafRule        `json:"waf_rules,omitempty"`
+	BotFingerprints []BotFingerprint `json:"bot_fingerprints,omitempty"`
+	AgentUpdate     *AgentUpdateInfo `json:"agent_update,omitempty"`
 }
 
 type SyncConfig struct {
