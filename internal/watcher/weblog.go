@@ -1,15 +1,13 @@
 package watcher
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"io"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"os/exec"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -18,59 +16,6 @@ import (
 	"sync"
 	"time"
 )
-
-// WafRuleEntry is the agent-side representation of a dynamic WAF rule from the panel.
-type WafRuleEntry struct {
-	ID       int64  `json:"id"`
-	Category string `json:"category"`
-	Pattern  string `json:"pattern"`
-	Target   string `json:"target"`   // "uri", "ua", "referer", "honeypot"
-	IsRegex  bool   `json:"is_regex"` // true = use compiled regexp, false = strings.Contains
-}
-
-// compiledWafRule is a ready-to-match rule — either a pre-compiled regex or a literal string.
-type compiledWafRule struct {
-	EventType string
-	Literal   string          // used when IsRegex=false
-	Compiled  *regexp.Regexp  // used when IsRegex=true (nil for literals)
-	IsRegex   bool
-}
-
-// matches reports whether this rule matches the given (lowercased) input string.
-func (r *compiledWafRule) matches(s string) bool {
-	if r.IsRegex {
-		return r.Compiled.MatchString(s)
-	}
-	return strings.Contains(s, r.Literal)
-}
-
-// BotFingerprintEntry is the agent-side representation of a bot fingerprint from the panel.
-type BotFingerprintEntry struct {
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	UAPattern string `json:"ua_pattern"`
-	IsRegex   bool   `json:"is_regex"`
-	Category  string `json:"category"`
-	Action    string `json:"action"` // "allow" | "log" | "block"
-}
-
-// compiledBotRule is a pre-compiled bot fingerprint ready for matching.
-type compiledBotRule struct {
-	Slug     string
-	Name     string
-	Category string
-	Action   string
-	Literal  string
-	Compiled *regexp.Regexp
-	IsRegex  bool
-}
-
-func (r *compiledBotRule) matches(s string) bool {
-	if r.IsRegex {
-		return r.Compiled.MatchString(s)
-	}
-	return strings.Contains(s, r.Literal)
-}
 
 // EventFunc is called when a suspicious event is detected (may or may not result in a ban).
 // Severity must be one of: "info", "warning", "critical" (matching the API validation).
@@ -89,12 +34,22 @@ type parseFileStats struct {
 	warned      bool
 }
 
+// compiledBot holds a pre-compiled bot fingerprint for fast matching.
+type compiledBot struct {
+	Slug     string
+	Name     string
+	Category string
+	Action   string // allow, log, block
+	Pattern  string // original pattern (used for plain substring match)
+	IsRegex  bool
+	Re       *regexp.Regexp // non-nil only when IsRegex is true
+}
+
 // WebWatcher tails web server access logs and bans IPs that match attack patterns.
 type WebWatcher struct {
 	logPaths  []string
 	domainMap map[string][]string // logPath → domain names
 	onBan     BanFunc
-	onBanTimed BanWithDurationFunc
 	onEvent   EventFunc
 	checkIP   CheckIPFunc
 
@@ -112,26 +67,13 @@ type WebWatcher struct {
 	// WAF config from panel sync (nil = use defaults)
 	wafEnabled    map[string]bool
 	wafDetectOnly map[string]bool
-	wafThresholds   map[string]int
-	wafScorePoints  map[string]int
+	wafThresholds map[string]int
 
-	// Dynamic WAF rules from panel (nil = use hardcoded defaults)
-	// Each compiledWafRule is a single pattern (literal or compiled regex).
-	wafDynURIRules  []compiledWafRule // replaces instantBanPatterns for URI
-	wafDynUARules   []compiledWafRule // replaces scannerAgents for UA
-	wafDynHoneypots []string          // replaces honeypotPaths (always literals)
-
-	// Bot fingerprints from panel (pre-filter gate before WAF scoring)
-	botRules []compiledBotRule
+	// Bot fingerprints from panel sync
+	botFingerprints []compiledBot
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
-
-	// Docker log reader processes
-	dockerCmds []*exec.Cmd
-
-	// Bot score tracker (score-based ban decisions)
-	scorer *BotScoreTracker
 }
 
 // ── Log path detection ──────────────────────────────────────────────
@@ -184,14 +126,7 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 5. cPanel/CloudLinux per-vhost logs in domlogs directory (always checked).
-	// Files are named by domain (e.g. domain.com, domain.com-ssl_log) with no
-	// standard extension. The main access_log is already covered below.
-	for _, info := range detectCpanelDomlogInfo() {
-		add(info)
-	}
-
-	// 6. Well-known static paths as fallback (only if nothing found from config)
+	// 5. Well-known static paths as fallback (only if nothing found from config)
 	if len(infos) == 0 {
 		knownPaths := []string{
 			"/var/log/nginx/access.log",
@@ -330,17 +265,8 @@ func parseNginxBlocks(output string) []nginxBlock {
 // nginxBlocksToLogPathInfos converts parsed nginx blocks to []LogPathInfo.
 // If mountMap is non-nil, container-internal paths are first resolved to host paths via it.
 // Only paths that exist on the host filesystem are included.
-//
-// When server blocks inherit a global access_log (i.e. they have server_name but no
-// access_log directive), their domains are associated with the global log path.
 func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) []LogPathInfo {
 	pathDomains := make(map[string]map[string]bool)
-
-	// Collect global log paths (blocks with logPaths but no serverNames)
-	// and orphan domains (blocks with serverNames but no logPaths).
-	var globalLogPaths []string
-	var orphanDomains []string
-
 	for _, block := range blocks {
 		for _, lp := range block.logPaths {
 			hostPath := lp
@@ -358,32 +284,6 @@ func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) 
 			}
 			for _, name := range block.serverNames {
 				pathDomains[hostPath][name] = true
-			}
-			// Track global log paths (from http-level, no server_name)
-			if len(block.serverNames) == 0 {
-				globalLogPaths = append(globalLogPaths, hostPath)
-			}
-		}
-		// Server blocks that inherit access_log from http level
-		if len(block.logPaths) == 0 && len(block.serverNames) > 0 {
-			orphanDomains = append(orphanDomains, block.serverNames...)
-		}
-	}
-
-	// Associate orphan domains with global log paths.
-	// This handles the common case: access_log at http{} level + server blocks with only server_name.
-	if len(orphanDomains) > 0 && len(globalLogPaths) > 0 {
-		// Dedup global log paths
-		seen := make(map[string]bool)
-		for _, gp := range globalLogPaths {
-			if !seen[gp] {
-				seen[gp] = true
-				if pathDomains[gp] == nil {
-					pathDomains[gp] = make(map[string]bool)
-				}
-				for _, d := range orphanDomains {
-					pathDomains[gp][d] = true
-				}
 			}
 		}
 	}
@@ -465,93 +365,25 @@ func detectApacheLogInfo() []LogPathInfo {
 			break
 		}
 	}
-	// cPanel installs Apache at a non-standard path not in $PATH
-	if !apacheInstalled {
-		if _, err := os.Stat("/usr/local/apache/bin/apachectl"); err == nil {
-			apacheInstalled = true
-		}
-	}
 	if !apacheInstalled {
 		return nil
 	}
 
-	// Detect ServerRoot from main config (CentOS: /etc/httpd, Debian: /etc/apache2)
-	serverRoot := ""
-	mainConfigs := []string{
-		"/etc/httpd/conf/httpd.conf",
+	configFiles := []string{
 		"/etc/apache2/apache2.conf",
+		"/etc/httpd/conf/httpd.conf",
 		"/usr/local/apache/conf/httpd.conf",
 	}
-	for _, mc := range mainConfigs {
-		if data, err := os.ReadFile(mc); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "#") {
-					continue
-				}
-				if strings.HasPrefix(strings.ToLower(trimmed), "serverroot ") {
-					parts := strings.Fields(trimmed)
-					if len(parts) >= 2 {
-						serverRoot = strings.Trim(parts[1], "\"")
-					}
-				}
-			}
-			if serverRoot != "" {
-				break
-			}
-		}
-	}
-
-	configFiles := make([]string, len(mainConfigs))
-	copy(configFiles, mainConfigs)
-
-	// Debian/Ubuntu vhost patterns
-	vhostGlobs := []string{
-		"/etc/apache2/sites-enabled/*.conf",
-		"/etc/apache2/conf-enabled/*.conf",
-		// CentOS/RHEL vhost patterns
-		"/etc/httpd/conf.d/*.conf",
-		"/etc/httpd/conf.modules.d/*.conf",
-	}
-	for _, pattern := range vhostGlobs {
-		if matches, _ := filepath.Glob(pattern); matches != nil {
-			configFiles = append(configFiles, matches...)
-		}
-	}
-
-	// Also try apachectl -S to discover included config files
-	// Include cPanel's non-standard binary path
-	for _, cmd := range []string{"apachectl", "apache2ctl", "httpd", "/usr/local/apache/bin/apachectl"} {
-		if out, err := exec.Command(cmd, "-S").CombinedOutput(); err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				line = strings.TrimSpace(line)
-				// Lines like: port 80 namevhost domain.com (/etc/httpd/conf.d/vhost.conf:1)
-				if idx := strings.Index(line, "("); idx != -1 {
-					if end := strings.Index(line[idx:], ":"); end != -1 {
-						cf := line[idx+1 : idx+end]
-						if _, err := os.Stat(cf); err == nil {
-							configFiles = append(configFiles, cf)
-						}
-					}
-				}
-			}
-			break
-		}
-	}
-
-	// Dedup config files
-	cfSeen := make(map[string]bool)
-	var uniqueConfigFiles []string
-	for _, cf := range configFiles {
-		if !cfSeen[cf] {
-			cfSeen[cf] = true
-			uniqueConfigFiles = append(uniqueConfigFiles, cf)
-		}
-	}
+	vhostFiles, _ := filepath.Glob("/etc/apache2/sites-enabled/*.conf")
+	configFiles = append(configFiles, vhostFiles...)
+	vhostFiles2, _ := filepath.Glob("/etc/httpd/conf.d/*.conf")
+	configFiles = append(configFiles, vhostFiles2...)
+	confFiles, _ := filepath.Glob("/etc/apache2/conf-enabled/*.conf")
+	configFiles = append(configFiles, confFiles...)
 
 	pathDomains := make(map[string]map[string]bool)
 
-	for _, cf := range uniqueConfigFiles {
+	for _, cf := range configFiles {
 		data, err := os.ReadFile(cf)
 		if err != nil {
 			continue
@@ -559,14 +391,6 @@ func detectApacheLogInfo() []LogPathInfo {
 		for _, vhost := range parseApacheVhosts(string(data)) {
 			for _, lp := range vhost.logPaths {
 				lp = resolveApacheEnvVars(lp)
-				// Resolve relative paths using ServerRoot (CentOS: "logs/access_log" → "/etc/httpd/logs/access_log")
-				if !filepath.IsAbs(lp) && serverRoot != "" {
-					lp = filepath.Join(serverRoot, lp)
-				}
-				// Follow symlinks (CentOS: /etc/httpd/logs → /var/log/httpd)
-				if resolved, err := filepath.EvalSymlinks(lp); err == nil {
-					lp = resolved
-				}
 				if _, err := os.Stat(lp); err != nil {
 					continue
 				}
@@ -576,24 +400,6 @@ func detectApacheLogInfo() []LogPathInfo {
 				for _, d := range vhost.serverNames {
 					pathDomains[lp][d] = true
 				}
-			}
-		}
-	}
-
-	// Well-known RHEL/CentOS log paths as extra fallback when Apache is installed
-	// but config parsing found nothing (e.g. piped logs only, or unusual config)
-	if len(pathDomains) == 0 {
-		rhelPaths := []string{
-			"/var/log/httpd/access_log",
-			"/var/log/httpd/ssl_access_log",
-			"/var/log/httpd/access.log",
-			"/var/log/apache2/access.log",
-			"/var/log/apache2/other_vhosts_access.log",
-		}
-		for _, p := range rhelPaths {
-			if _, err := os.Stat(p); err == nil {
-				pathDomains[p] = make(map[string]bool)
-				log.Printf("[webwatcher] apache: found well-known log path %s", p)
 			}
 		}
 	}
@@ -640,8 +446,8 @@ func parseApacheVhosts(content string) []apacheVhost {
 		}
 
 		if current == nil {
-			// Outside VirtualHost — capture global CustomLog (case-insensitive)
-			if strings.HasPrefix(lower, "customlog ") {
+			// Outside VirtualHost — capture global CustomLog
+			if strings.HasPrefix(trimmed, "CustomLog ") {
 				parts := strings.Fields(trimmed)
 				if len(parts) >= 2 {
 					path := strings.Trim(parts[1], "\"")
@@ -665,8 +471,7 @@ func parseApacheVhosts(content string) []apacheVhost {
 				current.serverNames = append(current.serverNames, alias)
 			}
 		}
-		// CustomLog — case-insensitive match
-		if strings.HasPrefix(lower, "customlog ") {
+		if strings.HasPrefix(trimmed, "CustomLog ") {
 			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
 				path := strings.Trim(parts[1], "\"")
@@ -681,36 +486,6 @@ func parseApacheVhosts(content string) []apacheVhost {
 
 // ── Docker container log detection ──────────────────────────────────
 
-// detectCpanelDomlogInfo scans cPanel's per-vhost access log directory.
-// cPanel stores per-domain Apache logs in /usr/local/apache/logs/domlogs/
-// as plain files named by domain (e.g. "domain.com", "domain.com-ssl_log").
-func detectCpanelDomlogInfo() []LogPathInfo {
-	domlogDir := "/usr/local/apache/logs/domlogs"
-	entries, err := os.ReadDir(domlogDir)
-	if err != nil {
-		return nil
-	}
-	var infos []LogPathInfo
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		// Skip byte-log variants (bandwidth tracking, not access logs)
-		if strings.HasSuffix(name, "-bytes_log") {
-			continue
-		}
-		p := domlogDir + "/" + name
-		// Extract domain name: strip -ssl_log suffix if present
-		domain := strings.TrimSuffix(name, "-ssl_log")
-		infos = append(infos, LogPathInfo{Path: p, Domains: []string{domain}})
-	}
-	if len(infos) > 0 {
-		log.Printf("[webwatcher] cPanel domlogs: found %d log files in %s", len(infos), domlogDir)
-	}
-	return infos
-}
-
 // detectDockerLogInfo finds web server access logs inside Docker containers.
 // For each running nginx/apache/caddy container it:
 //  1. Runs `nginx -T` inside the container and maps the log paths to host paths
@@ -722,7 +497,7 @@ func detectDockerLogInfo() []LogPathInfo {
 	}
 
 	out, err := exec.Command("docker", "ps",
-		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Ports}}",
+		"--format", "{{.ID}}|{{.Image}}|{{.Names}}",
 		"--filter", "status=running",
 	).Output()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
@@ -734,15 +509,11 @@ func detectDockerLogInfo() []LogPathInfo {
 	var result []LogPathInfo
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
 		if len(parts) < 3 {
 			continue
 		}
 		id, image, name := parts[0], strings.ToLower(parts[1]), parts[2]
-		ports := ""
-		if len(parts) >= 4 {
-			ports = parts[3]
-		}
 
 		isWeb := false
 		for _, kw := range webKeywords {
@@ -751,36 +522,11 @@ func detectDockerLogInfo() []LogPathInfo {
 				break
 			}
 		}
-
-		// Check exposed ports as heuristic — match container port (->80/tcp) not host port
-		if !isWeb && ports != "" {
-			for _, webPort := range []string{"->80/", "->443/", "->8080/", "->8000/"} {
-				if strings.Contains(ports, webPort) {
-					isWeb = true
-					break
-				}
-			}
-		}
-
-		// Check docker-compose service label
-		if !isWeb {
-			if svc := dockerComposeService(id); svc != "" {
-				svcLower := strings.ToLower(svc)
-				for _, kw := range append(webKeywords, "web", "proxy", "frontend") {
-					if strings.Contains(svcLower, kw) {
-						isWeb = true
-						break
-					}
-				}
-			}
-		}
-
 		if !isWeb {
 			continue
 		}
 
-		mounts := dockerMounts(id)
-		foundLogs := false
+		mounts := dockerBindMounts(id)
 
 		// Primary: run nginx -T inside the container to get precise paths + domain names.
 		if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
@@ -788,53 +534,30 @@ func detectDockerLogInfo() []LogPathInfo {
 				if !seen[info.Path] {
 					seen[info.Path] = true
 					result = append(result, info)
-					foundLogs = true
 					log.Printf("[webwatcher] docker: watching %s from container %s", info.Path, name)
 				}
 			}
+			continue // nginx -T worked; skip the generic fallback below
 		}
 
-		// Fallback: scan host-side mount directories for *access*.log files.
-		if !foundLogs {
-			for _, hostDir := range mounts {
-				entries, err := os.ReadDir(hostDir)
-				if err != nil {
+		// Fallback: scan host-side bind-mount directories for *access*.log files.
+		for _, hostDir := range mounts {
+			entries, err := os.ReadDir(hostDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() {
 					continue
 				}
-				for _, e := range entries {
-					if e.IsDir() {
-						continue
+				lower := strings.ToLower(e.Name())
+				if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
+					hostPath := filepath.Join(hostDir, e.Name())
+					if !seen[hostPath] {
+						seen[hostPath] = true
+						result = append(result, LogPathInfo{Path: hostPath})
+						log.Printf("[webwatcher] docker: watching %s (mount scan, container %s)", hostPath, name)
 					}
-					lower := strings.ToLower(e.Name())
-					if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
-						hostPath := filepath.Join(hostDir, e.Name())
-						if !seen[hostPath] {
-							seen[hostPath] = true
-							result = append(result, LogPathInfo{Path: hostPath})
-							foundLogs = true
-							log.Printf("[webwatcher] docker: watching %s (mount scan, container %s)", hostPath, name)
-						}
-					}
-				}
-			}
-		}
-
-		// Stdout fallback: container logs to stdout (e.g. default Docker nginx)
-		if !foundLogs {
-			if isDockerStdoutAccessLog(name) {
-				dockerPath := "docker://" + name
-				if !seen[dockerPath] {
-					// Try to get domains from nginx config inside the container
-					var domains []string
-					if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
-						blocks := parseNginxBlocks(string(nginxOut))
-						for _, b := range blocks {
-							domains = append(domains, b.serverNames...)
-						}
-					}
-					seen[dockerPath] = true
-					result = append(result, LogPathInfo{Path: dockerPath, Domains: domains})
-					log.Printf("[webwatcher] docker: watching stdout from container %s (domains: %v)", name, domains)
 				}
 			}
 		}
@@ -843,50 +566,10 @@ func detectDockerLogInfo() []LogPathInfo {
 	return result
 }
 
-// dockerComposeService returns the docker-compose service name for a container, or "".
-func dockerComposeService(containerID string) string {
+// dockerBindMounts returns a containerPath→hostPath map for a container's bind mounts.
+func dockerBindMounts(containerID string) map[string]string {
 	out, err := exec.Command("docker", "inspect",
-		"--format", "{{index .Config.Labels \"com.docker.compose.service\"}}",
-		containerID,
-	).Output()
-	if err != nil {
-		return ""
-	}
-	svc := strings.TrimSpace(string(out))
-	if svc == "<no value>" || svc == "" {
-		return ""
-	}
-	return svc
-}
-
-// isDockerStdoutAccessLog checks if a container's stdout looks like an access log (combined/common format).
-func isDockerStdoutAccessLog(containerName string) bool {
-	out, err := exec.Command("docker", "logs", "--tail", "5", containerName).CombinedOutput()
-	if err != nil || len(out) == 0 {
-		return false
-	}
-	// Check if any line looks like combined/common log format: IP - - [date] "METHOD ..."
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if len(line) < 20 {
-			continue
-		}
-		// Basic heuristic: starts with IP-like pattern and contains HTTP method
-		if (line[0] >= '0' && line[0] <= '9') &&
-			strings.Contains(line, " - ") &&
-			(strings.Contains(line, "\"GET ") || strings.Contains(line, "\"POST ") ||
-				strings.Contains(line, "\"HEAD ") || strings.Contains(line, "\"PUT ") ||
-				strings.Contains(line, "\"OPTIONS ")) {
-			return true
-		}
-	}
-	return false
-}
-
-// dockerMounts returns a containerPath→hostPath map for a container's bind mounts AND volume mounts.
-func dockerMounts(containerID string) map[string]string {
-	out, err := exec.Command("docker", "inspect",
-		"--format", "{{range .Mounts}}{{.Destination}}|{{.Source}}\n{{end}}",
+		"--format", "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Destination}}|{{.Source}}\n{{end}}{{end}}",
 		containerID,
 	).Output()
 	if err != nil {
@@ -939,15 +622,7 @@ func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc,
 		whitelist:   make(map[string]bool),
 		parseStats:  make(map[string]*parseFileStats),
 		activePaths: make(map[string]context.CancelFunc),
-		scorer:      NewBotScoreTracker(),
 	}
-}
-
-// SetBanTimed sets a callback for bans with a specific duration.
-func (w *WebWatcher) SetBanTimed(fn BanWithDurationFunc) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.onBanTimed = fn
 }
 
 // SetCheckIP sets a callback for immediate ban (e.g. geoblocking).
@@ -1028,14 +703,9 @@ func (w *WebWatcher) Run() {
 	// Hot-reload of new log files every 5 minutes
 	go w.hotReloadLoop()
 
-	// Start a goroutine per log source
+	// Start a goroutine per log file
 	for _, p := range w.logPaths {
-		if strings.HasPrefix(p, "docker://") {
-			containerName := strings.TrimPrefix(p, "docker://")
-			w.startDockerLogReader(p, containerName)
-		} else {
-			w.startTailGoroutine(p)
-		}
+		w.startTailGoroutine(p)
 	}
 
 	// Block forever
@@ -1074,71 +744,6 @@ func (w *WebWatcher) startTailGoroutine(path string) {
 				log.Printf("[webwatcher] %s error: %v — retrying in 5s", filepath.Base(path), err)
 				time.Sleep(5 * time.Second)
 			}
-		}
-	}()
-}
-
-// startDockerLogReader launches a goroutine that reads access logs from a Docker container's stdout.
-func (w *WebWatcher) startDockerLogReader(logPath, containerName string) {
-	w.mu.Lock()
-	if _, exists := w.activePaths[logPath]; exists {
-		w.mu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	w.activePaths[logPath] = cancel
-	w.mu.Unlock()
-
-	go func() {
-		defer func() {
-			w.mu.Lock()
-			delete(w.activePaths, logPath)
-			w.mu.Unlock()
-		}()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--since", time.Now().Format(time.RFC3339), "--tail", "0", containerName)
-			stdout, err := cmd.StdoutPipe()
-			if err != nil {
-				log.Printf("[webwatcher] docker logs pipe error for %s: %v — retrying in 10s", containerName, err)
-				time.Sleep(10 * time.Second)
-				continue
-			}
-
-			if err := cmd.Start(); err != nil {
-				log.Printf("[webwatcher] docker logs start error for %s: %v — retrying in 10s", containerName, err)
-				time.Sleep(10 * time.Second)
-				continue
-			}
-
-			w.mu.Lock()
-			w.dockerCmds = append(w.dockerCmds, cmd)
-			w.mu.Unlock()
-
-			log.Printf("[webwatcher] docker: reading stdout from container %s", containerName)
-
-			scanner := bufio.NewScanner(stdout)
-			scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
-			for scanner.Scan() {
-				line := scanner.Text()
-				w.mu.Lock()
-				w.processLine(logPath, line)
-				w.mu.Unlock()
-			}
-
-			_ = cmd.Wait()
-
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("[webwatcher] docker logs stream ended for %s — retrying in 5s", containerName)
-			time.Sleep(5 * time.Second)
 		}
 	}()
 }
@@ -1189,11 +794,7 @@ func (w *WebWatcher) hotReloadLoop() {
 				domainStr = " (" + strings.Join(domains, ", ") + ")"
 			}
 			log.Printf("[webwatcher] new log detected: %s%s", path, domainStr)
-			if strings.HasPrefix(path, "docker://") {
-				w.startDockerLogReader(path, strings.TrimPrefix(path, "docker://"))
-			} else {
-				w.startTailGoroutine(path)
-			}
+			w.startTailGoroutine(path)
 		}
 
 		for _, path := range toStop {
@@ -1227,11 +828,6 @@ func (w *WebWatcher) cleanupLoop() {
 			w.attempts = make(map[string][]time.Time)
 		}
 		w.mu.Unlock()
-
-		// Decay and cleanup bot scores (no new goroutine needed)
-		if w.scorer != nil {
-			w.scorer.DecayAndCleanup()
-		}
 	}
 }
 
@@ -1496,47 +1092,6 @@ var (
 	rule404Flood   = thresholdRule{"404_flood", "404_flood", 15, 5 * time.Minute}
 )
 
-// ── Honeypot paths ──────────────────────────────────────────────────
-
-// honeypotPaths are fake paths that no legitimate user visits. Any request to these
-// is a strong scanner signal with zero false positives.
-var honeypotPaths = []string{
-	"/.aws/credentials",
-	"/backup.sql",
-	"/db_backup.sql",
-	"/phpmyadmin/setup/",
-	"/.docker/config.json",
-	"/actuator/env",
-	"/api/debug",
-	"/_debug/default/view",
-	"/telescope/requests",
-	"/elmah.axd",
-	"/server-info",
-	"/cgi-bin/test",
-}
-
-// ── Score points per detection ──────────────────────────────────────
-
-var scorePoints = map[string]int{
-	"sql_injection":      40,
-	"rce_attempt":        50,
-	"web_shell":          50,
-	"ssrf_attempt":       40,
-	"path_traversal":     30,
-	"xss_attempt":        25,
-	"web_exploit":        40,
-	"shellshock":         50,
-	"header_injection":   30,
-	"scanner_ua":         50,
-	"env_probe":          25,
-	"config_probe":       20,
-	"honeypot_triggered": 40,
-	"wp_bruteforce":      30,
-	"xmlrpc_abuse":       25,
-	"scanner_detected":   20,
-	"404_flood":          15,
-}
-
 // ── Line processing ─────────────────────────────────────────────────
 
 // enrichDetails adds domain, log_file, and raw log line to event details.
@@ -1594,10 +1149,12 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if w.banned[ip] {
 		return
 	}
-	whitelisted := w.isWhitelisted(ip)
+	if w.isWhitelisted(ip) {
+		return
+	}
 
-	// Geoblocking callback (skip for whitelisted IPs)
-	if !whitelisted && w.checkIP != nil {
+	// Geoblocking callback
+	if w.checkIP != nil {
 		if reason := w.checkIP(ip); reason != "" {
 			w.banned[ip] = true
 			go w.onBan(ip, reason, 1)
@@ -1605,116 +1162,105 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
-	// ── Bot fingerprint pre-filter (runs before WAF scoring) ──
-	if len(w.botRules) > 0 {
-		for i := range w.botRules {
-			rule := &w.botRules[i]
-			if !rule.matches(uaLower) {
-				continue
-			}
-			switch rule.Action {
-			case "allow":
-				return // silencioso, sin evento
-			case "log":
-				go w.onEvent(ip, "bot_crawl", "info", map[string]string{
-					"bot_slug":     rule.Slug,
-					"bot_name":     rule.Name,
-					"bot_category": rule.Category,
-					"user_agent":   entry.userAgent,
-					"uri":          entry.uri,
-				})
-				return
-			case "block":
-				go w.onEvent(ip, "bot_detected", "warning", map[string]string{
-					"bot_slug":     rule.Slug,
-					"bot_name":     rule.Name,
-					"bot_category": rule.Category,
-					"user_agent":   entry.userAgent,
-					"uri":          entry.uri,
-				})
-				if !whitelisted && !w.banned[ip] {
-					w.banned[ip] = true
-					go w.onBan(ip, "bot_blocked_"+rule.Slug, 1)
-				}
-				return
-			}
-			break
+	// ── Instant-ban: path traversal & SQL injection ──
+	for _, rule := range instantBanPatterns {
+		if !w.isTypeEnabled(rule.eventType) {
+			continue
 		}
-	}
-
-	// ── Honeypot paths (checked before instant-ban, after whitelist) ──
-	if w.isTypeEnabled("honeypot_triggered") {
-		for _, hp := range w.getHoneypotPatterns() {
-			if strings.Contains(uriLower, hp) {
-				w.handleDetection(ip, "honeypot_triggered", whitelisted, logPath, line, map[string]string{
+		for _, pat := range rule.patterns {
+			if strings.Contains(uriLower, pat) {
+				if !w.isDetectOnly(rule.eventType) {
+					w.banned[ip] = true
+					go w.onBan(ip, rule.eventType, 1)
+				}
+				go w.onEvent(ip, rule.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"method":     entry.method,
 					"user_agent": entry.userAgent,
-					"pattern":    hp,
-				})
+					"pattern":    pat,
+				}))
 				return
 			}
 		}
 	}
 
-	// ── Instant-detection: URI patterns (literal and regex) ──
-	for _, rule := range w.getURIRules() {
-		if !w.isTypeEnabled(rule.EventType) {
-			continue
-		}
-		if rule.matches(uriLower) {
-			pat := rule.Literal
-			if rule.IsRegex {
-				pat = rule.Compiled.String()
+	// ── Instant-ban: known scanner user-agents ──
+	if w.isTypeEnabled("scanner_detected") {
+		for _, agent := range scannerAgents {
+			if strings.Contains(uaLower, agent) {
+				if !w.isDetectOnly("scanner_detected") {
+					w.banned[ip] = true
+					go w.onBan(ip, "scanner_detected", 1)
+				}
+				go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, line, map[string]string{
+					"uri":        entry.uri,
+					"user_agent": entry.userAgent,
+					"scanner":    agent,
+				}))
+				return
 			}
-			w.handleDetection(ip, rule.EventType, whitelisted, logPath, line, map[string]string{
-				"uri":        entry.uri,
-				"method":     entry.method,
-				"user_agent": entry.userAgent,
-				"pattern":    pat,
+		}
+	}
+
+	// ── Bot fingerprint matching ──
+	for i := range w.botFingerprints {
+		bot := &w.botFingerprints[i]
+		matched := false
+		if bot.IsRegex && bot.Re != nil {
+			matched = bot.Re.MatchString(entry.userAgent)
+		} else {
+			matched = strings.Contains(uaLower, strings.ToLower(bot.Pattern))
+		}
+		if matched {
+			details := w.enrichDetails(logPath, line, map[string]string{
+				"uri":          entry.uri,
+				"user_agent":   entry.userAgent,
+				"bot_slug":     bot.Slug,
+				"bot_name":     bot.Name,
+				"bot_category": bot.Category,
+				"bot_action":   bot.Action,
 			})
+			switch bot.Action {
+			case "block":
+				w.banned[ip] = true
+				go w.onBan(ip, "bot_blocked", 1)
+				go w.onEvent(ip, "bot_detected", "warning", details)
+			case "log":
+				go w.onEvent(ip, "bot_detected", "info", details)
+			// "allow" → no event, no ban
+			}
 			return
 		}
 	}
 
-	// ── Detection: known scanner user-agents (literal and regex) ──
-	if w.isTypeEnabled("scanner_detected") {
-		for _, rule := range w.getUARules() {
-			if rule.matches(uaLower) {
-				scanner := rule.Literal
-				if rule.IsRegex {
-					scanner = rule.Compiled.String()
-				}
-				w.handleDetection(ip, "scanner_ua", whitelisted, logPath, line, map[string]string{
-					"uri":        entry.uri,
-					"user_agent": entry.userAgent,
-					"scanner":    scanner,
-				})
-				return
-			}
-		}
-	}
-
-	// ── Detection: Shellshock (CVE-2014-6271) in Referer or User-Agent ──
+	// ── Instant-ban: Shellshock (CVE-2014-6271) in Referer or User-Agent ──
 	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
-		w.handleDetection(ip, "shellshock", whitelisted, logPath, line, map[string]string{
+		if !w.isDetectOnly("shellshock") {
+			w.banned[ip] = true
+			go w.onBan(ip, "shellshock", 1)
+		}
+		go w.onEvent(ip, "shellshock", "critical", w.enrichDetails(logPath, line, map[string]string{
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
 			"referer":    entry.referer,
-		})
+		}))
 		return
 	}
 
-	// ── Detection: Header injection in User-Agent or Referer ──
+	// ── Instant-ban: Header injection in User-Agent or Referer ──
 	if w.isTypeEnabled("header_injection") {
 		for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
 			if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
-				w.handleDetection(ip, "header_injection", whitelisted, logPath, line, map[string]string{
+				if !w.isDetectOnly("header_injection") {
+					w.banned[ip] = true
+					go w.onBan(ip, "header_injection", 1)
+				}
+				go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"referer":    entry.referer,
 					"pattern":    pat,
-				})
+				}))
 				return
 			}
 		}
@@ -1746,10 +1292,10 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
 		if w.isTypeEnabled("wp_bruteforce") {
 			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
-			if w.checkThresholdScored(ip, rule, now, whitelisted || w.isDetectOnly("wp_bruteforce"), logPath, line, map[string]string{
-				"uri": entry.uri,
-			}) {
-				return
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("wp_bruteforce")) {
+				go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
+					"uri": entry.uri,
+				}))
 			}
 		}
 		return
@@ -1759,10 +1305,10 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
 		if w.isTypeEnabled("xmlrpc_abuse") {
 			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
-			if w.checkThresholdScored(ip, rule, now, whitelisted || w.isDetectOnly("xmlrpc_abuse"), logPath, line, map[string]string{
-				"uri": entry.uri,
-			}) {
-				return
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("xmlrpc_abuse")) {
+				go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, line, map[string]string{
+					"uri": entry.uri,
+				}))
 			}
 		}
 		return
@@ -1772,10 +1318,10 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
 		if w.isTypeEnabled("scanner_detected") {
 			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
-			if w.checkThresholdScored(ip, rule, now, whitelisted || w.isDetectOnly("scanner_detected"), logPath, line, map[string]string{
-				"uri": entry.uri,
-			}) {
-				return
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("scanner_detected")) {
+				go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
+					"uri": entry.uri,
+				}))
 			}
 		}
 		return
@@ -1785,85 +1331,20 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	if entry.status == 404 {
 		if w.isTypeEnabled("404_flood") {
 			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
-			if w.checkThresholdScored(ip, rule, now, whitelisted || w.isDetectOnly("404_flood"), logPath, line, map[string]string{
-				"uri": entry.uri,
-			}) {
-				return
+			if w.checkThreshold(ip, rule, now, w.isDetectOnly("404_flood")) {
+				go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
+					"uri": entry.uri,
+				}))
 			}
 		}
 		return
 	}
 }
 
-// handleDetection processes a single detection through the bot scoring engine.
-// It adds score, determines the action, and either bans or just logs the event.
-// Caller must hold w.mu. The scorer has its own lock so we release w.mu briefly.
-func (w *WebWatcher) handleDetection(ip, eventType string, whitelisted bool, logPath, rawLine string, details map[string]string) {
-	detectOnly := w.isDetectOnly(eventType)
-
-	// Get score points for this detection type
-	points := 0
-	if w.wafScorePoints != nil {
-		points = w.wafScorePoints[eventType]
-	}
-	if points == 0 {
-		points = scorePoints[eventType]
-	}
-	if points == 0 {
-		points = 20 // default fallback
-	}
-
-	// Release w.mu to call scorer (which has its own lock)
-	w.mu.Unlock()
-	score, category := w.scorer.AddScore(ip, eventType, points)
-	action := ActionForScore(score)
-	w.mu.Lock()
-
-	// Re-check banned status after re-acquiring lock
-	if w.banned[ip] {
-		return
-	}
-
-	// Determine severity based on score action
-	severity := SeverityForAction(action)
-
-	// Enrich details with bot score info
-	enriched := w.enrichDetails(logPath, rawLine, details)
-	EnrichBotDetails(enriched, score, category, action)
-
-	// Map scanner_ua event type to scanner_detected for API compatibility
-	apiEventType := eventType
-	if eventType == "scanner_ua" {
-		apiEventType = "scanner_detected"
-	}
-
-	// Apply ban based on score (not individual detection)
-	if !whitelisted && !detectOnly {
-		switch action {
-		case "block":
-			w.banned[ip] = true
-			if w.onBanTimed != nil {
-				go w.onBanTimed(ip, apiEventType, 1, 1*time.Hour)
-			} else {
-				go w.onBan(ip, apiEventType, 1)
-			}
-		case "blacklist":
-			w.banned[ip] = true
-			if w.onBanTimed != nil {
-				go w.onBanTimed(ip, apiEventType, 1, 24*time.Hour)
-			} else {
-				go w.onBan(ip, apiEventType, 1)
-			}
-		}
-	}
-
-	go w.onEvent(ip, apiEventType, severity, enriched)
-}
-
-// checkThresholdScored increments the counter for a rule+IP and, when the threshold
-// is crossed, feeds the detection into the bot scoring engine for score-based banning.
+// checkThreshold increments the counter for a rule+IP and bans if threshold exceeded.
+// If detectOnly is true, tracks the attempt but does not ban.
 // Returns true if the threshold was crossed. Caller must hold w.mu.
-func (w *WebWatcher) checkThresholdScored(ip string, rule thresholdRule, now time.Time, detectOnly bool, logPath, rawLine string, details map[string]string) bool {
+func (w *WebWatcher) checkThreshold(ip string, rule thresholdRule, now time.Time, detectOnly bool) bool {
 	key := rule.key + ":" + ip
 
 	// Clean old entries
@@ -1877,153 +1358,14 @@ func (w *WebWatcher) checkThresholdScored(ip string, rule thresholdRule, now tim
 	w.attempts[key] = recent
 
 	if len(recent) >= rule.threshold {
-		// Threshold crossed — feed into scoring engine
-		w.handleDetection(ip, rule.eventType, detectOnly, logPath, rawLine, details)
+		if !detectOnly {
+			w.banned[ip] = true
+			count := len(recent)
+			go w.onBan(ip, rule.eventType, count)
+		}
 		return true
 	}
 	return false
-}
-
-// ── Dynamic WAF Rules ────────────────────────────────────────────────
-
-const wafRulesCachePath = "/etc/defensia/waf_rules.json"
-
-// compileRules converts WafRuleEntry slices into ready-to-match compiledWafRule slices.
-// Invalid regex patterns are silently skipped (logged).
-func compileRules(entries []WafRuleEntry) (uriRules, uaRules []compiledWafRule, honeypots []string) {
-	for _, r := range entries {
-		if r.Pattern == "" {
-			continue
-		}
-		switch r.Target {
-		case "uri":
-			if cr, ok := buildCompiledRule(r); ok {
-				uriRules = append(uriRules, cr)
-			}
-		case "ua":
-			if cr, ok := buildCompiledRule(r); ok {
-				uaRules = append(uaRules, cr)
-			}
-		case "honeypot":
-			honeypots = append(honeypots, r.Pattern)
-		}
-	}
-	return
-}
-
-func buildCompiledRule(r WafRuleEntry) (compiledWafRule, bool) {
-	if r.IsRegex {
-		// CRS patterns are case-insensitive — wrap with (?i) if not already present
-		pat := r.Pattern
-		if !strings.HasPrefix(pat, "(?i)") && !strings.HasPrefix(pat, "(?-i)") {
-			pat = "(?i)" + pat
-		}
-		compiled, err := regexp.Compile(pat)
-		if err != nil {
-			log.Printf("[webwatcher] invalid regex in WAF rule %d, skipping: %v", r.ID, err)
-			return compiledWafRule{}, false
-		}
-		return compiledWafRule{EventType: r.Category, Compiled: compiled, IsRegex: true}, true
-	}
-	return compiledWafRule{EventType: r.Category, Literal: r.Pattern, IsRegex: false}, true
-}
-
-// UpdateWAFRules applies dynamic WAF rules received from the panel sync.
-// When rules is empty, keeps existing rules (panel may send empty on error).
-// Persists the rule set to disk so it survives restarts without panel connectivity.
-func (w *WebWatcher) UpdateWAFRules(rules []WafRuleEntry) {
-	if len(rules) == 0 {
-		return
-	}
-
-	uriRules, uaRules, honeypots := compileRules(rules)
-
-	w.mu.Lock()
-	w.wafDynURIRules = uriRules
-	w.wafDynUARules = uaRules
-	w.wafDynHoneypots = honeypots
-	w.mu.Unlock()
-
-	log.Printf("[webwatcher] dynamic WAF rules: %d URI rules, %d UA rules, %d honeypots",
-		len(uriRules), len(uaRules), len(honeypots))
-
-	// Persist raw entries to disk (best-effort, recompiled on load)
-	go func() {
-		data, err := json.Marshal(rules)
-		if err != nil {
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(wafRulesCachePath), 0o750); err != nil {
-			return
-		}
-		_ = os.WriteFile(wafRulesCachePath, data, 0o600)
-	}()
-}
-
-// LoadWAFRulesCache restores dynamic rules from disk (called at startup before first sync).
-func (w *WebWatcher) LoadWAFRulesCache() {
-	data, err := os.ReadFile(wafRulesCachePath)
-	if err != nil {
-		return
-	}
-	var entries []WafRuleEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		log.Printf("[webwatcher] waf_rules cache corrupt, ignoring: %v", err)
-		return
-	}
-	if len(entries) == 0 {
-		return
-	}
-
-	uriRules, uaRules, honeypots := compileRules(entries)
-
-	w.mu.Lock()
-	w.wafDynURIRules = uriRules
-	w.wafDynUARules = uaRules
-	w.wafDynHoneypots = honeypots
-	w.mu.Unlock()
-
-	log.Printf("[webwatcher] restored WAF rules from cache: %d URI, %d UA, %d honeypots",
-		len(uriRules), len(uaRules), len(honeypots))
-}
-
-// getURIRules returns the active URI rules (dynamic or hardcoded fallback).
-// Must be called with w.mu held.
-func (w *WebWatcher) getURIRules() []compiledWafRule {
-	if w.wafDynURIRules != nil {
-		return w.wafDynURIRules
-	}
-	// Fallback: convert hardcoded instantBanPatterns to compiledWafRule (all literals)
-	var result []compiledWafRule
-	for _, p := range instantBanPatterns {
-		for _, pat := range p.patterns {
-			result = append(result, compiledWafRule{EventType: p.eventType, Literal: pat})
-		}
-	}
-	return result
-}
-
-// getUARules returns the active UA rules (dynamic or hardcoded fallback).
-// Must be called with w.mu held.
-func (w *WebWatcher) getUARules() []compiledWafRule {
-	if w.wafDynUARules != nil {
-		return w.wafDynUARules
-	}
-	// Fallback: hardcoded scanner agents as literals
-	result := make([]compiledWafRule, len(scannerAgents))
-	for i, agent := range scannerAgents {
-		result[i] = compiledWafRule{EventType: "scanner_ua", Literal: agent}
-	}
-	return result
-}
-
-// getHoneypotPatterns returns the active honeypot paths.
-// Must be called with w.mu held.
-func (w *WebWatcher) getHoneypotPatterns() []string {
-	if w.wafDynHoneypots != nil {
-		return w.wafDynHoneypots
-	}
-	return honeypotPaths
 }
 
 // ── WAF Configuration ───────────────────────────────────────────────
@@ -2033,7 +1375,6 @@ type WAFConfig struct {
 	EnabledTypes    []string       `json:"enabled_types"`
 	DetectOnlyTypes []string       `json:"detect_only_types"`
 	Thresholds      map[string]int `json:"thresholds"`
-	ScorePoints     map[string]int `json:"score_points"`
 }
 
 // UpdateWAFConfig applies WAF configuration from the panel.
@@ -2046,7 +1387,6 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		w.wafEnabled = nil
 		w.wafDetectOnly = nil
 		w.wafThresholds = nil
-		w.wafScorePoints = nil
 		return
 	}
 
@@ -2074,12 +1414,6 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		w.wafThresholds = cfg.Thresholds
 	} else {
 		w.wafThresholds = nil
-	}
-
-	if len(cfg.ScorePoints) > 0 {
-		w.wafScorePoints = cfg.ScorePoints
-	} else {
-		w.wafScorePoints = nil
 	}
 }
 
@@ -2114,87 +1448,43 @@ func (w *WebWatcher) wafThreshold(key string, defaultVal int) int {
 	return defaultVal
 }
 
-const botFingerprintsCachePath = "/etc/defensia/bot_fingerprints.json"
+// ── Bot Fingerprint Configuration ───────────────────────────────────
 
-// compileBotRules converts BotFingerprintEntry slices into ready-to-match compiledBotRule slices.
-func compileBotRules(entries []BotFingerprintEntry) []compiledBotRule {
-	var result []compiledBotRule
-	for _, e := range entries {
-		if e.UAPattern == "" {
-			continue
+// BotFingerprintInput matches the JSON structure from the panel sync.
+type BotFingerprintInput struct {
+	Slug     string `json:"slug"`
+	Name     string `json:"name"`
+	Pattern  string `json:"ua_pattern"`
+	IsRegex  bool   `json:"is_regex"`
+	Category string `json:"category"`
+	Action   string `json:"action"`
+}
+
+// UpdateBotFingerprints compiles and stores bot fingerprint rules from the panel.
+func (w *WebWatcher) UpdateBotFingerprints(fps []BotFingerprintInput) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	bots := make([]compiledBot, 0, len(fps))
+	for _, fp := range fps {
+		cb := compiledBot{
+			Slug:     fp.Slug,
+			Name:     fp.Name,
+			Category: fp.Category,
+			Action:   fp.Action,
+			Pattern:  fp.Pattern,
+			IsRegex:  fp.IsRegex,
 		}
-		cr := compiledBotRule{
-			Slug:     e.Slug,
-			Name:     e.Name,
-			Category: e.Category,
-			Action:   e.Action,
-			IsRegex:  e.IsRegex,
-		}
-		if e.IsRegex {
-			pat := e.UAPattern
-			if !strings.HasPrefix(pat, "(?i)") && !strings.HasPrefix(pat, "(?-i)") {
-				pat = "(?i)" + pat
-			}
-			compiled, err := regexp.Compile(pat)
+		if fp.IsRegex {
+			re, err := regexp.Compile("(?i)" + fp.Pattern)
 			if err != nil {
-				log.Printf("[webwatcher] invalid bot regex for %s, skipping: %v", e.Slug, err)
+				log.Printf("[webwatcher] invalid bot regex %q (%s): %v", fp.Pattern, fp.Slug, err)
 				continue
 			}
-			cr.Compiled = compiled
-		} else {
-			cr.Literal = strings.ToLower(e.UAPattern)
+			cb.Re = re
 		}
-		result = append(result, cr)
+		bots = append(bots, cb)
 	}
-	return result
-}
-
-// UpdateBotFingerprints applies bot fingerprints received from the panel sync.
-func (w *WebWatcher) UpdateBotFingerprints(entries []BotFingerprintEntry) {
-	if len(entries) == 0 {
-		return
-	}
-
-	rules := compileBotRules(entries)
-
-	w.mu.Lock()
-	w.botRules = rules
-	w.mu.Unlock()
-
-	log.Printf("[webwatcher] bot fingerprints loaded: %d rules", len(rules))
-
-	go func() {
-		data, err := json.Marshal(entries)
-		if err != nil {
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(botFingerprintsCachePath), 0o750); err != nil {
-			return
-		}
-		_ = os.WriteFile(botFingerprintsCachePath, data, 0o600)
-	}()
-}
-
-// LoadBotFingerprintsCache restores bot fingerprints from disk (called at startup before first sync).
-func (w *WebWatcher) LoadBotFingerprintsCache() {
-	data, err := os.ReadFile(botFingerprintsCachePath)
-	if err != nil {
-		return
-	}
-	var entries []BotFingerprintEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		log.Printf("[webwatcher] bot_fingerprints cache corrupt, ignoring: %v", err)
-		return
-	}
-	if len(entries) == 0 {
-		return
-	}
-
-	rules := compileBotRules(entries)
-
-	w.mu.Lock()
-	w.botRules = rules
-	w.mu.Unlock()
-
-	log.Printf("[webwatcher] restored bot fingerprints from cache: %d rules", len(rules))
+	w.botFingerprints = bots
+	log.Printf("[webwatcher] loaded %d bot fingerprints", len(bots))
 }

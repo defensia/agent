@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -20,21 +19,13 @@ import (
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
 	"github.com/defensia/agent/internal/monitor"
-	"github.com/defensia/agent/internal/remediation"
 	"github.com/defensia/agent/internal/scanner"
 	"github.com/defensia/agent/internal/updater"
 	"github.com/defensia/agent/internal/watcher"
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.37"
-
-var (
-	monitorConfigMu sync.RWMutex
-	monitorCfg      *api.MonitorConfig
-	whitelistIPs    []string
-	whitelistMu     sync.RWMutex
-)
+var version = "0.9.4"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -135,8 +126,14 @@ func runAgent() {
 
 	log.Printf("Starting Defensia agent v%s (agent_id=%d)", version, cfg.AgentID)
 
-	// Remove any leftover staging files from a previous interrupted update/rollback.
-	updater.CleanupStagingFiles()
+	// Deploy recovery script for systemd ExecStartPre (self-heals corrupted binaries)
+	updater.DeployRecoveryScript()
+
+	// Check if the recovery script restored the binary before we started
+	updater.CheckRecoveryMarker(version, reportUpdateEvent)
+
+	// Self-recovery: detect crash loops after a bad update and auto-rollback
+	updater.CheckStartupHealth(version, reportUpdateEvent)
 
 	// Protect the API server IP from being banned (would cut off agent comms)
 	if u, err := url.Parse(cfg.ServerURL); err == nil {
@@ -147,9 +144,6 @@ func runAgent() {
 			log.Printf("[main] warning: could not resolve API host %s: %v", host, err)
 		}
 	}
-
-	// Initialize firewall backend (ipset or iptables with FIFO rotation)
-	firewall.Init()
 
 	// Initialize GeoIP lookup
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
@@ -192,6 +186,7 @@ func runAgent() {
 			webLogPaths[i] = info.Path
 		}
 		monitoredLogPaths = webLogPaths
+		// Collect unique domains from all log files
 		domainSet := make(map[string]bool)
 		for _, domains := range domainMap {
 			for _, d := range domains {
@@ -202,7 +197,7 @@ func runAgent() {
 			monitoredDomains = append(monitoredDomains, d)
 		}
 		sort.Strings(monitoredDomains)
-		log.Printf("[webwatcher] detected %d access log(s), %d domain(s)", len(webLogPaths), len(monitoredDomains))
+		log.Printf("[webwatcher] detected %d access log(s)", len(webLogPaths))
 		webW = watcher.NewWebWatcher(
 			webLogPaths,
 			domainMap,
@@ -236,25 +231,6 @@ func runAgent() {
 			}
 			return ""
 		})
-		webW.SetBanTimed(func(ip, reason string, count int, duration time.Duration) {
-			log.Printf("[webwatcher] banning %s: %s (count=%d, duration=%s)", ip, reason, count, duration)
-			if err := firewall.BanIP(ip); err != nil {
-				log.Printf("[firewall] error: %v", err)
-			}
-			expiresAt := time.Now().UTC().Add(duration).Format(time.RFC3339)
-			if err := apiClient.ReportBan(api.BanRequest{
-				IPAddress: ip,
-				Reason:    reason,
-				BanCount:  count,
-				ExpiresAt: &expiresAt,
-			}); err != nil {
-				log.Printf("[api] failed to report ban: %v", err)
-			}
-		})
-		// Restore dynamic WAF rules from disk cache (populated on previous sync)
-		webW.LoadWAFRulesCache()
-		// Restore bot fingerprints from disk cache
-		webW.LoadBotFingerprintsCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
@@ -343,10 +319,6 @@ func runAgent() {
 					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 				}
 			},
-			OnRemediationRequested: func(p ws.RemediationRequestedPayload) {
-				log.Printf("[reverb] remediation.requested: job_id=%d check_id=%s", p.JobID, p.CheckID)
-				go runRemediation(apiClient, p.JobID, p.CheckID)
-			},
 		},
 	)
 	go wsClient.Run()
@@ -355,12 +327,6 @@ func runAgent() {
 	wsName, wsVersion := detectWebServerInfo()
 	if wsName != "" {
 		log.Printf("[webserver] detected %s %s", wsName, wsVersion)
-	}
-
-	// Detect Docker info at startup
-	dockerVersion, dockerContainers := collectDockerInfo()
-	if dockerVersion != "" {
-		log.Printf("[docker] detected Docker %s with %d container(s)", dockerVersion, len(dockerContainers))
 	}
 
 	// Metrics collector
@@ -375,19 +341,16 @@ func runAgent() {
 			zReport := monitor.ScanZombies()
 			sysMetrics := metricsCollector.Collect()
 
-			// Refresh Docker info (containers can start/stop)
-			dockerVersion, dockerContainers = collectDockerInfo()
-
-			fwStatus := firewall.FirewallStatus()
-
 			hbReq := api.HeartbeatRequest{
-				Status:           "online",
-				Version:          version,
-				Timestamp:        time.Now().UTC().Format(time.RFC3339),
-				IPAddress:        detectOutboundIP(),
-				ZombieCount:      zReport.Count,
-				WebServer:        wsName,
-				WebServerVersion: wsVersion,
+				Status:            "online",
+				Version:           version,
+				Timestamp:         time.Now().UTC().Format(time.RFC3339),
+				IPAddress:         detectOutboundIP(),
+				ZombieCount:       zReport.Count,
+				WebServer:         wsName,
+				WebServerVersion:  wsVersion,
+				MonitoredDomains:  monitoredDomains,
+				MonitoredLogPaths: monitoredLogPaths,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -402,14 +365,6 @@ func runAgent() {
 					NetBytesIn:    sysMetrics.NetBytesIn,
 					NetBytesOut:   sysMetrics.NetBytesOut,
 				},
-				MonitoredDomains:  monitoredDomains,
-				MonitoredLogPaths: monitoredLogPaths,
-				DockerVersion:     dockerVersion,
-				DockerContainers:  dockerContainers,
-				AuthWatcherMethod: w.Method,
-				FirewallMode:      fwStatus.Mode,
-				BanCapacity:       fwStatus.Capacity,
-				ActiveBans:        fwStatus.ActiveBans,
 			}
 
 			resp, err := apiClient.Heartbeat(hbReq)
@@ -427,11 +382,6 @@ func runAgent() {
 
 	// Zombie process monitor (check every 60s, report events when threshold exceeded)
 	go runZombieMonitor(apiClient)
-
-	// Security monitors (configurable per-server via panel)
-	go runPortScanMonitor(apiClient)
-	go runFloodMonitor(apiClient)
-	go runIntegrityMonitor(apiClient)
 
 	// Fallback sync ticker (every 5min, in case WS misses something)
 	go func() {
@@ -477,60 +427,8 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	w.UpdateWhitelist(wlIPs, wlCIDRs)
-
-	// Store whitelist IPs for monitor exclusions
-	whitelistMu.Lock()
-	whitelistIPs = wlIPs
-	whitelistMu.Unlock()
-
-	// Store monitor config for detector goroutines
-	if sync.Config.MonitorConfig != nil {
-		monitorConfigMu.Lock()
-		monitorCfg = sync.Config.MonitorConfig
-		monitorConfigMu.Unlock()
-	}
-
 	if webW != nil {
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
-		// Apply WAF config from panel
-		if sync.Config.WAFConfig != nil {
-			webW.UpdateWAFConfig(&watcher.WAFConfig{
-				EnabledTypes:    sync.Config.WAFConfig.EnabledTypes,
-				DetectOnlyTypes: sync.Config.WAFConfig.DetectOnlyTypes,
-				Thresholds:      sync.Config.WAFConfig.Thresholds,
-				ScorePoints:     sync.Config.WAFConfig.ScorePoints,
-			})
-		} else {
-			webW.UpdateWAFConfig(nil)
-		}
-		// Apply dynamic WAF rules from panel
-		if len(sync.WafRules) > 0 {
-			entries := make([]watcher.WafRuleEntry, len(sync.WafRules))
-			for i, r := range sync.WafRules {
-				entries[i] = watcher.WafRuleEntry{
-					ID:       r.ID,
-					Category: r.Category,
-					Pattern:  r.Pattern,
-					Target:   r.Target,
-				}
-			}
-			webW.UpdateWAFRules(entries)
-		}
-		// Apply bot fingerprints from panel
-		if len(sync.BotFingerprints) > 0 {
-			entries := make([]watcher.BotFingerprintEntry, len(sync.BotFingerprints))
-			for i, fp := range sync.BotFingerprints {
-				entries[i] = watcher.BotFingerprintEntry{
-					Slug:      fp.Slug,
-					Name:      fp.Name,
-					UAPattern: fp.UAPattern,
-					IsRegex:   fp.IsRegex,
-					Category:  fp.Category,
-					Action:    fp.Action,
-				}
-			}
-			webW.UpdateBotFingerprints(entries)
-		}
 	}
 
 	// Extract blocked countries from rules and update GeoIP
@@ -575,8 +473,24 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 
-	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries",
-		len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries))
+	// Apply bot fingerprints to web watcher
+	if webW != nil && len(sync.BotFingerprints) > 0 {
+		fps := make([]watcher.BotFingerprintInput, len(sync.BotFingerprints))
+		for i, fp := range sync.BotFingerprints {
+			fps[i] = watcher.BotFingerprintInput{
+				Slug:     fp.Slug,
+				Name:     fp.Name,
+				Pattern:  fp.Pattern,
+				IsRegex:  fp.IsRegex,
+				Category: fp.Category,
+				Action:   fp.Action,
+			}
+		}
+		webW.UpdateBotFingerprints(fps)
+	}
+
+	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",
+		len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries), len(sync.BotFingerprints))
 
 	// Check for agent update from sync response
 	if sync.AgentUpdate != nil && sync.AgentUpdate.LatestVersion != "" {
@@ -668,31 +582,6 @@ func runSoftwareAudit(client *api.Client, auditID int64) {
 
 	log.Printf("[collector] audit %d complete — %d packages, %d key software items",
 		auditID, result.Summary.TotalPackages, len(result.KeySoftware))
-}
-
-// runRemediation executes an automatic fix for the given check_id and reports the result.
-func runRemediation(client *api.Client, jobID int64, checkID string) {
-	fixer, ok := remediation.Fixers[checkID]
-	if !ok {
-		log.Printf("[remediation] no fixer for check_id=%s", checkID)
-		_ = client.ReportRemediationResult(jobID, "failed", "no fixer available for "+checkID)
-		return
-	}
-
-	log.Printf("[remediation] running fixer for job_id=%d check_id=%s", jobID, checkID)
-	output, err := fixer()
-
-	status := "completed"
-	if err != nil {
-		status = "failed"
-		output = err.Error() + "\n" + output
-	}
-
-	log.Printf("[remediation] job_id=%d status=%s", jobID, status)
-
-	if err := client.ReportRemediationResult(jobID, status, output); err != nil {
-		log.Printf("[remediation] failed to report result for job_id=%d: %v", jobID, err)
-	}
 }
 
 // applyAndAckRule applies a single firewall rule and sends the ack back to the server.
@@ -873,78 +762,6 @@ func parseApacheVersion(output string) string {
 	return ""
 }
 
-// collectDockerInfo returns the Docker version and a list of running containers.
-func collectDockerInfo() (string, []api.DockerContainer) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return "", nil
-	}
-
-	// Docker version
-	var dockerVersion string
-	if out, err := exec.Command("docker", "--version").Output(); err == nil {
-		raw := string(out)
-		if idx := strings.Index(raw, "version "); idx != -1 {
-			rest := raw[idx+8:]
-			if comma := strings.Index(rest, ","); comma != -1 {
-				dockerVersion = strings.TrimSpace(rest[:comma])
-			}
-		}
-	}
-
-	// Running containers
-	out, err := exec.Command("docker", "ps",
-		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Status}}|{{.Ports}}",
-		"--filter", "status=running",
-	).Output()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		return dockerVersion, nil
-	}
-
-	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik"}
-	var containers []api.DockerContainer
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 5)
-		if len(parts) < 4 {
-			continue
-		}
-		id, image, name, status := parts[0], parts[1], parts[2], parts[3]
-		ports := ""
-		if len(parts) >= 5 {
-			ports = parts[4]
-		}
-
-		isWeb := false
-		imageLower := strings.ToLower(image)
-		for _, kw := range webKeywords {
-			if strings.Contains(imageLower, kw) {
-				isWeb = true
-				break
-			}
-		}
-		if !isWeb && ports != "" {
-			// Match container port (e.g. "->80/tcp") not host port (":80->")
-			for _, wp := range []string{"->80/", "->443/", "->8080/", "->8000/"} {
-				if strings.Contains(ports, wp) {
-					isWeb = true
-					break
-				}
-			}
-		}
-
-		containers = append(containers, api.DockerContainer{
-			ID:     id,
-			Name:   name,
-			Image:  image,
-			Status: status,
-			Ports:  ports,
-			IsWeb:  isWeb,
-		})
-	}
-
-	return dockerVersion, containers
-}
-
 // runZombieMonitor periodically scans for zombie processes and reports events when threshold is exceeded.
 func runZombieMonitor(client *api.Client) {
 	const threshold = 5 // report event when zombies exceed this
@@ -985,124 +802,3 @@ func runZombieMonitor(client *api.Client) {
 		lastReported = report.Count
 	}
 }
-
-func getMonitorSetting(name string) (enabled bool, interval time.Duration) {
-	defaults := map[string]time.Duration{
-		"port_scan":        5 * time.Second,
-		"flood":            10 * time.Second,
-		"integrity_change": 5 * time.Minute,
-	}
-
-	monitorConfigMu.RLock()
-	cfg := monitorCfg
-	monitorConfigMu.RUnlock()
-
-	defaultInterval := defaults[name]
-
-	if cfg == nil {
-		return true, defaultInterval
-	}
-
-	var setting *api.MonitorSetting
-	switch name {
-	case "port_scan":
-		setting = cfg.PortScan
-	case "flood":
-		setting = cfg.Flood
-	case "integrity_change":
-		setting = cfg.IntegrityChange
-	}
-
-	if setting == nil {
-		return true, defaultInterval
-	}
-
-	iv := defaultInterval
-	if setting.Interval > 0 {
-		iv = time.Duration(setting.Interval) * time.Second
-	}
-	return setting.Enabled, iv
-}
-
-func getWhitelistIPs() []string {
-	whitelistMu.RLock()
-	defer whitelistMu.RUnlock()
-	cp := make([]string, len(whitelistIPs))
-	copy(cp, whitelistIPs)
-	return cp
-}
-
-func reportScanResult(client *api.Client, monitorName string, result monitor.ScanResult) {
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	if len(result.Events) > 0 {
-		log.Printf("[%s] detected %d event(s)", monitorName, len(result.Events))
-		if err := client.ReportEvents(result.Events); err != nil {
-			log.Printf("[%s] failed to report events: %v", monitorName, err)
-		}
-	}
-
-	run := api.MonitorRunRequest{
-		Monitor:    monitorName,
-		Detections: len(result.Events),
-		Summary:    result.Summary,
-		RanAt:      now,
-	}
-	if err := client.ReportMonitorRun(run); err != nil {
-		log.Printf("[%s] failed to report run: %v", monitorName, err)
-	}
-}
-
-func runPortScanMonitor(client *api.Client) {
-	detector := monitor.NewPortScanDetector()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		enabled, interval := getMonitorSetting("port_scan")
-		if !enabled {
-			continue
-		}
-		ticker.Reset(interval)
-
-		detector.SetWhitelists(getWhitelistIPs())
-		result := detector.Scan()
-		reportScanResult(client, "port_scan", result)
-	}
-}
-
-func runFloodMonitor(client *api.Client) {
-	detector := monitor.NewFloodDetector()
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		enabled, interval := getMonitorSetting("flood")
-		if !enabled {
-			continue
-		}
-		ticker.Reset(interval)
-
-		detector.SetWhitelists(getWhitelistIPs())
-		result := detector.Scan()
-		reportScanResult(client, "flood", result)
-	}
-}
-
-func runIntegrityMonitor(client *api.Client) {
-	detector := monitor.NewIntegrityDetector()
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		enabled, interval := getMonitorSetting("integrity_change")
-		if !enabled {
-			continue
-		}
-		ticker.Reset(interval)
-
-		result := detector.Scan()
-		reportScanResult(client, "integrity_change", result)
-	}
-}
-

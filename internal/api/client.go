@@ -65,34 +65,18 @@ type SystemMetrics struct {
 	NetBytesOut   uint64  `json:"net_bytes_out"`
 }
 
-// DockerContainer holds info about a running Docker container.
-type DockerContainer struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Image  string `json:"image"`
-	Status string `json:"status"`
-	Ports  string `json:"ports"`
-	IsWeb  bool   `json:"is_web"`
-}
-
 // HeartbeatRequest is sent every 60s.
 type HeartbeatRequest struct {
-	Status            string             `json:"status"`
-	Version           string             `json:"version"`
-	Timestamp         string             `json:"timestamp"`
-	IPAddress         string             `json:"ip_address,omitempty"`
-	ZombieCount       int                `json:"zombie_count"`
-	WebServer         string             `json:"web_server,omitempty"`
-	WebServerVersion  string             `json:"web_server_version,omitempty"`
-	Metrics           *SystemMetrics     `json:"metrics,omitempty"`
-	MonitoredDomains  []string           `json:"monitored_domains,omitempty"`
-	MonitoredLogPaths []string           `json:"monitored_log_paths,omitempty"`
-	DockerVersion     string             `json:"docker_version,omitempty"`
-	DockerContainers  []DockerContainer  `json:"docker_containers,omitempty"`
-	AuthWatcherMethod string             `json:"auth_watcher_method,omitempty"`
-	FirewallMode      string             `json:"firewall_mode,omitempty"`
-	BanCapacity       int                `json:"ban_capacity,omitempty"`
-	ActiveBans        int                `json:"active_bans,omitempty"`
+	Status             string         `json:"status"`
+	Version            string         `json:"version"`
+	Timestamp          string         `json:"timestamp"`
+	IPAddress          string         `json:"ip_address,omitempty"`
+	ZombieCount        int            `json:"zombie_count"`
+	WebServer          string         `json:"web_server,omitempty"`
+	WebServerVersion   string         `json:"web_server_version,omitempty"`
+	Metrics            *SystemMetrics `json:"metrics,omitempty"`
+	MonitoredDomains   []string       `json:"monitored_domains,omitempty"`
+	MonitoredLogPaths  []string       `json:"monitored_log_paths,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.
@@ -117,23 +101,14 @@ type AgentUpdateInfo struct {
 	DownloadBaseURL string `json:"download_base_url"`
 }
 
-// WafRule is a single dynamic WAF detection pattern from the panel.
-type WafRule struct {
-	ID       int64  `json:"id"`
-	Category string `json:"category"` // event type: sql_injection, path_traversal, etc.
-	Pattern  string `json:"pattern"`
-	Target   string `json:"target"`   // "uri", "ua", "referer", "honeypot"
-	IsRegex  bool   `json:"is_regex"` // true = regexp, false = strings.Contains
-}
-
-// BotFingerprint is a single bot detection entry from the panel (with resolved action).
+// BotFingerprint describes a known bot pattern synced from the panel.
 type BotFingerprint struct {
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	UAPattern string `json:"ua_pattern"`
-	IsRegex   bool   `json:"is_regex"`
-	Category  string `json:"category"`
-	Action    string `json:"action"` // "allow" | "log" | "block"
+	Slug     string `json:"slug"`
+	Name     string `json:"name"`
+	Pattern  string `json:"ua_pattern"`
+	IsRegex  bool   `json:"is_regex"`
+	Category string `json:"category"`
+	Action   string `json:"action"` // allow, log, block
 }
 
 // SyncResponse is the initial state fetched at startup.
@@ -142,36 +117,14 @@ type SyncResponse struct {
 	Rules           []Rule           `json:"rules"`
 	Bans            []Ban            `json:"bans"`
 	Whitelists      []WhitelistEntry `json:"whitelists"`
-	WafRules        []WafRule        `json:"waf_rules,omitempty"`
-	BotFingerprints []BotFingerprint `json:"bot_fingerprints,omitempty"`
 	AgentUpdate     *AgentUpdateInfo `json:"agent_update,omitempty"`
+	BotFingerprints []BotFingerprint `json:"bot_fingerprints"`
 }
 
 type SyncConfig struct {
-	BlockedCountries []string       `json:"blocked_countries"`
-	WAFConfig        *WAFConfig     `json:"waf_config"`
-	MonitorConfig    *MonitorConfig `json:"monitor_config,omitempty"`
-	BFThreshold      int            `json:"bf_threshold"`
-	BFWindow         int            `json:"bf_window"`
-	BFBanDuration    *int           `json:"bf_ban_duration"`
-}
-
-type MonitorConfig struct {
-	PortScan        *MonitorSetting `json:"port_scan,omitempty"`
-	Flood           *MonitorSetting `json:"flood,omitempty"`
-	IntegrityChange *MonitorSetting `json:"integrity_change,omitempty"`
-}
-
-type MonitorSetting struct {
-	Enabled  bool `json:"enabled"`
-	Interval int  `json:"interval"`
-}
-
-type WAFConfig struct {
-	EnabledTypes    []string       `json:"enabled_types"`
-	DetectOnlyTypes []string       `json:"detect_only_types"`
-	Thresholds      map[string]int `json:"thresholds"`
-	ScorePoints     map[string]int `json:"score_points"`
+	BFThreshold   int  `json:"bf_threshold"`
+	BFWindow      int  `json:"bf_window"`
+	BFBanDuration *int `json:"bf_ban_duration"`
 }
 
 type Rule struct {
@@ -306,19 +259,6 @@ func (c *Client) ReportEvents(events []EventRequest) error {
 	return c.post("/api/v1/agent/events", c.token, map[string]any{"events": events}, nil)
 }
 
-// MonitorRunRequest reports a single monitor scan execution.
-type MonitorRunRequest struct {
-	Monitor    string            `json:"monitor"`
-	Detections int               `json:"detections"`
-	Summary    map[string]string `json:"summary"`
-	RanAt      string            `json:"ran_at"`
-}
-
-// ReportMonitorRun sends a monitor scan summary to the server.
-func (c *Client) ReportMonitorRun(run MonitorRunRequest) error {
-	return c.post("/api/v1/agent/monitor-runs", c.token, run, nil)
-}
-
 // SoftwareAuditRequest sends software audit results to the server.
 type SoftwareAuditRequest struct {
 	AuditID     int64       `json:"audit_id"`
@@ -330,15 +270,6 @@ type SoftwareAuditRequest struct {
 // SubmitSoftwareAudit sends software audit results to the server.
 func (c *Client) SubmitSoftwareAudit(req SoftwareAuditRequest) error {
 	return c.post("/api/v1/agent/software-audit-results", c.token, req, nil)
-}
-
-// ReportRemediationResult reports the outcome of a remediation job to the server.
-func (c *Client) ReportRemediationResult(jobID int64, status, output string) error {
-	return c.post("/api/v1/agent/remediation-results", c.token, map[string]any{
-		"job_id": jobID,
-		"status": status,
-		"output": output,
-	}, nil)
 }
 
 func (c *Client) post(path, token string, body, out any) error {
