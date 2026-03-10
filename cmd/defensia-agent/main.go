@@ -516,21 +516,21 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			}
 			webW.UpdateWAFRules(entries)
 		}
-	}
-	// Apply bot fingerprints from panel
-	if len(sync.BotFingerprints) > 0 {
-		entries := make([]watcher.BotFingerprintEntry, len(sync.BotFingerprints))
-		for i, fp := range sync.BotFingerprints {
-			entries[i] = watcher.BotFingerprintEntry{
-				Slug:      fp.Slug,
-				Name:      fp.Name,
-				UAPattern: fp.UAPattern,
-				IsRegex:   fp.IsRegex,
-				Category:  fp.Category,
-				Action:    fp.Action,
+		// Apply bot fingerprints from panel
+		if len(sync.BotFingerprints) > 0 {
+			entries := make([]watcher.BotFingerprintEntry, len(sync.BotFingerprints))
+			for i, fp := range sync.BotFingerprints {
+				entries[i] = watcher.BotFingerprintEntry{
+					Slug:      fp.Slug,
+					Name:      fp.Name,
+					UAPattern: fp.UAPattern,
+					IsRegex:   fp.IsRegex,
+					Category:  fp.Category,
+					Action:    fp.Action,
+				}
 			}
+			webW.UpdateBotFingerprints(entries)
 		}
-		webW.UpdateBotFingerprints(entries)
 	}
 
 	// Extract blocked countries from rules and update GeoIP
