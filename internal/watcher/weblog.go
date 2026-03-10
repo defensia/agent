@@ -1220,15 +1220,15 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				"bot_category": bot.Category,
 				"bot_action":   bot.Action,
 			})
-			switch bot.Action {
-			case "block":
+			if bot.Action == "block" {
 				w.banned[ip] = true
 				go w.onBan(ip, "bot_blocked", 1)
-				go w.onEvent(ip, "bot_detected", "warning", details)
-			case "log":
-				go w.onEvent(ip, "bot_detected", "info", details)
-			// "allow" → no event, no ban
 			}
+			severity := "info"
+			if bot.Action == "block" {
+				severity = "warning"
+			}
+			go w.onEvent(ip, "bot_detected", severity, details)
 			return
 		}
 	}
