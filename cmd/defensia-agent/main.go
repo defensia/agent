@@ -27,7 +27,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.35"
+var version = "0.9.37"
 
 var (
 	monitorConfigMu sync.RWMutex
