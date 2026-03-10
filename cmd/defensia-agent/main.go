@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.4"
+var version = "v0.9.41"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -231,6 +231,7 @@ func runAgent() {
 			}
 			return ""
 		})
+		webW.LoadBotFingerprintsCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}

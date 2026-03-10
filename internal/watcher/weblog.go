@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -1461,6 +1462,7 @@ type BotFingerprintInput struct {
 }
 
 // UpdateBotFingerprints compiles and stores bot fingerprint rules from the panel.
+// Also persists the raw inputs to /etc/defensia/bot_fingerprints.json for cache reload on restart.
 func (w *WebWatcher) UpdateBotFingerprints(fps []BotFingerprintInput) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1487,4 +1489,34 @@ func (w *WebWatcher) UpdateBotFingerprints(fps []BotFingerprintInput) {
 	}
 	w.botFingerprints = bots
 	log.Printf("[webwatcher] loaded %d bot fingerprints", len(bots))
+
+	// Persist to cache so fingerprints survive agent restarts
+	const cachePath = "/etc/defensia/bot_fingerprints.json"
+	if data, err := json.Marshal(fps); err == nil {
+		if err := os.MkdirAll("/etc/defensia", 0755); err == nil {
+			if err := os.WriteFile(cachePath, data, 0600); err != nil {
+				log.Printf("[webwatcher] failed to save bot fingerprints cache: %v", err)
+			}
+		}
+	}
+}
+
+// LoadBotFingerprintsCache loads bot fingerprints from the on-disk cache written by
+// UpdateBotFingerprints. Should be called once at startup before the first sync.
+func (w *WebWatcher) LoadBotFingerprintsCache() {
+	const cachePath = "/etc/defensia/bot_fingerprints.json"
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[webwatcher] failed to read bot fingerprints cache: %v", err)
+		}
+		return
+	}
+	var fps []BotFingerprintInput
+	if err := json.Unmarshal(data, &fps); err != nil {
+		log.Printf("[webwatcher] failed to parse bot fingerprints cache: %v", err)
+		return
+	}
+	log.Printf("[webwatcher] loaded %d bot fingerprints from cache", len(fps))
+	w.UpdateBotFingerprints(fps)
 }
