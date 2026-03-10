@@ -52,6 +52,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.BOT_TOKEN }}
           name: ${{ steps.version.outputs.VERSION }}
           body: |
             ## Defensia Agent ${{ steps.version.outputs.VERSION }}
