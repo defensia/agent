@@ -434,6 +434,15 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	w.SetMonitorMode(sync.Config.MonitorMode)
 	if webW != nil {
 		webW.SetMonitorMode(sync.Config.MonitorMode)
+
+		// Apply WAF config from panel
+		if sync.Config.WAFConfig != nil {
+			webW.UpdateWAFConfig(&watcher.WAFConfig{
+				EnabledTypes:    sync.Config.WAFConfig.EnabledTypes,
+				DetectOnlyTypes: sync.Config.WAFConfig.DetectOnlyTypes,
+				Thresholds:      sync.Config.WAFConfig.Thresholds,
+			})
+		}
 	}
 
 	// Apply detection rules from panel (SSH patterns)
