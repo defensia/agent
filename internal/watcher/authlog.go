@@ -13,14 +13,54 @@ import (
 
 const defaultLogPath = "/var/log/auth.log"
 
-// failedPattern matches SSH authentication failure lines from /var/log/auth.log
-// and /var/log/secure. Covers both password-based and key-only SSH configs:
-//   - "Failed password for root from X.X.X.X"             (password auth)
-//   - "Failed password for invalid user foo from X.X.X.X" (password auth, bad user)
-//   - "Invalid user foo from X.X.X.X"                     (key-only auth / any auth)
-var failedPattern = regexp.MustCompile(
-	`(?:Failed password for (?:invalid user )?\S+ from|Invalid user \S+ from)\s*([\d.]+)`,
-)
+// sshPattern pairs a compiled regex with the ban reason it represents.
+type sshPattern struct {
+	re     *regexp.Regexp
+	reason string
+}
+
+// sshPatterns contains all SSH detection patterns, ordered by frequency.
+// Each regex must have a capture group for the IP address.
+//
+// Auth failures (normal mode) — standard brute force indicators:
+//
+//   - "Failed password for root from X.X.X.X"
+//   - "Failed password for invalid user foo from X.X.X.X"
+//   - "Invalid user foo from X.X.X.X"
+//   - "authentication failure; ... rhost=X.X.X.X" (PAM)
+//   - "maximum authentication attempts exceeded ... from X.X.X.X"
+//   - "Received disconnect from X.X.X.X ... Auth fail"
+//   - "User X not allowed because ..."
+//   - "ROOT LOGIN REFUSED FROM X.X.X.X"
+//
+// Pre-auth scanning (ddos mode) — connection-level abuse:
+//
+//   - "Did not receive identification string from X.X.X.X"
+//   - "Bad protocol version identification ... from X.X.X.X"
+//   - "Unable to negotiate with X.X.X.X: no matching ..."
+//   - "Connection closed by X.X.X.X ... [preauth]"
+//   - "banner exchange: Connection from X.X.X.X ..."
+//   - "ssh_dispatch_run_fatal: Connection from X.X.X.X ..."
+var sshPatterns = []sshPattern{
+	// ── Auth failures (most common first) ──────────────────────────────
+	{regexp.MustCompile(`Failed \S+ for (?:invalid user )?\S+ from ([\d.]+)`), "brute_force_ssh"},
+	{regexp.MustCompile(`[iI](?:llegal|nvalid) user \S+ from ([\d.]+)`), "brute_force_ssh"},
+	{regexp.MustCompile(`pam_[a-z]+\(sshd:auth\):\s+authentication failure;.*rhost=([\d.]+)`), "brute_force_ssh"},
+	{regexp.MustCompile(`maximum authentication attempts exceeded for .+? from ([\d.]+)`), "brute_force_ssh"},
+	{regexp.MustCompile(`Received disconnect from ([\d.]+).*:\s*3:.*Auth fail`), "brute_force_ssh"},
+	{regexp.MustCompile(`User \S+ from ([\d.]+) not allowed because`), "brute_force_ssh"},
+	{regexp.MustCompile(`ROOT LOGIN REFUSED FROM ([\d.]+)`), "brute_force_ssh"},
+	{regexp.MustCompile(`refused connect from \S+ \(([\d.]+)\)`), "brute_force_ssh"},
+	{regexp.MustCompile(`Disconnecting(?: from)? (?:invalid|authenticating) user \S+ ([\d.]+).*\[preauth\]`), "brute_force_ssh"},
+
+	// ── Pre-auth scanning / DDoS ───────────────────────────────────────
+	{regexp.MustCompile(`Did not receive identification string from ([\d.]+)`), "brute_force_ssh_preauth"},
+	{regexp.MustCompile(`Bad protocol version identification '.*?' from ([\d.]+)`), "brute_force_ssh_preauth"},
+	{regexp.MustCompile(`Unable to negotiate with ([\d.]+)`), "brute_force_ssh_preauth"},
+	{regexp.MustCompile(`(?:banner exchange|ssh_dispatch_run_fatal): Connection from ([\d.]+)`), "brute_force_ssh_preauth"},
+	{regexp.MustCompile(`Connection (?:closed|reset) by ([\d.]+).*\[preauth\]`), "brute_force_ssh_preauth"},
+	{regexp.MustCompile(`Timeout before authentication for(?: connection from)? ([\d.]+)`), "brute_force_ssh_preauth"},
+}
 
 // BanFunc is called when an IP exceeds the threshold.
 type BanFunc func(ip, reason string, count int)
@@ -235,12 +275,24 @@ func (w *Watcher) tail() error {
 }
 
 func (w *Watcher) processLine(line string) {
-	matches := failedPattern.FindStringSubmatch(line)
-	if len(matches) < 2 {
+	var ip, reason string
+	for _, p := range sshPatterns {
+		m := p.re.FindStringSubmatch(line)
+		if len(m) >= 2 {
+			ip = m[1]
+			reason = p.reason
+			break
+		}
+	}
+	if ip == "" {
 		return
 	}
 
-	ip := matches[1]
+	w.recordAttempt(ip, reason)
+}
+
+// recordAttempt tracks a failed attempt for the given IP and bans when threshold is exceeded.
+func (w *Watcher) recordAttempt(ip, reason string) {
 	now := time.Now()
 
 	w.mu.Lock()
@@ -256,10 +308,10 @@ func (w *Watcher) processLine(line string) {
 
 	// Check geoblocking callback first — immediate ban
 	if w.checkIP != nil {
-		if reason := w.checkIP(ip); reason != "" {
+		if banReason := w.checkIP(ip); banReason != "" {
 			w.banned[ip] = true
 			if !w.monitorMode {
-				go w.onBan(ip, reason, 1)
+				go w.onBan(ip, banReason, 1)
 			}
 			return
 		}
@@ -280,7 +332,7 @@ func (w *Watcher) processLine(line string) {
 		w.banned[ip] = true
 		count := len(recent)
 		if !w.monitorMode {
-			go w.onBan(ip, "brute_force_ssh", count)
+			go w.onBan(ip, reason, count)
 		}
 	}
 }
