@@ -13,10 +13,10 @@ import (
 
 const defaultLogPath = "/var/log/auth.log"
 
-// sshPattern pairs a compiled regex with the ban reason it represents.
-type sshPattern struct {
-	re     *regexp.Regexp
-	reason string
+// SSHPattern pairs a compiled regex with the ban reason it represents.
+type SSHPattern struct {
+	Re     *regexp.Regexp
+	Reason string
 }
 
 // sshPatterns contains all SSH detection patterns, ordered by frequency.
@@ -41,25 +41,25 @@ type sshPattern struct {
 //   - "Connection closed by X.X.X.X ... [preauth]"
 //   - "banner exchange: Connection from X.X.X.X ..."
 //   - "ssh_dispatch_run_fatal: Connection from X.X.X.X ..."
-var sshPatterns = []sshPattern{
+var sshPatterns = []SSHPattern{
 	// ── Auth failures (most common first) ──────────────────────────────
-	{regexp.MustCompile(`Failed \S+ for (?:invalid user )?\S+ from ([\d.]+)`), "brute_force_ssh"},
-	{regexp.MustCompile(`[iI](?:llegal|nvalid) user \S+ from ([\d.]+)`), "brute_force_ssh"},
-	{regexp.MustCompile(`pam_[a-z]+\(sshd:auth\):\s+authentication failure;.*rhost=([\d.]+)`), "brute_force_ssh"},
-	{regexp.MustCompile(`maximum authentication attempts exceeded for .+? from ([\d.]+)`), "brute_force_ssh"},
-	{regexp.MustCompile(`Received disconnect from ([\d.]+).*:\s*3:.*Auth fail`), "brute_force_ssh"},
-	{regexp.MustCompile(`User \S+ from ([\d.]+) not allowed because`), "brute_force_ssh"},
-	{regexp.MustCompile(`ROOT LOGIN REFUSED FROM ([\d.]+)`), "brute_force_ssh"},
-	{regexp.MustCompile(`refused connect from \S+ \(([\d.]+)\)`), "brute_force_ssh"},
-	{regexp.MustCompile(`Disconnecting(?: from)? (?:invalid|authenticating) user \S+ ([\d.]+).*\[preauth\]`), "brute_force_ssh"},
+	{Re: regexp.MustCompile(`Failed \S+ for (?:invalid user )?\S+ from ([\d.]+)`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`[iI](?:llegal|nvalid) user \S+ from ([\d.]+)`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`pam_[a-z]+\(sshd:auth\):\s+authentication failure;.*rhost=([\d.]+)`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`maximum authentication attempts exceeded for .+? from ([\d.]+)`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`Received disconnect from ([\d.]+).*:\s*3:.*Auth fail`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`User \S+ from ([\d.]+) not allowed because`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`ROOT LOGIN REFUSED FROM ([\d.]+)`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`refused connect from \S+ \(([\d.]+)\)`), Reason: "brute_force_ssh"},
+	{Re: regexp.MustCompile(`Disconnecting(?: from)? (?:invalid|authenticating) user \S+ ([\d.]+).*\[preauth\]`), Reason: "brute_force_ssh"},
 
 	// ── Pre-auth scanning / DDoS ───────────────────────────────────────
-	{regexp.MustCompile(`Did not receive identification string from ([\d.]+)`), "brute_force_ssh_preauth"},
-	{regexp.MustCompile(`Bad protocol version identification '.*?' from ([\d.]+)`), "brute_force_ssh_preauth"},
-	{regexp.MustCompile(`Unable to negotiate with ([\d.]+)`), "brute_force_ssh_preauth"},
-	{regexp.MustCompile(`(?:banner exchange|ssh_dispatch_run_fatal): Connection from ([\d.]+)`), "brute_force_ssh_preauth"},
-	{regexp.MustCompile(`Connection (?:closed|reset) by ([\d.]+).*\[preauth\]`), "brute_force_ssh_preauth"},
-	{regexp.MustCompile(`Timeout before authentication for(?: connection from)? ([\d.]+)`), "brute_force_ssh_preauth"},
+	{Re: regexp.MustCompile(`Did not receive identification string from ([\d.]+)`), Reason: "brute_force_ssh_preauth"},
+	{Re: regexp.MustCompile(`Bad protocol version identification '.*?' from ([\d.]+)`), Reason: "brute_force_ssh_preauth"},
+	{Re: regexp.MustCompile(`Unable to negotiate with ([\d.]+)`), Reason: "brute_force_ssh_preauth"},
+	{Re: regexp.MustCompile(`(?:banner exchange|ssh_dispatch_run_fatal): Connection from ([\d.]+)`), Reason: "brute_force_ssh_preauth"},
+	{Re: regexp.MustCompile(`Connection (?:closed|reset) by ([\d.]+).*\[preauth\]`), Reason: "brute_force_ssh_preauth"},
+	{Re: regexp.MustCompile(`Timeout before authentication for(?: connection from)? ([\d.]+)`), Reason: "brute_force_ssh_preauth"},
 }
 
 // BanFunc is called when an IP exceeds the threshold.
@@ -150,6 +150,28 @@ func (w *Watcher) UpdateConfig(cfg Config) {
 	}
 
 	log.Printf("[watcher] config updated: threshold=%d window=%s", w.threshold, w.window)
+}
+
+// UpdatePatterns replaces the SSH detection patterns with rules from the panel.
+// If patterns is empty, the hardcoded defaults are kept.
+func (w *Watcher) UpdatePatterns(patterns []SSHPattern) {
+	if len(patterns) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	sshPatterns = patterns
+	log.Printf("[watcher] detection patterns updated: %d rules", len(patterns))
+}
+
+// ParsePattern compiles a regex string into an SSHPattern. Returns nil on error.
+func ParsePattern(pattern, reason string) *SSHPattern {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		log.Printf("[watcher] invalid pattern %q: %v", pattern, err)
+		return nil
+	}
+	return &SSHPattern{Re: re, Reason: reason}
 }
 
 // UpdateWhitelist replaces the whitelist with a new set of IPs/CIDRs.
@@ -277,10 +299,10 @@ func (w *Watcher) tail() error {
 func (w *Watcher) processLine(line string) {
 	var ip, reason string
 	for _, p := range sshPatterns {
-		m := p.re.FindStringSubmatch(line)
+		m := p.Re.FindStringSubmatch(line)
 		if len(m) >= 2 {
 			ip = m[1]
-			reason = p.reason
+			reason = p.Reason
 			break
 		}
 	}

@@ -111,6 +111,14 @@ type BotFingerprint struct {
 	Action   string `json:"action"` // allow, log, block
 }
 
+// DetectionRule is a log-based detection pattern synced from the panel.
+type DetectionRule struct {
+	ID      int64  `json:"id"`
+	Service string `json:"service"`
+	Pattern string `json:"pattern"`
+	Reason  string `json:"reason"`
+}
+
 // SyncResponse is the initial state fetched at startup.
 type SyncResponse struct {
 	Config          SyncConfig       `json:"config"`
@@ -118,6 +126,7 @@ type SyncResponse struct {
 	Bans            []Ban            `json:"bans"`
 	Whitelists      []WhitelistEntry `json:"whitelists"`
 	AgentUpdate     *AgentUpdateInfo `json:"agent_update,omitempty"`
+	DetectionRules  []DetectionRule  `json:"detection_rules"`
 	BotFingerprints []BotFingerprint `json:"bot_fingerprints"`
 }
 

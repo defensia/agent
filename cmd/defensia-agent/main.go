@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "v0.9.43"
+var version = "v0.9.44"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -421,6 +421,21 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	w.SetMonitorMode(sync.Config.MonitorMode)
 	if webW != nil {
 		webW.SetMonitorMode(sync.Config.MonitorMode)
+	}
+
+	// Apply detection rules from panel (SSH patterns)
+	if len(sync.DetectionRules) > 0 {
+		var patterns []watcher.SSHPattern
+		for _, dr := range sync.DetectionRules {
+			if dr.Service != "ssh" {
+				continue
+			}
+			p := watcher.ParsePattern(dr.Pattern, dr.Reason)
+			if p != nil {
+				patterns = append(patterns, *p)
+			}
+		}
+		w.UpdatePatterns(patterns)
 	}
 
 	// Apply whitelists
