@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "v0.9.41"
+var version = "v0.9.42"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -417,6 +417,12 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		Window:    time.Duration(sync.Config.BFWindow) * time.Second,
 	})
 
+	// Apply monitor mode
+	w.SetMonitorMode(sync.Config.MonitorMode)
+	if webW != nil {
+		webW.SetMonitorMode(sync.Config.MonitorMode)
+	}
+
 	// Apply whitelists
 	var wlIPs, wlCIDRs []string
 	for _, wl := range sync.Whitelists {
@@ -441,14 +447,16 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	}
 	geo.SetBlocked(blockedCountries)
 
-	// Apply bans
+	// Apply bans (skipped in monitor mode)
 	activeBanIPs := make(map[string]bool, len(sync.Bans))
 	banIPs := make([]string, 0, len(sync.Bans))
 	for _, b := range sync.Bans {
 		activeBanIPs[b.IPAddress] = true
 		banIPs = append(banIPs, b.IPAddress)
 	}
-	firewall.ApplyBans(banIPs)
+	if !sync.Config.MonitorMode {
+		firewall.ApplyBans(banIPs)
+	}
 
 	// Build set of IPs managed by user firewall rules (so cleanup doesn't remove them)
 	activeRuleIPs := make(map[string]bool)

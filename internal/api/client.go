@@ -125,6 +125,7 @@ type SyncConfig struct {
 	BFThreshold   int  `json:"bf_threshold"`
 	BFWindow      int  `json:"bf_window"`
 	BFBanDuration *int `json:"bf_ban_duration"`
+	MonitorMode   bool `json:"monitor_mode"`
 }
 
 type Rule struct {

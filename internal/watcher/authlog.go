@@ -41,13 +41,14 @@ type Watcher struct {
 	onBan   BanFunc
 	checkIP CheckIPFunc
 
-	mu        sync.Mutex
-	threshold int
-	window    time.Duration
-	attempts  map[string][]time.Time
-	banned    map[string]bool
-	whitelist map[string]bool // IPs or CIDRs that are never banned
-	wlNets    []*net.IPNet    // parsed CIDR whitelists
+	mu          sync.Mutex
+	threshold   int
+	window      time.Duration
+	attempts    map[string][]time.Time
+	banned      map[string]bool
+	whitelist   map[string]bool // IPs or CIDRs that are never banned
+	wlNets      []*net.IPNet    // parsed CIDR whitelists
+	monitorMode bool            // when true, detect but do not ban
 }
 
 // detectLogPath returns the auth log path, checking the environment variable
@@ -85,6 +86,15 @@ func (w *Watcher) SetCheckIP(fn CheckIPFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.checkIP = fn
+}
+
+// SetMonitorMode enables or disables monitor-only mode. When enabled, the
+// watcher detects attacks and records attempts but does not call onBan.
+func (w *Watcher) SetMonitorMode(enabled bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.monitorMode = enabled
+	log.Printf("[watcher] monitor mode: %v", enabled)
 }
 
 // UpdateConfig reconfigures threshold and window at runtime.
@@ -248,7 +258,9 @@ func (w *Watcher) processLine(line string) {
 	if w.checkIP != nil {
 		if reason := w.checkIP(ip); reason != "" {
 			w.banned[ip] = true
-			go w.onBan(ip, reason, 1)
+			if !w.monitorMode {
+				go w.onBan(ip, reason, 1)
+			}
 			return
 		}
 	}
@@ -267,6 +279,8 @@ func (w *Watcher) processLine(line string) {
 	if len(recent) >= w.threshold {
 		w.banned[ip] = true
 		count := len(recent)
-		go w.onBan(ip, "brute_force_ssh", count)
+		if !w.monitorMode {
+			go w.onBan(ip, "brute_force_ssh", count)
+		}
 	}
 }

@@ -69,6 +69,7 @@ type WebWatcher struct {
 	wafEnabled    map[string]bool
 	wafDetectOnly map[string]bool
 	wafThresholds map[string]int
+	monitorMode   bool // when true, all event types are detect-only
 
 	// Bot fingerprints from panel sync
 	botFingerprints []compiledBot
@@ -1428,9 +1429,21 @@ func (w *WebWatcher) isTypeEnabled(eventType string) bool {
 	return w.wafEnabled[eventType]
 }
 
+// SetMonitorMode enables or disables monitor-only mode. When enabled, all WAF
+// event types are treated as detect-only — events are recorded but no bans issued.
+func (w *WebWatcher) SetMonitorMode(enabled bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.monitorMode = enabled
+	log.Printf("[webwatcher] monitor mode: %v", enabled)
+}
+
 // isDetectOnly returns true if the type should only record an event, not ban.
 // Must be called with w.mu held.
 func (w *WebWatcher) isDetectOnly(eventType string) bool {
+	if w.monitorMode {
+		return true
+	}
 	if w.wafDetectOnly == nil {
 		return false
 	}
