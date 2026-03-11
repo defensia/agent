@@ -168,6 +168,18 @@ func runAgent() {
 		}
 	})
 
+	// Set event callback for monitor mode (report detections without banning)
+	w.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
+		log.Printf("[watcher] detected %s from %s (monitor mode)", eventType, ip)
+		apiClient.ReportEvents([]api.EventRequest{{
+			Type:       eventType,
+			Severity:   severity,
+			SourceIP:   ip,
+			Details:    details,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	})
+
 	// Set geoblocking check on watcher
 	w.SetCheckIP(func(ip string) string {
 		cc, blocked := geo.IsBlocked(ip)

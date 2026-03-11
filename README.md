@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.34-brightgreen)](https://github.com/defensia/agent/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.45-brightgreen)](https://github.com/defensia/agent/releases)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 
 **Your server is being attacked right now. You just don't know it.**
@@ -27,7 +27,10 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 |--|---------|---------|---------|
 | Real-time dashboard | ❌ | Partial | ✅ |
 | One-command install | ❌ | ❌ | ✅ |
+| SSH detection (15 patterns) | ✅ | ✅ | ✅ |
 | WAF (15 OWASP types) | ❌ | Partial | ✅ |
+| Bot management (70+ fingerprints) | ❌ | ❌ | ✅ |
+| Monitor mode (detect without blocking) | ❌ | ❌ | ✅ |
 | Network ban sharing | ❌ | ✅ | ✅ |
 | Zero configuration | ❌ | ❌ | ✅ |
 | Community hub required | ❌ | ✅ | ❌ |
@@ -54,7 +57,7 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 
 ## What it detects
 
-**SSH & brute force** — monitors `auth.log` for failed login attempts, auto-bans via iptables
+**SSH & brute force** — 15 detection patterns covering auth failures, pre-auth scanning, protocol mismatches, PAM failures, and kex negotiation drops. Patterns are synced from the dashboard and can be enabled/disabled per server.
 
 **Web Application Firewall (WAF)** — 15 OWASP attack types across Nginx/Apache logs:
 
@@ -71,6 +74,12 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 | 404 flood | +15 | Threshold (30 req / 5 min) |
 
 **Bot Scoring Engine** — each detection adds points to a per-IP score. Scores decay at 5 pts/min when idle. Thresholds: observe (30) → throttle (60) → block/1h (80) → blacklist/24h (100+). Score weights are configurable per server from the dashboard.
+
+**Bot Management** — 70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners, monitoring). Per-org policies: allow/log/block per fingerprint. Allowed bots (Googlebot, Bingbot) are tracked as events without blocking.
+
+**Monitor Mode** — new servers start in monitor mode by default: all threats are detected and reported to the dashboard, but no IPs are banned. Switch to enforcement mode when ready.
+
+**Dynamic Detection Rules** — SSH detection patterns are synced from the dashboard and compiled at runtime. Enable/disable individual rules per server without agent updates.
 
 **Docker-aware** — auto-detects web servers inside Docker containers, reads logs via bind mounts, volumes, or container stdout
 
@@ -137,7 +146,7 @@ The agent never bans reserved IPs (`127.x`, `10.x`, `192.168.x`), your own serve
 
 ## Per-server WAF configuration *(v0.9.3+)*
 
-Each attack type can be independently configured from the dashboard (Server → Settings → WAF). Changes sync within 60 seconds.
+Each attack type can be independently configured from the dashboard (Server → Web Protection). Changes sync within 60 seconds.
 
 - **Enable/disable types** — disable rules irrelevant to your stack (e.g. `wp_bruteforce` on a non-WordPress server)
 - **Detect-only mode** — record events without banning. Useful for audit-only policies or testing before enforcement
@@ -145,6 +154,19 @@ Each attack type can be independently configured from the dashboard (Server → 
 - **Custom score weights** *(v0.9.34+)* — adjust points per detection type. E.g. set `404_flood` to 0 to ignore in scoring, or increase `sql_injection` to 80 for instant blocking on first detection
 
 `null` WAF config → all 15 types active, default thresholds and score weights (fully backward compatible).
+
+---
+
+## SSH detection rules *(v0.9.44+)*
+
+The agent ships with 15 built-in SSH detection patterns covering:
+
+| Category | Patterns | Examples |
+|----------|:--------:|---------|
+| Auth failures | 9 | Failed password, Invalid user, PAM auth failure, Max auth attempts, Root login refused |
+| Pre-auth scanning | 6 | No identification string, Bad protocol version, Unable to negotiate, Connection closed/reset preauth, Timeout before auth |
+
+All patterns are visible and configurable from the dashboard (Server → SSH Protection → Detection Rules). Disable individual rules per server without restarting the agent — changes sync via the heartbeat.
 
 ---
 
@@ -239,6 +261,16 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.45 | User-Agent `DefensiaAgent/{version}` header; allowed bots reported as `bot_crawl` events |
+| v0.9.44 | Dynamic detection rules from panel sync — SSH patterns configurable per server from dashboard |
+| v0.9.43 | Expanded SSH detection: 15 patterns (9 auth failures + 6 pre-auth scanning) |
+| v0.9.42 | Monitor mode: detect threats without blocking; new servers default to monitor mode |
+| v0.9.41 | Bot fingerprint detection with pre-filter gate before WAF scoring |
+| v0.9.40 | Bot management: allow/log/block policies per fingerprint, synced from panel |
+| v0.9.39 | Regex support for dynamic WAF rules (OWASP CRS compatible) |
+| v0.9.38 | Fix: nil pointer crash in `syncAndApply` when WAF disabled and BotFingerprints non-empty |
+| v0.9.37 | Dynamic WAF rules synced from panel (Phase 1) |
+| v0.9.35 | Bot scoring engine replaced malware detection; per-IP cumulative scoring with decay |
 | v0.9.34 | Configurable score weights per server via WAF config from dashboard |
 | v0.9.33 | ipset firewall backend (65K+ ban capacity) with iptables FIFO fallback (500 bans, auto-rotation); startup trim for existing rules exceeding capacity |
 | v0.9.32 | Malware detection expansion: cryptominers, rootkits, web shells (60+ signatures) |

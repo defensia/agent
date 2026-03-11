@@ -65,6 +65,9 @@ var sshPatterns = []SSHPattern{
 // BanFunc is called when an IP exceeds the threshold.
 type BanFunc func(ip, reason string, count int)
 
+// EventFunc is called to report a detection event (used in monitor mode).
+type EventFunc func(ip, eventType, severity string, details map[string]string)
+
 // CheckIPFunc is called for every detected IP. If it returns a non-empty reason,
 // the IP is banned immediately (used for geoblocking).
 type CheckIPFunc func(ip string) (banReason string)
@@ -79,6 +82,7 @@ type Config struct {
 type Watcher struct {
 	logPath string
 	onBan   BanFunc
+	onEvent EventFunc
 	checkIP CheckIPFunc
 
 	mu          sync.Mutex
@@ -128,8 +132,15 @@ func (w *Watcher) SetCheckIP(fn CheckIPFunc) {
 	w.checkIP = fn
 }
 
+// SetOnEvent sets the callback used to report detection events (e.g. in monitor mode).
+func (w *Watcher) SetOnEvent(fn EventFunc) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onEvent = fn
+}
+
 // SetMonitorMode enables or disables monitor-only mode. When enabled, the
-// watcher detects attacks and records attempts but does not call onBan.
+// watcher detects attacks and reports events but does not call onBan.
 func (w *Watcher) SetMonitorMode(enabled bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -332,7 +343,13 @@ func (w *Watcher) recordAttempt(ip, reason string) {
 	if w.checkIP != nil {
 		if banReason := w.checkIP(ip); banReason != "" {
 			w.banned[ip] = true
-			if !w.monitorMode {
+			if w.monitorMode {
+				if w.onEvent != nil {
+					go w.onEvent(ip, "brute_force", "critical", map[string]string{
+						"reason": banReason,
+					})
+				}
+			} else {
 				go w.onBan(ip, banReason, 1)
 			}
 			return
@@ -353,7 +370,13 @@ func (w *Watcher) recordAttempt(ip, reason string) {
 	if len(recent) >= w.threshold {
 		w.banned[ip] = true
 		count := len(recent)
-		if !w.monitorMode {
+		if w.monitorMode {
+			if w.onEvent != nil {
+				go w.onEvent(ip, "brute_force", "critical", map[string]string{
+					"reason": reason,
+				})
+			}
+		} else {
 			go w.onBan(ip, reason, count)
 		}
 	}
