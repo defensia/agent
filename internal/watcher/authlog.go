@@ -65,9 +65,6 @@ var sshPatterns = []SSHPattern{
 // BanFunc is called when an IP exceeds the threshold.
 type BanFunc func(ip, reason string, count int)
 
-// EventFunc is called to report a detection event (used in monitor mode).
-type EventFunc func(ip, eventType, severity string, details map[string]string)
-
 // CheckIPFunc is called for every detected IP. If it returns a non-empty reason,
 // the IP is banned immediately (used for geoblocking).
 type CheckIPFunc func(ip string) (banReason string)
