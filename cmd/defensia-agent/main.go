@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "v0.9.44"
+var version = "v0.9.45"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -113,6 +113,7 @@ func runAgent() {
 	}
 
 	apiClient := api.New(cfg.ServerURL, cfg.AgentToken)
+	apiClient.SetVersion(version)
 
 	// Callback for the updater to report update outcomes to the server
 	reportUpdateEvent := func(eventType, severity string, details map[string]string) {

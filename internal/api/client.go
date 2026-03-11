@@ -12,17 +12,24 @@ import (
 type Client struct {
 	baseURL    string
 	token      string
+	userAgent  string
 	httpClient *http.Client
 }
 
 func New(baseURL, token string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		token:   token,
+		baseURL:   baseURL,
+		token:     token,
+		userAgent: "DefensiaAgent/1.0",
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
 	}
+}
+
+// SetVersion updates the User-Agent string with the actual agent version.
+func (c *Client) SetVersion(version string) {
+	c.userAgent = "DefensiaAgent/" + version
 }
 
 // RegisterRequest holds the data sent during agent registration.
@@ -295,6 +302,7 @@ func (c *Client) post(path, token string, body, out any) error {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
 
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -326,6 +334,7 @@ func (c *Client) get(path string, out any) error {
 
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", c.userAgent)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
