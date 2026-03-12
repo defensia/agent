@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.45-brightgreen)](https://github.com/defensia/agent/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.52-brightgreen)](https://github.com/defensia/agent/releases)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 
 **Your server is being attacked right now. You just don't know it.**
@@ -261,6 +261,12 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.52 | Skip private/reserved IPs (Docker bridge, localhost) in both SSH and WAF watchers — no more noise from `172.20.0.1` |
+| v0.9.51 | Fix: deduplicate WAF scoring when same request appears in multiple log files |
+| v0.9.50 | Cumulative per-IP WAF scoring engine with configurable weights |
+| v0.9.49 | Fix: check WAF patterns against both raw and decoded URI to catch encoded attacks; private IP filter |
+| v0.9.47 | Fix: connect WAF config from panel sync to web watcher — WAF detection was completely disabled |
+| v0.9.46 | Fix: remove duplicate EventFunc declaration |
 | v0.9.45 | User-Agent `DefensiaAgent/{version}` header; allowed bots reported as `bot_crawl` events |
 | v0.9.44 | Dynamic detection rules from panel sync — SSH patterns configurable per server from dashboard |
 | v0.9.43 | Expanded SSH detection: 15 patterns (9 auth failures + 6 pre-auth scanning) |
