@@ -1137,8 +1137,15 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	}
 
 	ip := entry.ip
-	uriLower := strings.ToLower(entry.uri)
+
+	// Skip private/reserved IPs (Docker bridge, localhost, etc.)
+	if isPrivateIP(ip) {
+		return
+	}
+
+	uriRaw := strings.ToLower(entry.uri)
 	// Double-decode URI to catch double URL-encoded attacks (%252fetc → %2fetc → /etc)
+	uriLower := uriRaw
 	if decoded, err := url.QueryUnescape(uriLower); err == nil {
 		uriLower = decoded
 	}
@@ -1165,12 +1172,13 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	}
 
 	// ── Instant-ban: path traversal & SQL injection ──
+	// Check both raw URI (has +/%20) and decoded URI (has spaces) for pattern matching.
 	for _, rule := range instantBanPatterns {
 		if !w.isTypeEnabled(rule.eventType) {
 			continue
 		}
 		for _, pat := range rule.patterns {
-			if strings.Contains(uriLower, pat) {
+			if strings.Contains(uriLower, pat) || strings.Contains(uriRaw, pat) {
 				if !w.isDetectOnly(rule.eventType) {
 					w.banned[ip] = true
 					go w.onBan(ip, rule.eventType, 1)

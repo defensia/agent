@@ -304,6 +304,17 @@ func (w *Watcher) tail() error {
 	return nil
 }
 
+// isPrivateIP returns true for loopback, link-local, and RFC-1918 private IPs
+// (e.g. 127.x, 10.x, 172.16-31.x, 192.168.x, Docker bridge 172.20.0.1).
+// These must never be reported as events or banned.
+func isPrivateIP(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsPrivate()
+}
+
 func (w *Watcher) processLine(line string) {
 	var ip, reason string
 	for _, p := range sshPatterns {
@@ -315,6 +326,10 @@ func (w *Watcher) processLine(line string) {
 		}
 	}
 	if ip == "" {
+		return
+	}
+
+	if isPrivateIP(ip) {
 		return
 	}
 
