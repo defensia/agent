@@ -244,6 +244,29 @@ func runAgent() {
 			}
 			return ""
 		})
+		webW.SetOnScoredBan(func(ip, reason string, score int, duration time.Duration) {
+			log.Printf("[webwatcher] scored ban %s: %s (score=%d, duration=%s)", ip, reason, score, duration)
+			if err := firewall.BanIP(ip); err != nil {
+				log.Printf("[firewall] error: %v", err)
+			}
+			expiresAt := time.Now().Add(duration).UTC().Format(time.RFC3339)
+			if err := apiClient.ReportBan(api.BanRequest{
+				IPAddress: ip,
+				Reason:    reason,
+				BanCount:  1,
+				ExpiresAt: &expiresAt,
+			}); err != nil {
+				log.Printf("[api] failed to report scored ban: %v", err)
+			}
+		})
+		// Periodically clean up expired IP scores (every 5 minutes)
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				webW.CleanExpiredScores()
+			}
+		}()
 		webW.LoadBotFingerprintsCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
@@ -437,11 +460,12 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 		// Apply WAF config from panel
 		if sync.Config.WAFConfig != nil {
-			log.Printf("[sync] applying WAF config: %d enabled types", len(sync.Config.WAFConfig.EnabledTypes))
+			log.Printf("[sync] applying WAF config: %d enabled types, %d score weights", len(sync.Config.WAFConfig.EnabledTypes), len(sync.Config.WAFConfig.ScorePoints))
 			webW.UpdateWAFConfig(&watcher.WAFConfig{
 				EnabledTypes:    sync.Config.WAFConfig.EnabledTypes,
 				DetectOnlyTypes: sync.Config.WAFConfig.DetectOnlyTypes,
 				Thresholds:      sync.Config.WAFConfig.Thresholds,
+				ScorePoints:     sync.Config.WAFConfig.ScorePoints,
 			})
 		} else {
 			log.Println("[sync] no WAF config in sync response")

@@ -46,12 +46,37 @@ type compiledBot struct {
 	Re       *regexp.Regexp // non-nil only when IsRegex is true
 }
 
+// ScoredBanFunc is called when an IP's score crosses a ban threshold.
+// duration is the ban length (1h for block, 24h for blacklist).
+type ScoredBanFunc func(ip, reason string, score int, duration time.Duration)
+
+// defaultScorePoints are the fallback score weights when the panel hasn't configured them.
+var defaultScorePoints = map[string]int{
+	"rce_attempt":        50,
+	"web_shell":          50,
+	"shellshock":         50,
+	"scanner_detected":   50,
+	"sql_injection":      40,
+	"ssrf_attempt":       40,
+	"web_exploit":        40,
+	"honeypot_triggered": 40,
+	"path_traversal":     30,
+	"header_injection":   30,
+	"wp_bruteforce":      30,
+	"xss_attempt":        25,
+	"env_probe":          25,
+	"xmlrpc_abuse":       25,
+	"config_probe":       20,
+	"404_flood":          15,
+}
+
 // WebWatcher tails web server access logs and bans IPs that match attack patterns.
 type WebWatcher struct {
 	logPaths  []string
 	domainMap map[string][]string // logPath → domain names
 	onBan     BanFunc
 	onEvent   EventFunc
+	onScoredBan ScoredBanFunc
 	checkIP   CheckIPFunc
 
 	mu        sync.Mutex
@@ -62,6 +87,11 @@ type WebWatcher struct {
 	// Per-rule attempt tracking: ruleKey:ip → timestamps
 	attempts map[string][]time.Time
 
+	// Per-IP WAF score tracking (cumulative scoring engine)
+	scorer *BotScoreTracker
+	// Track highest ban action per IP to avoid re-banning
+	scoredActions map[string]string // ip → highest action taken ("block" or "blacklist")
+
 	// Parse failure tracking per log file
 	parseStats map[string]*parseFileStats
 
@@ -69,6 +99,7 @@ type WebWatcher struct {
 	wafEnabled    map[string]bool
 	wafDetectOnly map[string]bool
 	wafThresholds map[string]int
+	wafScorePoints map[string]int  // per-type score weights from panel
 	monitorMode   bool // when true, all event types are detect-only
 
 	// Bot fingerprints from panel sync
@@ -615,16 +646,25 @@ func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc,
 		domainMap = make(map[string][]string)
 	}
 	return &WebWatcher{
-		logPaths:    paths,
-		domainMap:   domainMap,
-		onBan:       onBan,
-		onEvent:     onEvent,
-		attempts:    make(map[string][]time.Time),
-		banned:      make(map[string]bool),
-		whitelist:   make(map[string]bool),
-		parseStats:  make(map[string]*parseFileStats),
-		activePaths: make(map[string]context.CancelFunc),
+		logPaths:      paths,
+		domainMap:     domainMap,
+		onBan:         onBan,
+		onEvent:       onEvent,
+		attempts:      make(map[string][]time.Time),
+		banned:        make(map[string]bool),
+		whitelist:     make(map[string]bool),
+		scorer:        NewBotScoreTracker(),
+		scoredActions: make(map[string]string),
+		parseStats:    make(map[string]*parseFileStats),
+		activePaths:   make(map[string]context.CancelFunc),
 	}
+}
+
+// SetOnScoredBan sets a callback for score-based bans (with duration).
+func (w *WebWatcher) SetOnScoredBan(fn ScoredBanFunc) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onScoredBan = fn
 }
 
 // SetCheckIP sets a callback for immediate ban (e.g. geoblocking).
@@ -1171,48 +1211,40 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
-	// ── Instant-ban: path traversal & SQL injection ──
-	// Check both raw URI (has +/%20) and decoded URI (has spaces) for pattern matching.
+	// ── Score-based detection: path traversal, SQL injection, etc. ──
+	// Each match adds points to the IP's cumulative score. Action depends on total score.
 	for _, rule := range instantBanPatterns {
 		if !w.isTypeEnabled(rule.eventType) {
 			continue
 		}
 		for _, pat := range rule.patterns {
 			if strings.Contains(uriLower, pat) || strings.Contains(uriRaw, pat) {
-				if !w.isDetectOnly(rule.eventType) {
-					w.banned[ip] = true
-					go w.onBan(ip, rule.eventType, 1)
-				}
-				go w.onEvent(ip, rule.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
+				w.addScore(ip, rule.eventType, logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"method":     entry.method,
 					"user_agent": entry.userAgent,
 					"pattern":    pat,
-				}))
+				})
 				return
 			}
 		}
 	}
 
-	// ── Instant-ban: known scanner user-agents ──
+	// ── Score-based: known scanner user-agents ──
 	if w.isTypeEnabled("scanner_detected") {
 		for _, agent := range scannerAgents {
 			if strings.Contains(uaLower, agent) {
-				if !w.isDetectOnly("scanner_detected") {
-					w.banned[ip] = true
-					go w.onBan(ip, "scanner_detected", 1)
-				}
-				go w.onEvent(ip, "scanner_detected", "warning", w.enrichDetails(logPath, line, map[string]string{
+				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"scanner":    agent,
-				}))
+				})
 				return
 			}
 		}
 	}
 
-	// ── Bot fingerprint matching ──
+	// ── Bot fingerprint matching (outside scoring — has its own allow/log/block) ──
 	for i := range w.botFingerprints {
 		bot := &w.botFingerprints[i]
 		matched := false
@@ -1230,11 +1262,11 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				"bot_category": bot.Category,
 				"bot_action":   bot.Action,
 			})
-			if bot.Action == "block" {
+			if bot.Action == "block" && !w.monitorMode {
 				w.banned[ip] = true
 				go w.onBan(ip, "bot_blocked", 1)
 				go w.onEvent(ip, "bot_detected", "warning", details)
-			} else if bot.Action == "log" {
+			} else if bot.Action == "log" || (bot.Action == "block" && w.monitorMode) {
 				go w.onEvent(ip, "bot_detected", "info", details)
 			} else {
 				// allow — log as crawl (lower noise)
@@ -1244,41 +1276,32 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
-	// ── Instant-ban: Shellshock (CVE-2014-6271) in Referer or User-Agent ──
+	// ── Score-based: Shellshock (CVE-2014-6271) ──
 	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
-		if !w.isDetectOnly("shellshock") {
-			w.banned[ip] = true
-			go w.onBan(ip, "shellshock", 1)
-		}
-		go w.onEvent(ip, "shellshock", "critical", w.enrichDetails(logPath, line, map[string]string{
+		w.addScore(ip, "shellshock", logPath, line, map[string]string{
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
 			"referer":    entry.referer,
-		}))
+		})
 		return
 	}
 
-	// ── Instant-ban: Header injection in User-Agent or Referer ──
+	// ── Score-based: Header injection ──
 	if w.isTypeEnabled("header_injection") {
 		for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
 			if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
-				if !w.isDetectOnly("header_injection") {
-					w.banned[ip] = true
-					go w.onBan(ip, "header_injection", 1)
-				}
-				go w.onEvent(ip, "header_injection", "warning", w.enrichDetails(logPath, line, map[string]string{
+				w.addScore(ip, "header_injection", logPath, line, map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"referer":    entry.referer,
 					"pattern":    pat,
-				}))
+				})
 				return
 			}
 		}
 	}
 
-	// ── Pre-filter: only process suspicious requests beyond this point ──
-	// Skip normal 2xx/3xx responses to non-sensitive URIs
+	// ── Pre-filter: only process threshold-based rules for suspicious/4xx requests ──
 	isSuspiciousURI := strings.Contains(uriLower, "wp-login") ||
 		strings.Contains(uriLower, "xmlrpc") ||
 		strings.Contains(uriLower, "wp-content/plugins/") ||
@@ -1294,68 +1317,68 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	is4xx := entry.status >= 400 && entry.status < 500
 
 	if !isSuspiciousURI && !is4xx {
-		return // Normal traffic — skip
+		return
 	}
 
 	now := time.Now()
 
-	// ── Threshold: WP Login brute force ──
+	// ── Threshold → score: WP Login brute force ──
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
 		if w.isTypeEnabled("wp_bruteforce") {
 			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("wp_bruteforce")) {
-				go w.onEvent(ip, ruleWPLogin.eventType, "critical", w.enrichDetails(logPath, line, map[string]string{
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "wp_bruteforce", logPath, line, map[string]string{
 					"uri": entry.uri,
-				}))
+				})
 			}
 		}
 		return
 	}
 
-	// ── Threshold: XMLRPC abuse ──
+	// ── Threshold → score: XMLRPC abuse ──
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
 		if w.isTypeEnabled("xmlrpc_abuse") {
 			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("xmlrpc_abuse")) {
-				go w.onEvent(ip, ruleXMLRPC.eventType, "warning", w.enrichDetails(logPath, line, map[string]string{
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "xmlrpc_abuse", logPath, line, map[string]string{
 					"uri": entry.uri,
-				}))
+				})
 			}
 		}
 		return
 	}
 
-	// ── Threshold: plugin scanner ──
+	// ── Threshold → score: plugin scanner ──
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
 		if w.isTypeEnabled("scanner_detected") {
 			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("scanner_detected")) {
-				go w.onEvent(ip, rulePluginScan.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
 					"uri": entry.uri,
-				}))
+				})
 			}
 		}
 		return
 	}
 
-	// ── Threshold: 404 flood ──
+	// ── Threshold → score: 404 flood ──
 	if entry.status == 404 {
 		if w.isTypeEnabled("404_flood") {
 			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
-			if w.checkThreshold(ip, rule, now, w.isDetectOnly("404_flood")) {
-				go w.onEvent(ip, rule404Flood.eventType, "info", w.enrichDetails(logPath, line, map[string]string{
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "404_flood", logPath, line, map[string]string{
 					"uri": entry.uri,
-				}))
+				})
 			}
 		}
 		return
 	}
 }
 
-// checkThreshold increments the counter for a rule+IP and bans if threshold exceeded.
-// If detectOnly is true, tracks the attempt but does not ban.
-// Returns true if the threshold was crossed. Caller must hold w.mu.
-func (w *WebWatcher) checkThreshold(ip string, rule thresholdRule, now time.Time, detectOnly bool) bool {
+// checkThresholdOnly increments the counter for a rule+IP and returns true if
+// the threshold was crossed. Does NOT ban — the caller should use addScore instead.
+// Resets the counter after triggering so it can fire again. Caller must hold w.mu.
+func (w *WebWatcher) checkThresholdOnly(ip string, rule thresholdRule, now time.Time) bool {
 	key := rule.key + ":" + ip
 
 	// Clean old entries
@@ -1369,11 +1392,8 @@ func (w *WebWatcher) checkThreshold(ip string, rule thresholdRule, now time.Time
 	w.attempts[key] = recent
 
 	if len(recent) >= rule.threshold {
-		if !detectOnly {
-			w.banned[ip] = true
-			count := len(recent)
-			go w.onBan(ip, rule.eventType, count)
-		}
+		// Reset counter so it can fire again for sustained attacks
+		w.attempts[key] = nil
 		return true
 	}
 	return false
@@ -1386,6 +1406,7 @@ type WAFConfig struct {
 	EnabledTypes    []string       `json:"enabled_types"`
 	DetectOnlyTypes []string       `json:"detect_only_types"`
 	Thresholds      map[string]int `json:"thresholds"`
+	ScorePoints     map[string]int `json:"score_points"`
 }
 
 // UpdateWAFConfig applies WAF configuration from the panel.
@@ -1428,6 +1449,12 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		w.wafThresholds = cfg.Thresholds
 	} else {
 		w.wafThresholds = nil
+	}
+
+	if len(cfg.ScorePoints) > 0 {
+		w.wafScorePoints = cfg.ScorePoints
+	} else {
+		w.wafScorePoints = nil
 	}
 }
 
@@ -1472,6 +1499,87 @@ func (w *WebWatcher) wafThreshold(key string, defaultVal int) int {
 		return v
 	}
 	return defaultVal
+}
+
+// ── IP Scoring Engine ───────────────────────────────────────────────
+
+// getScorePoints returns the configured points for a detection type.
+// Falls back to defaultScorePoints, then 0. Must be called with w.mu held.
+func (w *WebWatcher) getScorePoints(eventType string) int {
+	if w.wafScorePoints != nil {
+		if v, ok := w.wafScorePoints[eventType]; ok {
+			return v
+		}
+	}
+	if v, ok := defaultScorePoints[eventType]; ok {
+		return v
+	}
+	return 0
+}
+
+// addScore adds points to an IP's cumulative score and takes the appropriate action.
+// Must be called with w.mu held. Uses BotScoreTracker (has its own mutex, so we
+// release w.mu before calling it, then re-acquire).
+func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[string]string) {
+	points := w.getScorePoints(eventType)
+	if points == 0 {
+		return
+	}
+
+	// Release w.mu before calling scorer (which has its own lock)
+	w.mu.Unlock()
+	score, category := w.scorer.AddScore(ip, eventType, points)
+	w.mu.Lock()
+
+	action := ActionForScore(score)
+	severity := SeverityForAction(action)
+
+	details["waf_score"] = strconv.Itoa(score)
+	details["waf_action"] = action
+	details["waf_category"] = category
+	details = w.enrichDetails(logPath, line, details)
+
+	// Always report the event when score reaches observe level (30+)
+	if score >= thresholdObserve {
+		go w.onEvent(ip, eventType, severity, details)
+	}
+
+	// Monitor mode: never ban, just observe everything
+	if w.monitorMode {
+		return
+	}
+
+	// Ban actions: only escalate, never downgrade
+	prevAction := w.scoredActions[ip]
+	if action == "block" && prevAction != "block" && prevAction != "blacklist" {
+		w.scoredActions[ip] = "block"
+		w.banned[ip] = true
+		if w.onScoredBan != nil {
+			go w.onScoredBan(ip, eventType, score, 1*time.Hour)
+		}
+	} else if action == "blacklist" && prevAction != "blacklist" {
+		w.scoredActions[ip] = "blacklist"
+		w.banned[ip] = true
+		if w.onScoredBan != nil {
+			go w.onScoredBan(ip, eventType, score, 24*time.Hour)
+		}
+	}
+}
+
+// CleanExpiredScores removes expired IP scores and resets ban state for re-evaluation.
+// Should be called periodically (e.g. every 5 minutes).
+func (w *WebWatcher) CleanExpiredScores() {
+	w.scorer.DecayAndCleanup()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// Reset scored actions for IPs whose scores have been cleaned up
+	for ip := range w.scoredActions {
+		if s, _ := w.scorer.GetScore(ip); s == 0 {
+			delete(w.scoredActions, ip)
+			delete(w.banned, ip)
+		}
+	}
 }
 
 // ── Bot Fingerprint Configuration ───────────────────────────────────
