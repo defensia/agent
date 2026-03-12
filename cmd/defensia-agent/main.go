@@ -437,11 +437,14 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 		// Apply WAF config from panel
 		if sync.Config.WAFConfig != nil {
+			log.Printf("[sync] applying WAF config: %d enabled types", len(sync.Config.WAFConfig.EnabledTypes))
 			webW.UpdateWAFConfig(&watcher.WAFConfig{
 				EnabledTypes:    sync.Config.WAFConfig.EnabledTypes,
 				DetectOnlyTypes: sync.Config.WAFConfig.DetectOnlyTypes,
 				Thresholds:      sync.Config.WAFConfig.Thresholds,
 			})
+		} else {
+			log.Println("[sync] no WAF config in sync response")
 		}
 	}
 

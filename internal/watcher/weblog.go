@@ -1387,6 +1387,7 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 	defer w.mu.Unlock()
 
 	if cfg == nil {
+		log.Println("[webwatcher] WAF config reset to defaults (nil)")
 		w.wafEnabled = nil
 		w.wafDetectOnly = nil
 		w.wafThresholds = nil
@@ -1399,8 +1400,10 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 			m[t] = true
 		}
 		w.wafEnabled = m
+		log.Printf("[webwatcher] WAF config applied: %d enabled types, %d detect-only, %d thresholds", len(cfg.EnabledTypes), len(cfg.DetectOnlyTypes), len(cfg.Thresholds))
 	} else {
 		w.wafEnabled = nil
+		log.Println("[webwatcher] WAF config: no enabled types — WAF disabled")
 	}
 
 	if len(cfg.DetectOnlyTypes) > 0 {
