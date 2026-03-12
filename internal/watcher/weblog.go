@@ -91,6 +91,8 @@ type WebWatcher struct {
 	scorer *BotScoreTracker
 	// Track highest ban action per IP to avoid re-banning
 	scoredActions map[string]string // ip → highest action taken ("block" or "blacklist")
+	// Dedup: avoid scoring the same detection twice from multiple log files
+	recentScores map[string]time.Time // "ip:eventType" → last scored time
 
 	// Parse failure tracking per log file
 	parseStats map[string]*parseFileStats
@@ -655,6 +657,7 @@ func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc,
 		whitelist:     make(map[string]bool),
 		scorer:        NewBotScoreTracker(),
 		scoredActions: make(map[string]string),
+		recentScores:  make(map[string]time.Time),
 		parseStats:    make(map[string]*parseFileStats),
 		activePaths:   make(map[string]context.CancelFunc),
 	}
@@ -1526,6 +1529,15 @@ func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[s
 		return
 	}
 
+	// Dedup: skip if we scored this IP+type within the last 2 seconds
+	// (same request logged in multiple access log files)
+	dedupKey := ip + ":" + eventType
+	now := time.Now()
+	if last, ok := w.recentScores[dedupKey]; ok && now.Sub(last) < 2*time.Second {
+		return
+	}
+	w.recentScores[dedupKey] = now
+
 	// Release w.mu before calling scorer (which has its own lock)
 	w.mu.Unlock()
 	score, category := w.scorer.AddScore(ip, eventType, points)
@@ -1578,6 +1590,13 @@ func (w *WebWatcher) CleanExpiredScores() {
 		if s, _ := w.scorer.GetScore(ip); s == 0 {
 			delete(w.scoredActions, ip)
 			delete(w.banned, ip)
+		}
+	}
+	// Clean old dedup entries
+	now := time.Now()
+	for k, t := range w.recentScores {
+		if now.Sub(t) > 10*time.Second {
+			delete(w.recentScores, k)
 		}
 	}
 }
