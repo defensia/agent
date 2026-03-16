@@ -25,7 +25,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "v0.9.52"
+var version = "v0.9.53"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -145,6 +145,9 @@ func runAgent() {
 			log.Printf("[main] warning: could not resolve API host %s: %v", host, err)
 		}
 	}
+
+	// Initialize firewall backend (detects ipset, falls back to iptables)
+	firewall.Init()
 
 	// Initialize GeoIP lookup
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
@@ -378,6 +381,7 @@ func runAgent() {
 			zReport := monitor.ScanZombies()
 			sysMetrics := metricsCollector.Collect()
 
+			fwStatus := firewall.FirewallStatus()
 			hbReq := api.HeartbeatRequest{
 				Status:            "online",
 				Version:           version,
@@ -388,6 +392,9 @@ func runAgent() {
 				WebServerVersion:  wsVersion,
 				MonitoredDomains:  monitoredDomains,
 				MonitoredLogPaths: monitoredLogPaths,
+				FirewallMode:      fwStatus.Mode,
+				BanCapacity:       fwStatus.Capacity,
+				ActiveBans:        fwStatus.ActiveBans,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,

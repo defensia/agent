@@ -84,6 +84,9 @@ type HeartbeatRequest struct {
 	Metrics            *SystemMetrics `json:"metrics,omitempty"`
 	MonitoredDomains   []string       `json:"monitored_domains,omitempty"`
 	MonitoredLogPaths  []string       `json:"monitored_log_paths,omitempty"`
+	FirewallMode       string         `json:"firewall_mode,omitempty"`
+	BanCapacity        int            `json:"ban_capacity,omitempty"`
+	ActiveBans         int            `json:"active_bans,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.
