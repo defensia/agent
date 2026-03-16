@@ -1279,6 +1279,21 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
+	// ── Unknown bot detection ──────────────────────────────────
+	// If UA looks like a bot but matched no fingerprint, emit bot_unknown
+	if w.isTypeEnabled("bot_unknown") {
+		uaPatterns := []string{"bot", "crawler", "spider", "scraper", "fetch", "python-requests", "python-urllib", "go-http-client", "java/", "curl/", "wget/", "libwww", "httpx", "axios/", "ruby", "perl/", "php/"}
+		for _, pat := range uaPatterns {
+			if strings.Contains(uaLower, pat) {
+				go w.onEvent(ip, "bot_unknown", "info", w.enrichDetails(logPath, line, map[string]string{
+					"uri":        entry.uri,
+					"user_agent": entry.userAgent,
+				}))
+				break
+			}
+		}
+	}
+
 	// ── Score-based: Shellshock (CVE-2014-6271) ──
 	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
 		w.addScore(ip, "shellshock", logPath, line, map[string]string{
