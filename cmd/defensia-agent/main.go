@@ -22,10 +22,11 @@ import (
 	"github.com/defensia/agent/internal/scanner"
 	"github.com/defensia/agent/internal/updater"
 	"github.com/defensia/agent/internal/watcher"
+	"github.com/defensia/agent/internal/webserver"
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "v0.9.53"
+var version = "v0.9.54"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -275,8 +276,37 @@ func runAgent() {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
 
+	// Detect web server once at startup (lightweight — runs nginx -v or apache2 -v once)
+	wsName, wsVersion := detectWebServerInfo()
+	if wsName != "" {
+		log.Printf("[webserver] detected %s %s", wsName, wsVersion)
+	}
+
+	// Setup UA blocking at web server level (runs once; no-op if sentinel exists)
+	uaReport := func(eventType, severity string, details map[string]string) {
+		_ = apiClient.ReportEvents([]api.EventRequest{{
+			Type:       eventType,
+			Severity:   severity,
+			Details:    details,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}
+	if wsName == "nginx" {
+		go func() {
+			if err := webserver.SetupNginxUABlock(uaReport); err != nil {
+				log.Printf("[ua-block] nginx setup error: %v", err)
+			}
+		}()
+	} else if wsName == "apache" {
+		go func() {
+			if err := webserver.SetupApacheUABlock(uaReport); err != nil {
+				log.Printf("[ua-block] apache setup error: %v", err)
+			}
+		}()
+	}
+
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent); err != nil {
+	if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -334,7 +364,7 @@ func runAgent() {
 			OnSyncRequested: func(p ws.SyncRequestedPayload) {
 				log.Printf("[reverb] sync.requested: agent_id=%d", p.AgentID)
 				go func() {
-					if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent); err != nil {
+					if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent, wsName); err != nil {
 						log.Printf("[sync] sync.requested failed: %v", err)
 					}
 				}()
@@ -362,12 +392,6 @@ func runAgent() {
 		},
 	)
 	go wsClient.Run()
-
-	// Detect web server once at startup (lightweight — runs nginx -v or apache2 -v once)
-	wsName, wsVersion := detectWebServerInfo()
-	if wsName != "" {
-		log.Printf("[webserver] detected %s %s", wsName, wsVersion)
-	}
 
 	// Metrics collector
 	metricsCollector := monitor.NewMetricsCollector()
@@ -433,7 +457,7 @@ func runAgent() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent); err != nil {
+			if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent, wsName); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -448,7 +472,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter, wsType string) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -567,6 +591,40 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			}
 		}
 		webW.UpdateBotFingerprints(fps)
+	}
+
+	// Update web server UA blocklist (fingerprints with action=block)
+	if wsType != "" && len(sync.BotFingerprints) > 0 {
+		var uaFps []webserver.UAFingerprint
+		for _, fp := range sync.BotFingerprints {
+			if fp.Action == "block" {
+				uaFps = append(uaFps, webserver.UAFingerprint{
+					Pattern: fp.Pattern,
+					IsRegex: fp.IsRegex,
+				})
+			}
+		}
+		uaReport := func(eventType, severity string, details map[string]string) {
+			_ = client.ReportEvents([]api.EventRequest{{
+				Type:       eventType,
+				Severity:   severity,
+				Details:    details,
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}
+		if wsType == "nginx" {
+			go func(fps []webserver.UAFingerprint) {
+				if err := webserver.UpdateNginxUABlocklist(fps, uaReport); err != nil {
+					log.Printf("[ua-block] nginx update error: %v", err)
+				}
+			}(uaFps)
+		} else if wsType == "apache" {
+			go func(fps []webserver.UAFingerprint) {
+				if err := webserver.UpdateApacheUABlock(fps, uaReport); err != nil {
+					log.Printf("[ua-block] apache update error: %v", err)
+				}
+			}(uaFps)
+		}
 	}
 
 	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",

@@ -216,12 +216,6 @@ func setApacheDirective(key, value string) (string, error) {
 		return "", fmt.Errorf("cannot write %s: %w", path, err)
 	}
 
-	// Try apache2 (Debian) then httpd (RHEL)
-	restartCmd := "apache2"
-	if _, err := exec.LookPath("apache2"); err != nil {
-		restartCmd = "httpd"
-	}
-
-	out, err := exec.Command("systemctl", "restart", restartCmd).CombinedOutput()
-	return fmt.Sprintf("set %s %s; restart: %s", key, value, string(out)), err
+	out, err := exec.Command("apachectl", "graceful").CombinedOutput()
+	return fmt.Sprintf("set %s %s; graceful: %s", key, value, string(out)), err
 }
