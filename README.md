@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.52-brightgreen)](https://github.com/defensia/agent/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.55-brightgreen)](https://github.com/defensia/agent/releases)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 [![DigitalOcean Marketplace](https://img.shields.io/badge/DigitalOcean-Marketplace-0080FF?logo=digitalocean&logoColor=white)](https://marketplace.digitalocean.com/apps/defensia-agent)
 
@@ -76,7 +76,7 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 
 **Bot Scoring Engine** — each detection adds points to a per-IP score. Scores decay at 5 pts/min when idle. Thresholds: observe (30) → throttle (60) → block/1h (80) → blacklist/24h (100+). Score weights are configurable per server from the dashboard.
 
-**Bot Management** — 70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners, monitoring). Per-org policies: allow/log/block per fingerprint. Allowed bots (Googlebot, Bingbot) are tracked as events without blocking.
+**Bot Management** — 70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners, monitoring). Per-org policies: allow/log/block per fingerprint. Allowed bots (Googlebot, Bingbot) are tracked as events without blocking. Bots with policy **block** are rejected at the web server level (nginx `map+include` / Apache `SetEnvIfNoCase`) — connection closed before PHP/app is ever reached.
 
 **Monitor Mode** — new servers start in monitor mode by default: all threats are detected and reported to the dashboard, but no IPs are banned. Switch to enforcement mode when ready.
 
@@ -262,6 +262,9 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.55 | UA bot blocking at the web server level: bots with policy **block** are rejected by nginx (`map+include /etc/defensia/ua-blocklist.conf`) or Apache (`SetEnvIfNoCase`) — zero app load, graceful reload on every policy change |
+| v0.9.54 | Emit `bot_unknown` events for unrecognized bot User-Agents (not in fingerprint list) — surfaces unknown crawlers in the dashboard |
+| v0.9.53 | Restore ipset firewall backend: `defensia-bans` hash:ip set (65K capacity), automatic FIFO rotation at 500 bans when ipset absent, migrates existing DROP rules on first run |
 | v0.9.52 | Skip private/reserved IPs (Docker bridge, localhost) in both SSH and WAF watchers — no more noise from `172.20.0.1` |
 | v0.9.51 | Fix: deduplicate WAF scoring when same request appears in multiple log files |
 | v0.9.50 | Cumulative per-IP WAF scoring engine with configurable weights |
