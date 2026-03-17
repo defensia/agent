@@ -26,7 +26,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "v0.9.54"
+var version = "v0.9.55"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
