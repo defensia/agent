@@ -499,7 +499,8 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				ScorePoints:     sync.Config.WAFConfig.ScorePoints,
 			})
 		} else {
-			log.Println("[sync] no WAF config in sync response")
+			log.Println("[sync] no WAF config — all types enabled by default")
+			webW.UpdateWAFConfig(nil)
 		}
 	}
 

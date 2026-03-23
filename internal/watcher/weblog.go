@@ -1476,7 +1476,7 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 	defer w.mu.Unlock()
 
 	if cfg == nil {
-		log.Println("[webwatcher] WAF config reset to defaults (nil)")
+		log.Println("[webwatcher] WAF config reset to defaults — all types enabled")
 		w.wafEnabled = nil
 		w.wafDetectOnly = nil
 		w.wafThresholds = nil
@@ -1492,7 +1492,7 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		log.Printf("[webwatcher] WAF config applied: %d enabled types, %d detect-only, %d thresholds", len(cfg.EnabledTypes), len(cfg.DetectOnlyTypes), len(cfg.Thresholds))
 	} else {
 		w.wafEnabled = nil
-		log.Println("[webwatcher] WAF config: no enabled types — WAF disabled")
+		log.Println("[webwatcher] WAF config: no types specified — all types enabled by default")
 	}
 
 	if len(cfg.DetectOnlyTypes) > 0 {
@@ -1519,11 +1519,11 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 }
 
 // isTypeEnabled returns true if this attack type should be processed.
-// When wafEnabled is nil (no config from panel yet), WAF is disabled by default.
+// When wafEnabled is nil (no explicit config from panel), all types are enabled by default.
 // Must be called with w.mu held.
 func (w *WebWatcher) isTypeEnabled(eventType string) bool {
 	if w.wafEnabled == nil {
-		return false
+		return true
 	}
 	return w.wafEnabled[eventType]
 }
