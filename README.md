@@ -3,7 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.55-brightgreen)](https://github.com/defensia/agent/releases)
+[![Version](https://img.shields.io/badge/version-v0.9.61-brightgreen)](https://github.com/defensia/agent/releases)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/defensia/agent/pkgs/container/agent)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 [![DigitalOcean Marketplace](https://img.shields.io/badge/DigitalOcean-Marketplace-0080FF?logo=digitalocean&logoColor=white)](https://marketplace.digitalocean.com/apps/defensia-agent)
 
@@ -15,6 +16,16 @@ Defensia is a lightweight Go agent that detects every attack in real time and bl
 
 ```bash
 curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
+```
+
+**Or with Docker:**
+
+```bash
+docker run -d --privileged --net=host --pid=host \
+  -v /var/log:/var/log:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -e DEFENSIA_TOKEN=<YOUR_TOKEN> \
+  ghcr.io/defensia/agent:latest
 ```
 
 → **[Get your token at defensia.cloud](https://defensia.cloud)**
@@ -93,19 +104,64 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOK
 
 ## Install
 
+### One-liner (recommended)
+
 ```bash
 curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
 ```
 
-**Uninstall:**
+**Supported systems:** Ubuntu 20+, Debian 11+, CentOS 7+, RHEL 8+, Amazon Linux 2023
+**Requirements:** `iptables`, `systemd` (or upstart/sysvinit), root access
+**Recommended:** `ipset` (auto-detected — increases ban capacity from 500 to 65,000+)
+
+### Docker
+
+```bash
+docker run -d --privileged --net=host --pid=host \
+  -v /var/log:/var/log:ro \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v defensia-config:/etc/defensia \
+  -e DEFENSIA_TOKEN=<YOUR_TOKEN> \
+  --name defensia-agent \
+  --restart unless-stopped \
+  ghcr.io/defensia/agent:latest
+```
+
+Or add to your existing `docker-compose.yml`:
+
+```yaml
+services:
+  defensia-agent:
+    image: ghcr.io/defensia/agent:latest
+    container_name: defensia-agent
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    pid: host
+    environment:
+      - DEFENSIA_TOKEN=${DEFENSIA_TOKEN}
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - defensia-config:/etc/defensia
+
+volumes:
+  defensia-config:
+```
+
+```bash
+DEFENSIA_TOKEN=<YOUR_TOKEN> docker compose up -d defensia-agent
+```
+
+The agent auto-registers on first start and persists its config in the `defensia-config` volume. Subsequent restarts don't need the token.
+
+**Image:** `ghcr.io/defensia/agent` — multi-arch (amd64 + arm64), ~40MB
+
+### Uninstall
+
 ```bash
 curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --uninstall
 ```
-
-**Supported systems:** Ubuntu 20+, Debian 11+, CentOS 7+, RHEL 8+, Amazon Linux 2023
-
-**Requirements:** `iptables`, `systemd` (or upstart/sysvinit), root access
-**Recommended:** `ipset` (auto-detected — increases ban capacity from 500 to 65,000+)
 
 ---
 
@@ -262,6 +318,12 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.61 | **Docker image published to GHCR** (`ghcr.io/defensia/agent`): multi-arch (amd64+arm64), auto-register via `DEFENSIA_TOKEN` env var, docker-compose snippet included. Automated build+push on every release tag |
+| v0.9.60 | Apply threat feed (Spamhaus DROP/EDROP, Feodo Tracker, CINS Army) to firewall — pre-emptive blocking of known-bad IPs |
+| v0.9.59 | Virtual patching: apply dynamic WAF rules from panel (regex patterns synced via heartbeat) |
+| v0.9.58 | Heartbeat reports `auth_watcher_method`, `firewall_mode`, `ban_capacity`, `active_bans_count` for dashboard visibility |
+| v0.9.57 | Fix: web log detection for Docker containers with non-standard log paths; improved Apache log discovery on cPanel servers |
+| v0.9.56 | Agent reports all bot actions (allow/log/block) as events for full dashboard visibility |
 | v0.9.55 | UA bot blocking at the web server level: bots with policy **block** are rejected by nginx (`map+include /etc/defensia/ua-blocklist.conf`) or Apache (`SetEnvIfNoCase`) — zero app load, graceful reload on every policy change |
 | v0.9.54 | Emit `bot_unknown` events for unrecognized bot User-Agents (not in fingerprint list) — surfaces unknown crawlers in the dashboard |
 | v0.9.53 | Restore ipset firewall backend: `defensia-bans` hash:ip set (65K capacity), automatic FIFO rotation at 500 bans when ipset absent, migrates existing DROP rules on first run |
