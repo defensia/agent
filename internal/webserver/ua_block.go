@@ -124,6 +124,7 @@ func SetupNginxUABlock(report EventReporter) error {
 
 // UpdateNginxUABlocklist regenerates /etc/defensia/ua-blocklist.conf and does nginx -s reload.
 // If setup has not completed yet (sentinel absent), writes the file only — reload happens at setup time.
+// Skips reload if the generated config is identical to the current file.
 func UpdateNginxUABlocklist(fps []UAFingerprint, report EventReporter) error {
 	if err := os.MkdirAll(defensiaDir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", defensiaDir, err)
@@ -134,6 +135,11 @@ func UpdateNginxUABlocklist(fps []UAFingerprint, report EventReporter) error {
 	// If setup hasn't run yet, just write the file — it'll be used when setup runs
 	if _, err := os.Stat(nginxSentinel); os.IsNotExist(err) {
 		return os.WriteFile(nginxBlocklist, []byte(content), 0644)
+	}
+
+	// Skip reload if content hasn't changed
+	if existing, err := os.ReadFile(nginxBlocklist); err == nil && string(existing) == content {
+		return nil
 	}
 
 	// Backup current blocklist
@@ -242,6 +248,7 @@ func SetupApacheUABlock(report EventReporter) error {
 }
 
 // UpdateApacheUABlock regenerates the Apache UA block config and does apachectl graceful.
+// Skips reload if the generated config is identical to the current file.
 func UpdateApacheUABlock(fps []UAFingerprint, report EventReporter) error {
 	confPath, _ := apacheConfPath()
 	content := generateApacheConf(fps)
@@ -249,6 +256,11 @@ func UpdateApacheUABlock(fps []UAFingerprint, report EventReporter) error {
 	// If setup hasn't run yet, just write the file
 	if _, err := os.Stat(apacheSentinel); os.IsNotExist(err) {
 		return os.WriteFile(confPath, []byte(content), 0644)
+	}
+
+	// Skip reload if content hasn't changed
+	if existing, err := os.ReadFile(confPath); err == nil && string(existing) == content {
+		return nil
 	}
 
 	var backup []byte
