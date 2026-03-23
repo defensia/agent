@@ -236,21 +236,51 @@ The agent **automatically detects Docker** and reports all running containers to
 3. Falls back to scanning mount directories for `*access*.log` files
 4. Last resort: reads container stdout via `docker logs -f` if logs go to stdout (common with official nginx image)
 
-**Best practice** — bind-mount the log directory to the host for fastest detection:
+### Docker labels *(v0.9.62+)*
+
+Use Docker labels to configure monitoring per container — no agent restart needed:
 
 ```yaml
 services:
   nginx:
     image: nginx
+    labels:
+      defensia.monitor: "true"          # force-monitor (even non-web images)
+      defensia.log-path: "/var/log/nginx/access.log"  # explicit host log path
+      defensia.domain: "example.com,api.example.com"   # associate domains
+      defensia.waf: "true"              # informational (WAF config from panel)
     volumes:
       - /var/log/nginx:/var/log/nginx
+
+  my-custom-app:
+    image: myapp:latest
+    labels:
+      defensia.monitor: "true"          # monitor even though not a web keyword image
+      defensia.log-path: "/var/log/myapp/access.log"
+
+  internal-nginx:
+    image: nginx
+    labels:
+      defensia.monitor: "false"         # skip this container
 ```
+
+| Label | Values | Effect |
+|-------|--------|--------|
+| `defensia.monitor` | `true` / `false` | Force-include or exclude a container from monitoring |
+| `defensia.log-path` | Host path(s), comma-separated | Explicit log path — skips auto-detection |
+| `defensia.domain` | Domain(s), comma-separated | Associate domain names with this container's logs |
+| `defensia.waf` | `true` / `false` | Informational — WAF on/off is controlled from the panel |
+
+**Priority**: `defensia.log-path` label > `nginx -T` auto-detection > bind-mount scan.
+**Without labels**: the agent falls back to image-name detection (same as before).
 
 **Dashboard** — the server detail page shows a dedicated Docker tab with all containers, web detection status, and the WAF tab shows which log sources are being monitored.
 
 ```bash
 journalctl -u defensia-agent | grep webwatcher
-# [webwatcher] docker: watching /var/log/nginx/access.log from container my-nginx
+# [webwatcher] docker: container my-custom-app selected via defensia.monitor label
+# [webwatcher] docker: watching /var/log/myapp/access.log from container my-custom-app (defensia.log-path label)
+# [webwatcher] docker: watching /var/log/nginx/access.log from container nginx
 # [webwatcher] detected 3 access log(s), 5 domain(s)
 ```
 
@@ -318,6 +348,7 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.62 | **Docker labels autoconf**: `defensia.monitor`, `defensia.log-path`, `defensia.domain`, `defensia.waf` — configure monitoring per container via Docker labels without agent restart |
 | v0.9.61 | **Docker image published to GHCR** (`ghcr.io/defensia/agent`): multi-arch (amd64+arm64), auto-register via `DEFENSIA_TOKEN` env var, docker-compose snippet included. Automated build+push on every release tag |
 | v0.9.60 | Apply threat feed (Spamhaus DROP/EDROP, Feodo Tracker, CINS Army) to firewall — pre-emptive blocking of known-bad IPs |
 | v0.9.59 | Virtual patching: apply dynamic WAF rules from panel (regex patterns synced via heartbeat) |

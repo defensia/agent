@@ -578,17 +578,29 @@ func parseApacheVhosts(content string) []apacheVhost {
 // ── Docker container log detection ──────────────────────────────────
 
 // detectDockerLogInfo finds web server access logs inside Docker containers.
-// For each running nginx/apache/caddy container it:
-//  1. Runs `nginx -T` inside the container and maps the log paths to host paths
-//     via bind-mount information from `docker inspect`.
-//  2. Falls back to scanning all bind-mounted host directories for *access*.log files.
+// Containers are selected for monitoring if they match one of:
+//  1. Image name contains a web keyword (nginx, apache, httpd, caddy, openresty, traefik)
+//  2. Label `defensia.monitor=true` is present (overrides image detection)
+//
+// Log path resolution order:
+//  1. Label `defensia.log-path` — explicit host path(s), comma-separated
+//  2. `docker exec nginx -T` — parses nginx config for log directives
+//  3. Fallback: scan bind-mounted directories for *access*.log files
+//
+// Supported labels:
+//
+//	defensia.monitor=true     — force-monitor this container (even if not a web image)
+//	defensia.monitor=false    — skip this container (even if it matches a web image)
+//	defensia.log-path=/path   — explicit host log path(s), comma-separated
+//	defensia.waf=true         — (informational) reported in heartbeat, WAF config comes from panel
+//	defensia.domain=example   — associate domain(s) with this container's logs, comma-separated
 func detectDockerLogInfo() []LogPathInfo {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil
 	}
 
 	out, err := exec.Command("docker", "ps",
-		"--format", "{{.ID}}|{{.Image}}|{{.Names}}",
+		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Labels}}",
 		"--filter", "status=running",
 	).Output()
 	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
@@ -600,21 +612,65 @@ func detectDockerLogInfo() []LogPathInfo {
 	var result []LogPathInfo
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(strings.TrimSpace(line), "|", 3)
+		parts := strings.SplitN(strings.TrimSpace(line), "|", 4)
 		if len(parts) < 3 {
 			continue
 		}
 		id, image, name := parts[0], strings.ToLower(parts[1]), parts[2]
+		rawLabels := ""
+		if len(parts) >= 4 {
+			rawLabels = parts[3]
+		}
 
+		labels := parseDockerLabels(rawLabels)
+
+		// Label-based override: defensia.monitor=false skips, =true forces
+		if v, ok := labels["defensia.monitor"]; ok {
+			if v == "false" || v == "0" || v == "no" {
+				continue
+			}
+		}
+
+		// Determine if this is a web container
 		isWeb := false
-		for _, kw := range webKeywords {
-			if strings.Contains(image, kw) {
-				isWeb = true
-				break
+		if v, ok := labels["defensia.monitor"]; ok && (v == "true" || v == "1" || v == "yes") {
+			isWeb = true
+			log.Printf("[webwatcher] docker: container %s selected via defensia.monitor label", name)
+		}
+		if !isWeb {
+			for _, kw := range webKeywords {
+				if strings.Contains(image, kw) {
+					isWeb = true
+					break
+				}
 			}
 		}
 		if !isWeb {
 			continue
+		}
+
+		// Label: defensia.domain — explicit domain association
+		var labelDomains []string
+		if d, ok := labels["defensia.domain"]; ok && d != "" {
+			for _, dom := range strings.Split(d, ",") {
+				dom = strings.TrimSpace(dom)
+				if dom != "" {
+					labelDomains = append(labelDomains, dom)
+				}
+			}
+		}
+
+		// Label: defensia.log-path — explicit host path(s), highest priority
+		if lp, ok := labels["defensia.log-path"]; ok && lp != "" {
+			for _, p := range strings.Split(lp, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" && !seen[p] {
+					seen[p] = true
+					result = append(result, LogPathInfo{Path: p, Domains: labelDomains})
+					log.Printf("[webwatcher] docker: watching %s from container %s (defensia.log-path label)", p, name)
+				}
+			}
+			continue // explicit path set — skip auto-detection
 		}
 
 		mounts := dockerBindMounts(id)
@@ -624,6 +680,9 @@ func detectDockerLogInfo() []LogPathInfo {
 			for _, info := range nginxBlocksToLogPathInfos(parseNginxBlocks(string(nginxOut)), mounts) {
 				if !seen[info.Path] {
 					seen[info.Path] = true
+					if len(labelDomains) > 0 {
+						info.Domains = append(info.Domains, labelDomains...)
+					}
 					result = append(result, info)
 					log.Printf("[webwatcher] docker: watching %s from container %s", info.Path, name)
 				}
@@ -646,7 +705,7 @@ func detectDockerLogInfo() []LogPathInfo {
 					hostPath := filepath.Join(hostDir, e.Name())
 					if !seen[hostPath] {
 						seen[hostPath] = true
-						result = append(result, LogPathInfo{Path: hostPath})
+						result = append(result, LogPathInfo{Path: hostPath, Domains: labelDomains})
 						log.Printf("[webwatcher] docker: watching %s (mount scan, container %s)", hostPath, name)
 					}
 				}
@@ -655,6 +714,21 @@ func detectDockerLogInfo() []LogPathInfo {
 	}
 
 	return result
+}
+
+// parseDockerLabels parses the comma-separated key=value label string from `docker ps --format {{.Labels}}`.
+func parseDockerLabels(raw string) map[string]string {
+	labels := make(map[string]string)
+	if raw == "" {
+		return labels
+	}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if eq := strings.IndexByte(pair, '='); eq > 0 {
+			labels[pair[:eq]] = pair[eq+1:]
+		}
+	}
+	return labels
 }
 
 // dockerBindMounts returns a containerPath→hostPath map for a container's bind mounts.
