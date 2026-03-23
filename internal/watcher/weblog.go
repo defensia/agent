@@ -161,24 +161,22 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 5. Well-known static paths as fallback (only if nothing found from config)
-	if len(infos) == 0 {
-		knownPaths := []string{
-			"/var/log/nginx/access.log",
-			"/var/log/apache2/access.log",
-			"/var/log/apache2/other_vhosts_access.log",
-			"/var/log/httpd/access_log",
-			"/usr/local/apache/logs/access_log",
-			"/var/log/httpd/access.log",
-			"/usr/local/lsws/logs/access.log",
-			"/var/log/caddy/access.log",
-			"/var/log/nginx-access.log",
-			"/var/log/access.log",
-		}
-		for _, p := range knownPaths {
-			if _, err := os.Stat(p); err == nil {
-				add(LogPathInfo{Path: p})
-			}
+	// 5. Well-known static paths (always checked — add() deduplicates)
+	knownPaths := []string{
+		"/var/log/nginx/access.log",
+		"/var/log/apache2/access.log",
+		"/var/log/apache2/other_vhosts_access.log",
+		"/var/log/httpd/access_log",
+		"/usr/local/apache/logs/access_log",
+		"/var/log/httpd/access.log",
+		"/usr/local/lsws/logs/access.log",
+		"/var/log/caddy/access.log",
+		"/var/log/nginx-access.log",
+		"/var/log/access.log",
+	}
+	for _, p := range knownPaths {
+		if _, err := os.Stat(p); err == nil {
+			add(LogPathInfo{Path: p})
 		}
 	}
 
@@ -205,6 +203,7 @@ type nginxBlock struct {
 func detectNginxLogInfo() []LogPathInfo {
 	out, err := exec.Command("nginx", "-T").CombinedOutput()
 	if err != nil {
+		log.Printf("[webwatcher] nginx -T failed: %v (output: %.200s)", err, string(out))
 		return nil
 	}
 	return nginxBlocksToLogPathInfos(parseNginxBlocks(string(out)), nil)
@@ -297,6 +296,42 @@ func parseNginxBlocks(output string) []nginxBlock {
 	return blocks
 }
 
+var nginxPrefix string
+var nginxPrefixOnce sync.Once
+
+func getNginxPrefix() string {
+	nginxPrefixOnce.Do(func() {
+		out, err := exec.Command("nginx", "-V").CombinedOutput()
+		if err != nil {
+			return
+		}
+		re := regexp.MustCompile(`--prefix=(\S+)`)
+		if m := re.FindSubmatch(out); len(m) > 1 {
+			nginxPrefix = string(m[1])
+		}
+	})
+	return nginxPrefix
+}
+
+func resolveNginxRelativePath(relPath string) string {
+	var candidates []string
+	if prefix := getNginxPrefix(); prefix != "" {
+		candidates = append(candidates, filepath.Join(prefix, relPath))
+	}
+	candidates = append(candidates,
+		filepath.Join("/etc/nginx", relPath),
+		filepath.Join("/usr/local/nginx", relPath),
+		filepath.Join("/opt/nginx", relPath),
+		filepath.Join("/usr/share/nginx", relPath),
+	)
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
 // nginxBlocksToLogPathInfos converts parsed nginx blocks to []LogPathInfo.
 // If mountMap is non-nil, container-internal paths are first resolved to host paths via it.
 // Only paths that exist on the host filesystem are included.
@@ -310,6 +345,13 @@ func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) 
 				if hostPath == "" {
 					continue
 				}
+			}
+			if !filepath.IsAbs(hostPath) {
+				resolved := resolveNginxRelativePath(hostPath)
+				if resolved == "" {
+					continue
+				}
+				hostPath = resolved
 			}
 			if _, err := os.Stat(hostPath); err != nil {
 				continue
