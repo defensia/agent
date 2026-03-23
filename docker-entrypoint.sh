@@ -12,11 +12,18 @@ BINARY="/usr/local/bin/defensia-agent"
 SERVER_URL="${DEFENSIA_SERVER_URL:-https://defensia.cloud}"
 AGENT_NAME="${DEFENSIA_AGENT_NAME:-$(hostname -s)}"
 
+# ── Resolve token (supports Docker secrets via _FILE suffix) ──────────────────
+if [[ -z "${DEFENSIA_TOKEN:-}" ]] && [[ -n "${DEFENSIA_TOKEN_FILE:-}" ]] && [[ -f "$DEFENSIA_TOKEN_FILE" ]]; then
+    DEFENSIA_TOKEN="$(cat "$DEFENSIA_TOKEN_FILE")"
+    export DEFENSIA_TOKEN
+fi
+
 # ── Register if not already configured ────────────────────────────────────────
 if [[ ! -f "$CONFIG_FILE" ]]; then
     if [[ -z "${DEFENSIA_TOKEN:-}" ]]; then
         echo "[defensia] ERROR: DEFENSIA_TOKEN is required for first-time registration."
         echo "[defensia] Set it via: docker run -e DEFENSIA_TOKEN=<your-token> ..."
+        echo "[defensia] Or use Docker secrets: DEFENSIA_TOKEN_FILE=/run/secrets/defensia_token"
         exit 1
     fi
 

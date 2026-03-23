@@ -6,7 +6,7 @@
 
 services:
   defensia-agent:
-    image: defensia/agent:latest
+    image: ghcr.io/defensia/agent:latest
     container_name: defensia-agent
     restart: unless-stopped
     privileged: true

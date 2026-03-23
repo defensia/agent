@@ -1,0 +1,37 @@
+# Defensia Agent — Docker Swarm
+# Deploys one agent per node in the cluster (global mode).
+#
+# Deploy:
+#   echo "<your-token>" | docker secret create defensia_token -
+#   docker stack deploy -c docker-compose.swarm.yml defensia
+#
+# Each agent auto-registers with the hostname of the Swarm node it runs on.
+# Get your token at: https://defensia.cloud/dashboard → Add Server
+
+services:
+  agent:
+    image: ghcr.io/defensia/agent:latest
+    deploy:
+      mode: global
+      restart_policy:
+        condition: any
+        delay: 10s
+    privileged: true
+    network_mode: host
+    pid: host
+    environment:
+      - DEFENSIA_TOKEN_FILE=/run/secrets/defensia_token
+      - DEFENSIA_SERVER_URL=${DEFENSIA_SERVER_URL:-https://defensia.cloud}
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - defensia-config:/etc/defensia
+    secrets:
+      - defensia_token
+
+secrets:
+  defensia_token:
+    external: true
+
+volumes:
+  defensia-config:

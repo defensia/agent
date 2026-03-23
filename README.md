@@ -157,6 +157,22 @@ The agent auto-registers on first start and persists its config in the `defensia
 
 **Image:** `ghcr.io/defensia/agent` — multi-arch (amd64 + arm64), ~40MB
 
+### Docker Swarm
+
+Deploy one agent per node in the cluster:
+
+```bash
+# Store token as a Docker secret
+echo "<YOUR_TOKEN>" | docker secret create defensia_token -
+
+# Deploy as a global service (1 agent per node)
+docker stack deploy -c docker-compose.swarm.yml defensia
+```
+
+Each agent auto-registers using the hostname of the Swarm node it runs on. The token is read from Docker secrets (`DEFENSIA_TOKEN_FILE`), not environment variables — safe for multi-node deployments.
+
+See [docker-compose.swarm.yml](docker-compose.swarm.yml) for the full stack definition.
+
 ### Uninstall
 
 ```bash
@@ -348,6 +364,7 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.63 | **Docker Swarm support**: `docker-compose.swarm.yml` with `deploy: mode: global` (1 agent per node), Docker secrets support (`DEFENSIA_TOKEN_FILE`) for secure multi-node deployments |
 | v0.9.62 | **Docker labels autoconf**: `defensia.monitor`, `defensia.log-path`, `defensia.domain`, `defensia.waf` — configure monitoring per container via Docker labels without agent restart |
 | v0.9.61 | **Docker image published to GHCR** (`ghcr.io/defensia/agent`): multi-arch (amd64+arm64), auto-register via `DEFENSIA_TOKEN` env var, docker-compose snippet included. Automated build+push on every release tag |
 | v0.9.60 | Apply threat feed (Spamhaus DROP/EDROP, Feodo Tracker, CINS Army) to firewall — pre-emptive blocking of known-bad IPs |
