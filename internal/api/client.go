@@ -111,6 +111,17 @@ type AgentUpdateInfo struct {
 	DownloadBaseURL string `json:"download_base_url"`
 }
 
+// WafRule is a dynamic WAF detection pattern synced from the panel.
+// Target: "uri" | "ua" | "referer" | "honeypot"
+// Category maps to an existing eventType (sql_injection, rce_attempt, etc.)
+type WafRule struct {
+	ID       int64  `json:"id"`
+	Category string `json:"category"`
+	Pattern  string `json:"pattern"`
+	Target   string `json:"target"`
+	IsRegex  bool   `json:"is_regex"`
+}
+
 // BotFingerprint describes a known bot pattern synced from the panel.
 type BotFingerprint struct {
 	Slug     string `json:"slug"`
@@ -138,6 +149,7 @@ type SyncResponse struct {
 	AgentUpdate     *AgentUpdateInfo `json:"agent_update,omitempty"`
 	DetectionRules  []DetectionRule  `json:"detection_rules"`
 	BotFingerprints []BotFingerprint `json:"bot_fingerprints"`
+	WafRules        []WafRule        `json:"waf_rules"`
 }
 
 type SyncConfig struct {

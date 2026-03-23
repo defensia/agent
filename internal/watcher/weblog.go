@@ -3,12 +3,13 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -42,6 +43,16 @@ type compiledBot struct {
 	Category string
 	Action   string // allow, log, block
 	Pattern  string // original pattern (used for plain substring match)
+	IsRegex  bool
+	Re       *regexp.Regexp // non-nil only when IsRegex is true
+}
+
+// compiledWafRule is a dynamic WAF rule loaded from the panel (virtual patching).
+type compiledWafRule struct {
+	ID       int64
+	Category string         // eventType to emit (sql_injection, rce_attempt, etc.)
+	Target   string         // "uri" | "ua" | "referer"
+	Pattern  string         // original pattern for substring match
 	IsRegex  bool
 	Re       *regexp.Regexp // non-nil only when IsRegex is true
 }
@@ -106,6 +117,9 @@ type WebWatcher struct {
 
 	// Bot fingerprints from panel sync
 	botFingerprints []compiledBot
+
+	// WAF rules (virtual patches) from panel sync
+	dynamicWafRules []compiledWafRule
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
@@ -1275,6 +1289,40 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 	}
 
+	// ── Dynamic WAF rules (virtual patches from panel) ──
+	for i := range w.dynamicWafRules {
+		rule := &w.dynamicWafRules[i]
+		if !w.isTypeEnabled(rule.Category) {
+			continue
+		}
+		var haystack string
+		switch rule.Target {
+		case "ua":
+			haystack = uaLower
+		case "referer":
+			haystack = refLower
+		default: // "uri"
+			haystack = uriLower
+		}
+		matched := false
+		if rule.IsRegex && rule.Re != nil {
+			matched = rule.Re.MatchString(haystack)
+		} else {
+			matched = strings.Contains(haystack, rule.Pattern)
+		}
+		if matched {
+			w.addScore(ip, rule.Category, logPath, line, map[string]string{
+				"uri":        entry.uri,
+				"method":     entry.method,
+				"user_agent": entry.userAgent,
+				"waf_rule":   fmt.Sprintf("%d", rule.ID),
+				"target":     rule.Target,
+				"pattern":    rule.Pattern,
+			})
+			return
+		}
+	}
+
 	// ── Score-based: known scanner user-agents ──
 	if w.isTypeEnabled("scanner_detected") {
 		for _, agent := range scannerAgents {
@@ -1728,4 +1776,77 @@ func (w *WebWatcher) LoadBotFingerprintsCache() {
 	}
 	log.Printf("[webwatcher] loaded %d bot fingerprints from cache", len(fps))
 	w.UpdateBotFingerprints(fps)
+}
+
+// ── Dynamic WAF Rules (Virtual Patching) ────────────────────────────
+
+// WafRuleInput matches the JSON structure from the panel sync.
+type WafRuleInput struct {
+	ID       int64  `json:"id"`
+	Category string `json:"category"`
+	Pattern  string `json:"pattern"`
+	Target   string `json:"target"`
+	IsRegex  bool   `json:"is_regex"`
+}
+
+// UpdateWafRules compiles and stores dynamic WAF rules from the panel.
+// Also persists the raw inputs to /etc/defensia/waf_rules.json for cache reload on restart.
+func (w *WebWatcher) UpdateWafRules(rules []WafRuleInput) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	compiled := make([]compiledWafRule, 0, len(rules))
+	for _, r := range rules {
+		target := r.Target
+		if target == "" {
+			target = "uri"
+		}
+		cr := compiledWafRule{
+			ID:       r.ID,
+			Category: r.Category,
+			Target:   target,
+			Pattern:  strings.ToLower(r.Pattern),
+			IsRegex:  r.IsRegex,
+		}
+		if r.IsRegex {
+			re, err := regexp.Compile("(?i)" + r.Pattern)
+			if err != nil {
+				log.Printf("[webwatcher] invalid WAF rule regex %q (id=%d): %v", r.Pattern, r.ID, err)
+				continue
+			}
+			cr.Re = re
+		}
+		compiled = append(compiled, cr)
+	}
+	w.dynamicWafRules = compiled
+	log.Printf("[webwatcher] loaded %d dynamic WAF rules", len(compiled))
+
+	const cachePath = "/etc/defensia/waf_rules.json"
+	if data, err := json.Marshal(rules); err == nil {
+		if err := os.MkdirAll("/etc/defensia", 0755); err == nil {
+			if err := os.WriteFile(cachePath, data, 0600); err != nil {
+				log.Printf("[webwatcher] failed to save WAF rules cache: %v", err)
+			}
+		}
+	}
+}
+
+// LoadWafRulesCache loads dynamic WAF rules from the on-disk cache written by
+// UpdateWafRules. Should be called once at startup before the first sync.
+func (w *WebWatcher) LoadWafRulesCache() {
+	const cachePath = "/etc/defensia/waf_rules.json"
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[webwatcher] failed to read WAF rules cache: %v", err)
+		}
+		return
+	}
+	var rules []WafRuleInput
+	if err := json.Unmarshal(data, &rules); err != nil {
+		log.Printf("[webwatcher] failed to parse WAF rules cache: %v", err)
+		return
+	}
+	log.Printf("[webwatcher] loaded %d dynamic WAF rules from cache", len(rules))
+	w.UpdateWafRules(rules)
 }

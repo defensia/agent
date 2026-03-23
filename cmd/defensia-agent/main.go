@@ -272,6 +272,7 @@ func runAgent() {
 			}
 		}()
 		webW.LoadBotFingerprintsCache()
+	webW.LoadWafRulesCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
@@ -592,6 +593,21 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			}
 		}
 		webW.UpdateBotFingerprints(fps)
+	}
+
+	// Apply dynamic WAF rules (virtual patches from panel)
+	if webW != nil {
+		rules := make([]watcher.WafRuleInput, len(sync.WafRules))
+		for i, r := range sync.WafRules {
+			rules[i] = watcher.WafRuleInput{
+				ID:       r.ID,
+				Category: r.Category,
+				Pattern:  r.Pattern,
+				Target:   r.Target,
+				IsRegex:  r.IsRegex,
+			}
+		}
+		webW.UpdateWafRules(rules)
 	}
 
 	// Update web server UA blocklist (fingerprints with action=block)
