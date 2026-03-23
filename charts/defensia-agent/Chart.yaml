@@ -1,9 +1,9 @@
 apiVersion: v2
 name: defensia-agent
-description: Real-time attack detection and blocking for Linux servers
+description: Real-time attack detection and blocking for Linux servers — SSH brute force, WAF, bot management, geo-blocking, and threat intelligence in a single lightweight agent.
 type: application
-version: 0.1.0
-appVersion: "0.9.63"
+version: 0.1.1
+appVersion: "0.9.64"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent
@@ -14,7 +14,42 @@ keywords:
   - intrusion-detection
   - linux
   - server
+  - bot-detection
+  - brute-force
+  - threat-intelligence
+  - server-monitoring
+kubeVersion: ">=1.22.0-0"
 maintainers:
   - name: Defensia
+    email: support@defensia.cloud
     url: https://defensia.cloud
 icon: https://defensia.cloud/img/logo.svg
+annotations:
+  artifacthub.io/category: security
+  artifacthub.io/license: MIT
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/defensia/agent#readme
+    - name: support
+      url: https://github.com/defensia/agent/issues
+    - name: Dashboard
+      url: https://defensia.cloud
+  artifacthub.io/screenshots: |
+    - title: Dashboard
+      url: https://raw.githubusercontent.com/defensia/agent/main/docs/01-dashboard.png
+    - title: Events Feed
+      url: https://raw.githubusercontent.com/defensia/agent/main/docs/02-events.png
+    - title: WAF Analytics
+      url: https://raw.githubusercontent.com/defensia/agent/main/docs/04-waf.png
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial Helm chart release with DaemonSet deployment
+    - kind: added
+      description: Support for token via Secret or existingSecret
+    - kind: added
+      description: Tolerations for all nodes including control-plane
+  artifacthub.io/images: |
+    - name: defensia-agent
+      image: ghcr.io/defensia/agent:0.9.64
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/containsSecurityUpdates: "false"
