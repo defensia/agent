@@ -1,0 +1,47 @@
+# Defensia Agent — Helm values
+# Full docs: https://github.com/defensia/agent
+
+# Required: your install token from https://defensia.cloud/dashboard
+token: ""
+
+# Or reference an existing Secret (key must be "token")
+existingSecret: ""
+
+# Defensia panel URL
+serverUrl: "https://defensia.cloud"
+
+# Agent name override (default: node hostname)
+agentName: ""
+
+image:
+  repository: ghcr.io/defensia/agent
+  tag: ""  # defaults to appVersion
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Run on ALL nodes including masters/control-plane
+tolerations:
+  - operator: Exists
+
+nodeSelector: {}
+
+affinity: {}
+
+# Host paths to mount (read-only)
+hostPaths:
+  log: /var/log
+  dockerSocket: /var/run/docker.sock
+
+# Extra environment variables
+extraEnv: []
+#  - name: WEB_LOG_PATH
+#    value: "/var/log/nginx/access.log"
+#  - name: GEOIP_DB_PATH
+#    value: "/usr/share/GeoIP/GeoLite2-Country.mmdb"

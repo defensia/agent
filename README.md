@@ -173,6 +173,53 @@ Each agent auto-registers using the hostname of the Swarm node it runs on. The t
 
 See [docker-compose.swarm.yml](docker-compose.swarm.yml) for the full stack definition.
 
+### Kubernetes (Helm)
+
+```bash
+helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
+  --set token=<YOUR_TOKEN>
+```
+
+This deploys a DaemonSet — one agent per node, including masters. The agent runs privileged with host networking to manage iptables and read system logs.
+
+**With an existing Secret:**
+
+```bash
+kubectl create secret generic defensia-token --from-literal=token=<YOUR_TOKEN>
+helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
+  --set existingSecret=defensia-token
+```
+
+**Custom values:**
+
+```yaml
+# values.yaml
+token: "<YOUR_TOKEN>"
+serverUrl: "https://defensia.cloud"
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+tolerations:
+  - operator: Exists    # run on all nodes
+extraEnv:
+  - name: WEB_LOG_PATH
+    value: "/var/log/nginx/access.log"
+```
+
+```bash
+helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent -f values.yaml
+```
+
+**Upgrade / Uninstall:**
+
+```bash
+helm upgrade defensia-agent oci://ghcr.io/defensia/charts/defensia-agent
+helm uninstall defensia-agent
+```
+
+See [charts/defensia-agent/](charts/defensia-agent/) for the full chart source.
+
 ### Uninstall
 
 ```bash
@@ -364,6 +411,7 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.64 | **Kubernetes Helm chart**: DaemonSet (1 agent per node), OCI chart on GHCR (`oci://ghcr.io/defensia/charts/defensia-agent`), token via Secret or existingSecret, tolerations for all nodes, resource limits, extraEnv support |
 | v0.9.63 | **Docker Swarm support**: `docker-compose.swarm.yml` with `deploy: mode: global` (1 agent per node), Docker secrets support (`DEFENSIA_TOKEN_FILE`) for secure multi-node deployments |
 | v0.9.62 | **Docker labels autoconf**: `defensia.monitor`, `defensia.log-path`, `defensia.domain`, `defensia.waf` — configure monitoring per container via Docker labels without agent restart |
 | v0.9.61 | **Docker image published to GHCR** (`ghcr.io/defensia/agent`): multi-arch (amd64+arm64), auto-register via `DEFENSIA_TOKEN` env var, docker-compose snippet included. Automated build+push on every release tag |

@@ -1,0 +1,20 @@
+apiVersion: v2
+name: defensia-agent
+description: Real-time attack detection and blocking for Linux servers
+type: application
+version: 0.1.0
+appVersion: "0.9.63"
+home: https://defensia.cloud
+sources:
+  - https://github.com/defensia/agent
+keywords:
+  - security
+  - waf
+  - firewall
+  - intrusion-detection
+  - linux
+  - server
+maintainers:
+  - name: Defensia
+    url: https://defensia.cloud
+icon: https://defensia.cloud/img/logo.svg
