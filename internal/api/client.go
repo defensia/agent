@@ -132,6 +132,14 @@ type BotFingerprint struct {
 	Action   string `json:"action"` // allow, log, block
 }
 
+// ThreatEntry is a blocked IP or CIDR from an external threat feed.
+// Source identifies the feed slug (e.g. "spamhaus-drop", "feodo-tracker").
+type ThreatEntry struct {
+	IP     *string `json:"ip"`
+	CIDR   *string `json:"cidr"`
+	Source string  `json:"source"`
+}
+
 // DetectionRule is a log-based detection pattern synced from the panel.
 type DetectionRule struct {
 	ID      int64  `json:"id"`
@@ -150,6 +158,7 @@ type SyncResponse struct {
 	DetectionRules  []DetectionRule  `json:"detection_rules"`
 	BotFingerprints []BotFingerprint `json:"bot_fingerprints"`
 	WafRules        []WafRule        `json:"waf_rules"`
+	ThreatFeed      []ThreatEntry    `json:"threat_feed"`
 }
 
 type SyncConfig struct {

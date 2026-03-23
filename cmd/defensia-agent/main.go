@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -272,7 +273,8 @@ func runAgent() {
 			}
 		}()
 		webW.LoadBotFingerprintsCache()
-	webW.LoadWafRulesCache()
+		webW.LoadWafRulesCache()
+		loadThreatFeedCache()
 	} else {
 		log.Printf("[webwatcher] no access logs found — web attack detection disabled (set WEB_LOG_PATH to override)")
 	}
@@ -553,6 +555,12 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	}
 	if !sync.Config.MonitorMode {
 		firewall.ApplyBans(banIPs)
+	}
+
+	// Apply threat feed blocks (IPs + CIDRs from Spamhaus, Feodo, etc.)
+	if !sync.Config.MonitorMode && len(sync.ThreatFeed) > 0 {
+		go applyThreatFeed(sync.ThreatFeed)
+		saveThreatFeedCache(sync.ThreatFeed)
 	}
 
 	// Build set of IPs managed by user firewall rules (so cleanup doesn't remove them)
@@ -956,4 +964,51 @@ func runZombieMonitor(client *api.Client) {
 
 		lastReported = report.Count
 	}
+}
+
+// ── Threat Feed ──────────────────────────────────────────────────────────────
+
+const threatFeedCache = "/etc/defensia/threat_feed.json"
+
+func applyThreatFeed(entries []api.ThreatEntry) {
+	for _, e := range entries {
+		if e.IP != nil && *e.IP != "" {
+			if err := firewall.BanIP(*e.IP); err != nil {
+				log.Printf("[threat-feed] ban %s (%s): %v", *e.IP, e.Source, err)
+			}
+		} else if e.CIDR != nil && *e.CIDR != "" {
+			cidr := *e.CIDR
+			if err := firewall.ApplyRule(firewall.RuleSpec{Type: "block", IPRange: &cidr}); err != nil {
+				log.Printf("[threat-feed] block cidr %s (%s): %v", cidr, e.Source, err)
+			}
+		}
+	}
+	log.Printf("[threat-feed] applied %d entries", len(entries))
+}
+
+func saveThreatFeedCache(entries []api.ThreatEntry) {
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll("/etc/defensia", 0755); err != nil {
+		return
+	}
+	if err := os.WriteFile(threatFeedCache, data, 0600); err != nil {
+		log.Printf("[threat-feed] failed to save cache: %v", err)
+	}
+}
+
+func loadThreatFeedCache() {
+	data, err := os.ReadFile(threatFeedCache)
+	if err != nil {
+		return
+	}
+	var entries []api.ThreatEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		log.Printf("[threat-feed] failed to parse cache: %v", err)
+		return
+	}
+	log.Printf("[threat-feed] applying %d cached entries at startup", len(entries))
+	applyThreatFeed(entries)
 }
