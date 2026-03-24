@@ -157,6 +157,7 @@ jobs:
     needs: build
     permissions:
       packages: write
+      id-token: write
 
     steps:
       - name: Checkout
@@ -170,8 +171,15 @@ jobs:
         run: |
           sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.VERSION }}\"/" charts/defensia-agent/Chart.yaml
 
-      - name: Login to GHCR
+      - name: Login to GHCR (Helm)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Login to GHCR (Docker/Cosign)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Package chart
         run: helm package charts/defensia-agent -d /tmp/charts
