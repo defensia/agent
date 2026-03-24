@@ -1,12 +1,14 @@
 # Defensia Agent
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![Version](https://img.shields.io/badge/version-v0.9.61-brightgreen)](https://github.com/defensia/agent/releases)
-[![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/defensia/agent/pkgs/container/agent)
-[![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
+[![GitHub Release](https://img.shields.io/github/v/release/defensia/agent?label=version&color=brightgreen)](https://github.com/defensia/agent/releases)
+[![Docker](https://img.shields.io/badge/Docker_Hub-defensiacloud-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/defensiacloud/agent)
+[![GHCR](https://img.shields.io/badge/GHCR-defensia%2Fagent-2496ED?logo=github&logoColor=white)](https://github.com/defensia/agent/pkgs/container/agent)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/defensia-agent)](https://artifacthub.io/packages/helm/defensia-agent/defensia-agent)
 [![DigitalOcean Marketplace](https://img.shields.io/badge/DigitalOcean-Marketplace-0080FF?logo=digitalocean&logoColor=white)](https://marketplace.digitalocean.com/apps/defensia-agent)
+[![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
 
 **Your server is being attacked right now. You just don't know it.**
 
