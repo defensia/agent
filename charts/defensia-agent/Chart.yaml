@@ -2,8 +2,8 @@ apiVersion: v2
 name: defensia-agent
 description: Real-time attack detection and blocking for Linux servers — SSH brute force, WAF, bot management, geo-blocking, and threat intelligence in a single lightweight agent.
 type: application
-version: 0.1.1
-appVersion: "0.9.64"
+version: 0.1.2
+appVersion: "0.9.60"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent
@@ -42,14 +42,12 @@ annotations:
     - title: WAF Analytics
       url: https://raw.githubusercontent.com/defensia/agent/main/docs/04-waf.png
   artifacthub.io/changes: |
-    - kind: added
-      description: Initial Helm chart release with DaemonSet deployment
-    - kind: added
-      description: Support for token via Secret or existingSecret
-    - kind: added
-      description: Tolerations for all nodes including control-plane
+    - kind: fixed
+      description: Add chart README for Artifact Hub display
+    - kind: fixed
+      description: Fix logo URL (was returning 404)
   artifacthub.io/images: |
     - name: defensia-agent
-      image: ghcr.io/defensia/agent:0.9.64
+      image: ghcr.io/defensia/agent:0.9.60
   artifacthub.io/prerelease: "false"
   artifacthub.io/containsSecurityUpdates: "false"
