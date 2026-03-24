@@ -181,8 +181,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Package chart
-        run: helm package charts/defensia-agent -d /tmp/charts
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          gpg --export-secret-keys > /tmp/secring.gpg
+
+      - name: Package chart (signed)
+        run: |
+          helm package charts/defensia-agent \
+            --sign --key "Defensia" --keyring /tmp/secring.gpg \
+            -d /tmp/charts
 
       - name: Push chart to GHCR
         id: helm-push
@@ -192,15 +200,10 @@ jobs:
           DIGEST=$(echo "$OUTPUT" | grep -oP 'sha256:[a-f0-9]+')
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign Helm chart
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+      - name: Attach provenance file
         run: |
           CHART_VERSION=$(grep '^version:' charts/defensia-agent/Chart.yaml | awk '{print $2}')
-          cosign sign --key env://COSIGN_PRIVATE_KEY \
-            --yes \
-            ghcr.io/defensia/charts/defensia-agent@${{ steps.helm-push.outputs.digest }}
+          oras attach ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} \
+            --artifact-type "application/vnd.cncf.helm.chart.provenance.v1.prov" \
+            --disable-path-validation \
+            /tmp/charts/defensia-agent-${CHART_VERSION}.tgz.prov:application/vnd.cncf.helm.chart.provenance.v1.prov
