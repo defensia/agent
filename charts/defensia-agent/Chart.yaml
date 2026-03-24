@@ -2,8 +2,8 @@ apiVersion: v2
 name: defensia-agent
 description: Real-time attack detection and blocking for Linux servers — SSH brute force, WAF, bot management, geo-blocking, and threat intelligence in a single lightweight agent.
 type: application
-version: 0.1.2
-appVersion: "0.9.60"
+version: 0.1.3
+appVersion: "0.9.71"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent
@@ -42,12 +42,12 @@ annotations:
     - title: WAF Analytics
       url: https://raw.githubusercontent.com/defensia/agent/main/docs/04-waf.png
   artifacthub.io/changes: |
+    - kind: security
+      description: Upgrade Go from 1.22 to 1.26 — fixes 25 CVEs in stdlib
     - kind: fixed
-      description: Add chart README for Artifact Hub display
-    - kind: fixed
-      description: Fix logo URL (was returning 404)
+      description: Add chart README and fix logo URL
   artifacthub.io/images: |
     - name: defensia-agent
-      image: ghcr.io/defensia/agent:0.9.60
+      image: ghcr.io/defensia/agent:0.9.71
   artifacthub.io/prerelease: "false"
   artifacthub.io/containsSecurityUpdates: "false"
