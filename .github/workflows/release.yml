@@ -112,7 +112,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -129,8 +128,8 @@ jobs:
           tags: |
             ghcr.io/defensia/agent:latest
             ghcr.io/defensia/agent:${{ steps.version.outputs.VERSION }}
-            defensia/agent:latest
-            defensia/agent:${{ steps.version.outputs.VERSION }}
+            defensiacloud/agent:latest
+            defensiacloud/agent:${{ steps.version.outputs.VERSION }}
           labels: |
             org.opencontainers.image.title=Defensia Agent
             org.opencontainers.image.description=Real-time attack detection and blocking for Linux servers
