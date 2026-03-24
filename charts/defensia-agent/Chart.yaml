@@ -2,7 +2,7 @@ apiVersion: v2
 name: defensia-agent
 description: Real-time attack detection and blocking for Linux servers — SSH brute force, WAF, bot management, geo-blocking, and threat intelligence in a single lightweight agent.
 type: application
-version: 0.1.5
+version: 0.1.6
 appVersion: "0.9.73"
 home: https://defensia.cloud
 sources:

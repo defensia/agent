@@ -11,10 +11,7 @@ Deploy the [Defensia](https://defensia.cloud) security agent as a DaemonSet on y
 ## Install
 
 ```bash
-helm repo add defensia https://defensia.github.io/agent
-helm repo update
-
-helm install defensia-agent defensia/defensia-agent \
+helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
   --set token="YOUR_INSTALL_TOKEN"
 ```
 
@@ -23,7 +20,7 @@ Or using an existing Kubernetes Secret:
 ```bash
 kubectl create secret generic defensia-token --from-literal=token=YOUR_INSTALL_TOKEN
 
-helm install defensia-agent defensia/defensia-agent \
+helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
   --set existingSecret=defensia-token
 ```
 
@@ -85,8 +82,29 @@ extraEnv:
 - Real-time firewall rule management via WebSocket
 - Auto-update with SHA256 verification and crash-loop recovery
 
+## Docker labels
+
+Configure monitoring per container without agent restart:
+
+```yaml
+services:
+  nginx:
+    labels:
+      defensia.monitor: "true"
+      defensia.log-path: "/var/log/nginx/access.log"
+      defensia.domain: "example.com"
+```
+
+| Label | Description |
+|-------|-------------|
+| `defensia.monitor` | Force-include (`true`) or exclude (`false`) a container |
+| `defensia.log-path` | Explicit host log path(s), comma-separated |
+| `defensia.domain` | Associate domain(s) with this container's logs |
+| `defensia.waf` | Informational — WAF config is controlled from the dashboard |
+
 ## Links
 
 - [Defensia Dashboard](https://defensia.cloud)
 - [Agent Documentation](https://github.com/defensia/agent#readme)
+- [Docker Hub](https://hub.docker.com/r/defensiacloud/agent)
 - [Report Issues](https://github.com/defensia/agent/issues)
