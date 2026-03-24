@@ -200,6 +200,12 @@ jobs:
           DIGEST=$(echo "$OUTPUT" | grep -oP 'sha256:[a-f0-9]+')
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
+      - name: Install oras
+        run: |
+          curl -sLO https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz
+          tar xzf oras_1.2.2_linux_amd64.tar.gz -C /usr/local/bin oras
+          rm oras_1.2.2_linux_amd64.tar.gz
+
       - name: Attach provenance file
         run: |
           CHART_VERSION=$(grep '^version:' charts/defensia-agent/Chart.yaml | awk '{print $2}')
