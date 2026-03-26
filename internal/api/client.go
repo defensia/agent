@@ -162,11 +162,12 @@ type SyncResponse struct {
 }
 
 type SyncConfig struct {
-	BFThreshold   int        `json:"bf_threshold"`
-	BFWindow      int        `json:"bf_window"`
-	BFBanDuration *int       `json:"bf_ban_duration"`
-	MonitorMode   bool       `json:"monitor_mode"`
-	WAFConfig     *WAFConfig `json:"waf_config"`
+	BFThreshold      int        `json:"bf_threshold"`
+	BFWindow         int        `json:"bf_window"`
+	BFBanDuration    *int       `json:"bf_ban_duration"`
+	MonitorMode      bool       `json:"monitor_mode"`
+	WAFConfig        *WAFConfig `json:"waf_config"`
+	BlockedCountries []string   `json:"blocked_countries"`
 }
 
 type WAFConfig struct {

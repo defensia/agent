@@ -27,7 +27,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.65"
+var version = "0.9.77"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -537,8 +537,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
 	}
 
-	// Extract blocked countries from rules and update GeoIP
-	var blockedCountries []string
+	// Apply geoblocking from config (blocked_countries field)
+	blockedCountries := sync.Config.BlockedCountries
+	// Fallback: also check rules with country_code for backward compatibility
 	for _, r := range sync.Rules {
 		if r.CountryCode != nil && *r.CountryCode != "" && r.Type == "block" {
 			blockedCountries = append(blockedCountries, *r.CountryCode)
