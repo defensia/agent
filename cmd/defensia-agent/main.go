@@ -27,7 +27,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.77"
+var version = "0.9.79"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -308,8 +308,47 @@ func runAgent() {
 		}()
 	}
 
+	// Start mail log watcher (if Postfix/Dovecot detected)
+	var mailW *watcher.MailWatcher
+	if watcher.HasMailService() {
+		mailW = watcher.NewMailWatcher(func(ip, reason string, count int) {
+			log.Printf("[mailwatcher] banning %s: %s (count=%d)", ip, reason, count)
+			if err := firewall.BanIP(ip); err != nil {
+				log.Printf("[firewall] error: %v", err)
+			}
+			if err := apiClient.ReportBan(api.BanRequest{
+				IPAddress: ip,
+				Reason:    reason,
+				BanCount:  count,
+			}); err != nil {
+				log.Printf("[api] failed to report ban: %v", err)
+			}
+		})
+		if mailW != nil {
+			mailW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
+				apiClient.ReportEvents([]api.EventRequest{{
+					Type:       eventType,
+					Severity:   severity,
+					SourceIP:   ip,
+					Details:    details,
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			})
+			mailW.SetCheckIP(func(ip string) string {
+				cc, blocked := geo.IsBlocked(ip)
+				if blocked {
+					return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
+				}
+				return ""
+			})
+			log.Printf("[mailwatcher] mail service detected")
+		}
+	} else {
+		log.Printf("[mailwatcher] no mail service found — mail attack detection disabled")
+	}
+
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent, wsName); err != nil {
+	if err := syncAndApply(apiClient, w, webW, mailW, geo, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -319,6 +358,9 @@ func runAgent() {
 	go w.Run()
 	if webW != nil {
 		go webW.Run()
+	}
+	if mailW != nil {
+		go mailW.Run()
 	}
 
 	// Start Reverb WebSocket listener
@@ -367,7 +409,7 @@ func runAgent() {
 			OnSyncRequested: func(p ws.SyncRequestedPayload) {
 				log.Printf("[reverb] sync.requested: agent_id=%d", p.AgentID)
 				go func() {
-					if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent, wsName); err != nil {
+					if err := syncAndApply(apiClient, w, webW, mailW, geo, reportUpdateEvent, wsName); err != nil {
 						log.Printf("[sync] sync.requested failed: %v", err)
 					}
 				}()
@@ -460,7 +502,7 @@ func runAgent() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, webW, geo, reportUpdateEvent, wsName); err != nil {
+			if err := syncAndApply(apiClient, w, webW, mailW, geo, reportUpdateEvent, wsName); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -475,7 +517,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter, wsType string) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter, wsType string) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -489,6 +531,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 	// Apply monitor mode
 	w.SetMonitorMode(sync.Config.MonitorMode)
+	if mailW != nil {
+		mailW.SetMonitorMode(sync.Config.MonitorMode)
+	}
 	if webW != nil {
 		webW.SetMonitorMode(sync.Config.MonitorMode)
 
@@ -533,6 +578,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	w.UpdateWhitelist(wlIPs, wlCIDRs)
+	if mailW != nil {
+		mailW.UpdateWhitelist(wlIPs, wlCIDRs)
+	}
 	if webW != nil {
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
 	}
