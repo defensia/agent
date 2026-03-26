@@ -386,6 +386,45 @@ func runAgent() {
 		log.Printf("[dbwatcher] no database service found — DB auth detection disabled")
 	}
 
+	// Start FTP log watcher (if vsftpd/ProFTPD/Pure-FTPd detected)
+	var ftpW *watcher.FTPWatcher
+	if watcher.HasFTPService() {
+		ftpW = watcher.NewFTPWatcher(func(ip, reason string, count int) {
+			log.Printf("[ftpwatcher] banning %s: %s (count=%d)", ip, reason, count)
+			if err := firewall.BanIP(ip); err != nil {
+				log.Printf("[firewall] error: %v", err)
+			}
+			if err := apiClient.ReportBan(api.BanRequest{
+				IPAddress: ip,
+				Reason:    reason,
+				BanCount:  count,
+			}); err != nil {
+				log.Printf("[api] failed to report ban: %v", err)
+			}
+		})
+		if ftpW != nil {
+			ftpW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
+				apiClient.ReportEvents([]api.EventRequest{{
+					Type:       eventType,
+					Severity:   severity,
+					SourceIP:   ip,
+					Details:    details,
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			})
+			ftpW.SetCheckIP(func(ip string) string {
+				cc, blocked := geo.IsBlocked(ip)
+				if blocked {
+					return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
+				}
+				return ""
+			})
+			log.Printf("[ftpwatcher] FTP service detected")
+		}
+	} else {
+		log.Printf("[ftpwatcher] no FTP service found — FTP brute force detection disabled")
+	}
+
 	// Check for exposed database ports (runs once at startup)
 	go func() {
 		warnings := watcher.ExposedDBPorts()
@@ -401,7 +440,7 @@ func runAgent() {
 	}()
 
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, webW, mailW, dbW, geo, reportUpdateEvent, wsName); err != nil {
+	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -417,6 +456,9 @@ func runAgent() {
 	}
 	if dbW != nil {
 		go dbW.Run()
+	}
+	if ftpW != nil {
+		go ftpW.Run()
 	}
 
 	// Start Reverb WebSocket listener
@@ -465,7 +507,7 @@ func runAgent() {
 			OnSyncRequested: func(p ws.SyncRequestedPayload) {
 				log.Printf("[reverb] sync.requested: agent_id=%d", p.AgentID)
 				go func() {
-					if err := syncAndApply(apiClient, w, webW, mailW, dbW, geo, reportUpdateEvent, wsName); err != nil {
+					if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
 						log.Printf("[sync] sync.requested failed: %v", err)
 					}
 				}()
@@ -558,7 +600,7 @@ func runAgent() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, webW, mailW, dbW, geo, reportUpdateEvent, wsName); err != nil {
+			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -573,7 +615,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter, wsType string) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, ftpW *watcher.FTPWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter, wsType string) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -592,6 +634,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	}
 	if dbW != nil {
 		dbW.SetMonitorMode(sync.Config.MonitorMode)
+	}
+	if ftpW != nil {
+		ftpW.SetMonitorMode(sync.Config.MonitorMode)
 	}
 	if webW != nil {
 		webW.SetMonitorMode(sync.Config.MonitorMode)
@@ -642,6 +687,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	}
 	if dbW != nil {
 		dbW.UpdateWhitelist(wlIPs, wlCIDRs)
+	}
+	if ftpW != nil {
+		ftpW.UpdateWhitelist(wlIPs, wlCIDRs)
 	}
 	if webW != nil {
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
