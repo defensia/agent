@@ -87,6 +87,10 @@ docker run -d --privileged --net=host --pid=host \
 | Config probing / Scanner pattern | +20 | Score-based |
 | 404 flood | +15 | Threshold (30 req / 5 min) |
 
+**Mail server protection** *(v0.9.79+)* — 11 patterns for Postfix SASL, Dovecot IMAP/POP3, and Roundcube. Auto-detects `/var/log/mail.log` or `/var/log/maillog`. Detects SMTP brute force, relay scans, and suspicious connections.
+
+**Database auth monitoring** *(v0.9.80+)* — 8 patterns for MySQL/MariaDB, PostgreSQL, and MongoDB. Auto-detects error logs. Bans IPs after repeated auth failures. Proactive port exposure check: alerts if MySQL (3306), PostgreSQL (5432), MongoDB (27017), or Redis (6379) are publicly accessible.
+
 **Bot Scoring Engine** — each detection adds points to a per-IP score. Scores decay at 5 pts/min when idle. Thresholds: observe (30) → throttle (60) → block/1h (80) → blacklist/24h (100+). Score weights are configurable per server from the dashboard.
 
 **Bot Management** — 70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners, monitoring). Per-org policies: allow/log/block per fingerprint. Allowed bots (Googlebot, Bingbot) are tracked as events without blocking. Bots with policy **block** are rejected at the web server level (nginx `map+include` / Apache `SetEnvIfNoCase`) — connection closed before PHP/app is ever reached.
@@ -413,6 +417,10 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.80 | **Database auth monitoring**: MySQL/MariaDB, PostgreSQL, MongoDB brute force detection (8 patterns). Proactive port exposure check — alerts if DB ports are publicly accessible |
+| v0.9.79 | **Mail server protection**: Postfix SASL, Dovecot IMAP/POP3, Roundcube brute force detection (11 patterns). Auto-detects mail.log/maillog/dovecot.log |
+| v0.9.78 | Fix: WAF scored bans no longer override backend escalation logic |
+| v0.9.77 | Fix: geoblocking reads `blocked_countries` from sync config (was silently ignored) |
 | v0.9.64 | **Kubernetes Helm chart**: DaemonSet (1 agent per node), OCI chart on GHCR (`oci://ghcr.io/defensia/charts/defensia-agent`), token via Secret or existingSecret, tolerations for all nodes, resource limits, extraEnv support |
 | v0.9.63 | **Docker Swarm support**: `docker-compose.swarm.yml` with `deploy: mode: global` (1 agent per node), Docker secrets support (`DEFENSIA_TOKEN_FILE`) for secure multi-node deployments |
 | v0.9.62 | **Docker labels autoconf**: `defensia.monitor`, `defensia.log-path`, `defensia.domain`, `defensia.waf` — configure monitoring per container via Docker labels without agent restart |
