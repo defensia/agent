@@ -254,12 +254,12 @@ func runAgent() {
 			if err := firewall.BanIP(ip); err != nil {
 				log.Printf("[firewall] error: %v", err)
 			}
-			expiresAt := time.Now().Add(duration).UTC().Format(time.RFC3339)
+			// Don't send ExpiresAt — let the backend apply escalation logic
+			// (1st=24h, 2nd=7d, 3rd=30d, 4th+=permanent)
 			if err := apiClient.ReportBan(api.BanRequest{
 				IPAddress: ip,
 				Reason:    reason,
 				BanCount:  1,
-				ExpiresAt: &expiresAt,
 			}); err != nil {
 				log.Printf("[api] failed to report scored ban: %v", err)
 			}
