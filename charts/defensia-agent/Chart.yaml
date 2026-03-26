@@ -2,8 +2,8 @@ apiVersion: v2
 name: defensia-agent
 description: Real-time attack detection and blocking for Linux servers — SSH brute force, WAF, bot management, geo-blocking, and threat intelligence in a single lightweight agent.
 type: application
-version: 0.1.6
-appVersion: "0.9.73"
+version: 0.2.0
+appVersion: "0.9.80"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent
@@ -42,14 +42,16 @@ annotations:
     - title: WAF Analytics
       url: https://raw.githubusercontent.com/defensia/agent/main/docs/04-waf.png
   artifacthub.io/changes: |
+    - kind: added
+      description: Mail server protection — Postfix SASL, Dovecot IMAP/POP3, Roundcube (11 patterns)
+    - kind: added
+      description: Database auth monitoring — MySQL, PostgreSQL, MongoDB brute force + port exposure alerts
+    - kind: added
+      description: Geoblocking fix — blocked_countries now correctly read from sync config
     - kind: security
       description: Upgrade Go from 1.22 to 1.26 — fixes 25 CVEs in stdlib
-    - kind: added
-      description: GPG provenance signing for Helm chart
-    - kind: added
-      description: Cosign signing for Docker images
   artifacthub.io/images: |
     - name: defensia-agent
-      image: ghcr.io/defensia/agent:0.9.73
+      image: ghcr.io/defensia/agent:0.9.80
   artifacthub.io/prerelease: "false"
   artifacthub.io/containsSecurityUpdates: "false"
