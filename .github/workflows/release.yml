@@ -35,6 +35,7 @@ jobs:
         run: |
           mkdir -p build
 
+          # Bare metal binaries (no client-go, ~7MB)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
             -ldflags "-s -w -X main.version=${VERSION}" \
             -o build/defensia-agent-linux-amd64 \
@@ -45,11 +46,26 @@ jobs:
             -o build/defensia-agent-linux-arm64 \
             ./cmd/defensia-agent
 
+          # K8s binaries (includes client-go, ~33MB)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags kubernetes \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o build/defensia-agent-linux-amd64-k8s \
+            ./cmd/defensia-agent
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+            -tags kubernetes \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o build/defensia-agent-linux-arm64-k8s \
+            ./cmd/defensia-agent
+
       - name: Generate checksums
         working-directory: build
         run: |
           sha256sum defensia-agent-linux-amd64 > defensia-agent-linux-amd64.sha256
           sha256sum defensia-agent-linux-arm64 > defensia-agent-linux-arm64.sha256
+          sha256sum defensia-agent-linux-amd64-k8s > defensia-agent-linux-amd64-k8s.sha256
+          sha256sum defensia-agent-linux-arm64-k8s > defensia-agent-linux-arm64-k8s.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -78,12 +94,18 @@ jobs:
             |---|---|
             | Linux x86_64 | `defensia-agent-linux-amd64` |
             | Linux ARM64  | `defensia-agent-linux-arm64` |
+            | Linux x86_64 (K8s) | `defensia-agent-linux-amd64-k8s` |
+            | Linux ARM64 (K8s)  | `defensia-agent-linux-arm64-k8s` |
 
           files: |
             build/defensia-agent-linux-amd64
             build/defensia-agent-linux-amd64.sha256
             build/defensia-agent-linux-arm64
             build/defensia-agent-linux-arm64.sha256
+            build/defensia-agent-linux-amd64-k8s
+            build/defensia-agent-linux-amd64-k8s.sha256
+            build/defensia-agent-linux-arm64-k8s
+            build/defensia-agent-linux-arm64-k8s.sha256
             install.sh
 
   docker:
@@ -126,7 +148,9 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          build-args: VERSION=${{ steps.version.outputs.VERSION }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            BUILD_TAGS=kubernetes
           tags: |
             ghcr.io/defensia/agent:latest
             ghcr.io/defensia/agent:${{ steps.version.outputs.VERSION }}

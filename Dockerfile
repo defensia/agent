@@ -9,7 +9,9 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=0.0.0
+ARG BUILD_TAGS=""
 RUN CGO_ENABLED=0 GOOS=linux go build \
+    -tags "${BUILD_TAGS}" \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /defensia-agent \
     ./cmd/defensia-agent
