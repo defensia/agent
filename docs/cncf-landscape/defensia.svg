@@ -1,0 +1,8 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Shield -->
+  <path d="M128 20l88 40v80c0 48-40 88-88 104-48-16-88-56-88-104V60z" stroke="#0EA5E9" stroke-width="8" fill="none"/>
+  <!-- Terminal prompt -->
+  <text x="88" y="148" fill="#0EA5E9" font-family="JetBrains Mono, Consolas, monospace" font-size="52" font-weight="700">&gt;_</text>
+  <!-- Name -->
+  <text x="128" y="230" fill="#0EA5E9" font-family="Inter, -apple-system, sans-serif" font-size="28" font-weight="600" text-anchor="middle">DEFENSIA</text>
+</svg>

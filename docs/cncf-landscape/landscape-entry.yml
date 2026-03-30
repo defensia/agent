@@ -1,0 +1,23 @@
+# CNCF Landscape entry for Defensia
+# Location: Provisioning > Security & Compliance (alphabetical, between "D" entries)
+# Submit as PR to https://github.com/cncf/landscape (add to landscape.yml)
+#
+# Prerequisites:
+# - 300+ GitHub stars on defensia/agent
+# - Crunchbase organization profile for Defensia
+# - Upload defensia.svg to hosted_logos/
+
+          - item:
+              name: Defensia
+              description: Cloud-native server security platform with a Go-based agent that provides WAF, intrusion detection, automated threat response, CVE scanning, and real-time monitoring for Linux servers and Kubernetes clusters. Deploys as a DaemonSet with Ingress WAF, pod event monitoring, and NetworkPolicy audit.
+              homepage_url: https://defensia.cloud
+              repo_url: https://github.com/defensia/agent
+              logo: defensia.svg
+              twitter: https://twitter.com/defensiacloud
+              crunchbase: https://www.crunchbase.com/organization/defensia
+              extra:
+                summary_personas: DevOps Engineers, SREs, Platform Engineers, DevSecOps, Sysadmins
+                summary_tags: Security, WAF, IDS, Intrusion Detection, Go, Linux, Kubernetes, Runtime Security, Container Security, Server Protection, Threat Intelligence, CVE Scanning
+                summary_use_case: Defensia protects Linux servers and Kubernetes nodes with real-time attack detection and automated blocking. The Go agent reads web server and ingress controller logs for WAF analysis, monitors SSH for brute force, detects pod crashes and misconfigurations in K8s, and scans for CVE vulnerabilities. One Helm command deploys a DaemonSet across the entire cluster.
+                summary_integrations: Kubernetes, Docker, Helm, Nginx, Apache, Postfix, Dovecot, DigitalOcean, cPanel/WHM
+                summary_release_rate: Weekly releases with automatic OTA agent updates
