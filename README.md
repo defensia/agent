@@ -9,6 +9,9 @@
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/defensia-agent)](https://artifacthub.io/packages/helm/defensia-agent/defensia-agent)
 [![DigitalOcean Marketplace](https://img.shields.io/badge/DigitalOcean-Marketplace-0080FF?logo=digitalocean&logoColor=white)](https://marketplace.digitalocean.com/apps/defensia-agent)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
+[![GitHub stars](https://img.shields.io/github/stars/defensia/agent?style=social)](https://github.com/defensia/agent)
+
+> **If Defensia helps protect your servers, give us a star — it helps others find the project.**
 
 **Your server is being attacked right now. You just don't know it.**
 
@@ -100,6 +103,8 @@ docker run -d --privileged --net=host --pid=host \
 **Dynamic Detection Rules** — SSH detection patterns are synced from the dashboard and compiled at runtime. Enable/disable individual rules per server without agent updates.
 
 **Docker-aware** — auto-detects web servers inside Docker containers, reads logs via bind mounts, volumes, or container stdout
+
+**Kubernetes-native** *(v0.9.83+)* — deploys as a DaemonSet via Helm. Auto-detects K8s API, lists pods per node, discovers Ingress hosts for cluster-wide WAF, watches pod events (CrashLoop, OOM, evictions), audits NetworkPolicy. The container image includes `client-go` — if `KUBERNETES_SERVICE_HOST` is present, K8s mode activates automatically.
 
 **GeoIP blocking** — block entire countries from the dashboard
 **Network propagation** — bans detected on one server instantly applied to all your servers
@@ -417,6 +422,9 @@ systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl st
 
 | Version | Changes |
 |---------|---------|
+| v0.9.83 | **Kubernetes Level 5**: K8s API integration via `client-go` (build tags). Pod inventory, Ingress host discovery, NetworkPolicy audit, pod event watcher (CrashLoop, OOM, evictions). Containerd log adapter for Ingress WAF. WAF request counter in heartbeat. Dual binary release (bare metal 7MB + K8s 33MB) |
+| v0.9.82 | FTP brute force detection (vsftpd, ProFTPD, Pure-FTPd) |
+| v0.9.81 | Helm chart v0.2.0 (appVersion 0.9.80, mail+DB watchers) |
 | v0.9.80 | **Database auth monitoring**: MySQL/MariaDB, PostgreSQL, MongoDB brute force detection (8 patterns). Proactive port exposure check — alerts if DB ports are publicly accessible |
 | v0.9.79 | **Mail server protection**: Postfix SASL, Dovecot IMAP/POP3, Roundcube brute force detection (11 patterns). Auto-detects mail.log/maillog/dovecot.log |
 | v0.9.78 | Fix: WAF scored bans no longer override backend escalation logic |
