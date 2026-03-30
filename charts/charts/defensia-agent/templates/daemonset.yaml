@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: {{ include "defensia-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "defensia-agent.labels" . | nindent 4 }}
 spec:
@@ -17,10 +18,13 @@ spec:
       labels:
         {{- include "defensia-agent.selectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "defensia-agent.fullname" . }}
+      serviceAccountName: {{ include "defensia-agent.serviceAccountName" . }}
       hostNetwork: true
       hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
@@ -29,19 +33,18 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       containers:
-        - name: agent
-          image: "{{ .Values.image.repository }}:{{ include "defensia-agent.imageTag" . }}"
+        - name: defensia-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             privileged: true
           env:
-            - name: DEFENSIA_TOKEN_FILE
-              value: /run/secrets/defensia/token
+            - name: DEFENSIA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "defensia-agent.fullname" . }}
+                  key: api-key
             - name: DEFENSIA_SERVER_URL
               value: {{ .Values.serverUrl | quote }}
             - name: NODE_NAME
@@ -52,10 +55,6 @@ spec:
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
             {{- end }}
-            {{- if .Values.agentName }}
-            - name: DEFENSIA_AGENT_NAME
-              value: {{ .Values.agentName | quote }}
-            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -65,28 +64,26 @@ spec:
             - name: host-log
               mountPath: /var/log
               readOnly: true
-            - name: docker-socket
+            - name: docker-sock
               mountPath: /var/run/docker.sock
               readOnly: true
-            - name: config
-              mountPath: /etc/defensia
-            - name: token
-              mountPath: /run/secrets/defensia
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
               readOnly: true
+            - name: agent-config
+              mountPath: /etc/defensia
       volumes:
         - name: host-log
           hostPath:
-            path: {{ .Values.hostPaths.log }}
+            path: /var/log
             type: DirectoryOrCreate
-        - name: docker-socket
+        - name: docker-sock
           hostPath:
-            path: {{ .Values.hostPaths.dockerSocket }}
-            type: Socket
-        - name: config
+            path: /var/run/docker.sock
+            type: FileOrCreate
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: FileOrCreate
+        - name: agent-config
           emptyDir: {}
-        - name: token
-          secret:
-            secretName: {{ include "defensia-agent.secretName" . }}
-            items:
-              - key: token
-                path: token

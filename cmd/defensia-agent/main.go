@@ -19,6 +19,7 @@ import (
 	"github.com/defensia/agent/internal/config"
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
+	"github.com/defensia/agent/internal/kubernetes"
 	"github.com/defensia/agent/internal/monitor"
 	"github.com/defensia/agent/internal/scanner"
 	"github.com/defensia/agent/internal/updater"
@@ -155,6 +156,21 @@ func runAgent() {
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
 	geo := geoip.New(geoDBPath)
 	defer geo.Close()
+
+	// Initialize Kubernetes client (nil if not running in K8s)
+	k8sClient := kubernetes.NewClient()
+	if k8sClient != nil {
+		log.Printf("[main] Kubernetes mode enabled, node: %s", k8sClient.NodeName())
+		go k8sClient.WatchEvents(func(event kubernetes.K8sEvent) {
+			log.Printf("[kubernetes] event: %s (%s)", event.Type, event.Severity)
+			_ = apiClient.ReportEvents([]api.EventRequest{{
+				Type:       event.Type,
+				Severity:   event.Severity,
+				Details:    event.Details,
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		})
+	}
 
 	// Start auth.log watcher
 	w := watcher.New(func(ip, reason string, count int) {
@@ -548,6 +564,11 @@ func runAgent() {
 			zReport := monitor.ScanZombies()
 			sysMetrics := metricsCollector.Collect()
 
+			var reqAnalyzed uint64
+			if webW != nil {
+				reqAnalyzed = webW.RequestsAnalyzed()
+			}
+
 			fwStatus := firewall.FirewallStatus()
 			hbReq := api.HeartbeatRequest{
 				Status:            "online",
@@ -562,6 +583,8 @@ func runAgent() {
 				FirewallMode:      fwStatus.Mode,
 				BanCapacity:       fwStatus.Capacity,
 				ActiveBans:        fwStatus.ActiveBans,
+				KubernetesInfo:    collectK8sInfo(k8sClient),
+				RequestsAnalyzed: reqAnalyzed,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -966,6 +989,13 @@ func detectOS() osInfo {
 	}
 
 	return info
+}
+
+func collectK8sInfo(c *kubernetes.Client) interface{} {
+	if c == nil {
+		return nil
+	}
+	return c.CollectInfo()
 }
 
 func detectOutboundIP() string {

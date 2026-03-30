@@ -1,0 +1,45 @@
+# Defensia Agent Helm Chart — values.yaml
+
+# Required: your organization API key from defensia.cloud
+apiKey: ""
+
+# Defensia server URL (change only for self-hosted)
+serverUrl: "https://defensia.cloud"
+
+# Optional: cluster name (auto-detected if not set)
+clusterName: ""
+
+image:
+  repository: ghcr.io/defensia/agent
+  tag: ""  # Defaults to appVersion
+  pullPolicy: IfNotPresent
+
+# Resource limits for the agent container
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# DaemonSet tolerations — run on ALL nodes (including masters)
+tolerations:
+  - operator: Exists
+
+# Node selector (optional — restrict to specific nodes)
+nodeSelector: {}
+
+# Priority class (optional — ensure agent isn't evicted first)
+priorityClassName: ""
+
+# Extra environment variables
+extraEnv: []
+#  - name: GEOIP_DB_PATH
+#    value: /etc/defensia/GeoLite2-Country.mmdb
+
+# Service account
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

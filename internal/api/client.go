@@ -87,6 +87,8 @@ type HeartbeatRequest struct {
 	FirewallMode       string         `json:"firewall_mode,omitempty"`
 	BanCapacity        int            `json:"ban_capacity,omitempty"`
 	ActiveBans         int            `json:"active_bans,omitempty"`
+	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`
+	RequestsAnalyzed   uint64         `json:"requests_analyzed,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.
@@ -95,6 +97,7 @@ type HeartbeatResponse struct {
 	LastSeenAt          string  `json:"last_seen_at"`
 	LatestAgentVersion  *string `json:"latest_agent_version,omitempty"`
 	AgentDownloadBaseURL *string `json:"agent_download_base_url,omitempty"`
+	K8sDomainLimit      int     `json:"k8s_domain_limit,omitempty"`
 }
 
 // BanRequest reports a newly banned IP to the server.

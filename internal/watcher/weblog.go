@@ -108,6 +108,9 @@ type WebWatcher struct {
 	// Parse failure tracking per log file
 	parseStats map[string]*parseFileStats
 
+	// Counter: total requests analyzed since last heartbeat read
+	requestsAnalyzed uint64
+
 	// WAF config from panel sync (nil = use defaults)
 	wafEnabled    map[string]bool
 	wafDetectOnly map[string]bool
@@ -794,6 +797,15 @@ func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc,
 }
 
 // SetOnScoredBan sets a callback for score-based bans (with duration).
+// RequestsAnalyzed returns and resets the request counter since last call.
+func (w *WebWatcher) RequestsAnalyzed() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	count := w.requestsAnalyzed
+	w.requestsAnalyzed = 0
+	return count
+}
+
 func (w *WebWatcher) SetOnScoredBan(fn ScoredBanFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1097,8 +1109,19 @@ type accessLogEntry struct {
 
 // parseAccessLog parses a combined log format line without regex.
 // Format: IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
+// Also handles containerd/CRI-O log prefix: "2026-01-01T00:00:00.000Z stdout F <actual log line>"
 func parseAccessLog(line string) (accessLogEntry, bool) {
 	var e accessLogEntry
+
+	// Strip containerd/CRI-O log prefix (K8s container logs)
+	// Format: "2006-01-02T15:04:05.999999999Z stdout F <line>"
+	if len(line) > 36 && line[4] == '-' && line[10] == 'T' {
+		if idx := strings.Index(line, " stdout F "); idx > 0 && idx < 40 {
+			line = line[idx+10:]
+		} else if idx := strings.Index(line, " stderr F "); idx > 0 && idx < 40 {
+			line = line[idx+10:]
+		}
+	}
 
 	// Extract IP (first field)
 	spaceIdx := strings.IndexByte(line, ' ')
@@ -1295,6 +1318,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		w.parseStats[logPath] = stats
 	}
 	stats.totalLines++
+	w.requestsAnalyzed++
 
 	if !ok {
 		stats.failedLines++
