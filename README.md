@@ -274,6 +274,56 @@ Bot Scoring Engine
 
 The agent never bans reserved IPs (`127.x`, `10.x`, `192.168.x`), your own server's IPs, or the Defensia API endpoint — even if the backend somehow sends a bad rule. Bans use `ipset` when available (65K+ capacity); without it, falls back to iptables with automatic FIFO rotation at 500 rules.
 
+### How it works on Kubernetes *(v0.9.84+)*
+
+On bare metal, `iptables INPUT` blocks everything. On Kubernetes, web traffic bypasses INPUT (goes through FORWARD → kube-proxy → pod). Defensia solves this with **3-layer blocking**:
+
+```
+Attacker
+    │
+    ├─── SSH to node ──► iptables INPUT ──► DROP ✓
+    │
+    └─── HTTP to ingress
+              │
+              ▼
+         LoadBalancer → NodePort → kube-proxy
+              │
+              ▼
+         nginx-ingress controller
+              │  reads ConfigMap "defensia-blocked-ips"
+              │  (managed by Defensia agent)
+              │
+              ├─ IP in deny list? → 403 Forbidden ✓
+              │
+              └─ IP allowed → forward to backend pod
+                                │
+                                ▼
+                          access log written
+                                │
+                                ▼
+                     Defensia agent (DaemonSet)
+                          │  WAF: SQLi, XSS, RCE, path traversal...
+                          │  Bot scoring engine (same as bare metal)
+                          │
+                          └─ Score ≥ threshold → BanIP
+                                │         │
+                                │         └──► ConfigMap: deny <IP>;
+                                │              nginx-ingress reloads → 403
+                                │
+                                └──► iptables INPUT: DROP <IP>
+                                     (protects SSH on this node)
+```
+
+**Three layers of protection:**
+
+| Layer | Protects | Mechanism |
+|-------|----------|-----------|
+| **iptables INPUT** | SSH to the node | `iptables -I INPUT -s <IP> -j DROP` |
+| **ConfigMap → nginx deny** | All web traffic via ingress | Agent writes `deny <IP>;` to ConfigMap, nginx-ingress reads it |
+| **Dashboard propagation** | All servers + nodes | Ban synced via WebSocket to every agent in the organization |
+
+The ConfigMap approach is **CNI-agnostic** — works with Cilium, Calico, Flannel, or any networking plugin. The agent only needs write access to one ConfigMap in the ingress namespace (least-privilege RBAC).
+
 ---
 
 ## Per-server WAF configuration *(v0.9.3+)*
