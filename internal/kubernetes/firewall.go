@@ -104,6 +104,7 @@ func (fw *K8sFirewall) syncToIngress() error {
 	defBlock := markerStart + "\n"
 	if len(denyLines) > 0 {
 		defBlock += strings.Join(denyLines, "\n") + "\n"
+		defBlock += "allow all;\n"
 	}
 	defBlock += markerEnd
 
