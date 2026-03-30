@@ -9,6 +9,7 @@
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/defensia-agent)](https://artifacthub.io/packages/helm/defensia-agent/defensia-agent)
 [![DigitalOcean Marketplace](https://img.shields.io/badge/DigitalOcean-Marketplace-0080FF?logo=digitalocean&logoColor=white)](https://marketplace.digitalocean.com/apps/defensia-agent)
 [![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/defensia/agent/badge)](https://securityscorecards.dev/viewer/?uri=github.com/defensia/agent)
 [![GitHub stars](https://img.shields.io/github/stars/defensia/agent?style=social)](https://github.com/defensia/agent)
 
 > **If Defensia helps protect your servers, give us a star — it helps others find the project.**
