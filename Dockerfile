@@ -31,7 +31,9 @@ COPY --from=builder /defensia-agent /usr/local/bin/defensia-agent
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/defensia-agent
 
+ARG VERSION
 ENV DEFENSIA_CONFIG=/etc/defensia/config.json
 ENV DEFENSIA_SERVER_URL=https://defensia.cloud
+ENV DEFENSIA_VERSION=${VERSION}
 
 ENTRYPOINT ["docker-entrypoint.sh"]
