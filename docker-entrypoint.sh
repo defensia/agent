@@ -31,27 +31,20 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     if [[ -n "${DEFENSIA_API_KEY:-}" ]]; then
         NODE_NAME="${NODE_NAME:-$(hostname -s)}"
         CLUSTER_NAME="${CLUSTER_NAME:-}"
-        OS_INFO="$(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME=' | cut -d= -f2 | tr -d '"' || echo 'Linux')"
-        OS_VERSION="$(uname -r)"
-        IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}' || echo '0.0.0.0')"
-        AGENT_VERSION="$("$BINARY" version 2>/dev/null || echo 'unknown')"
+        OS_INFO=$(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME=' | cut -d= -f2 | tr -d '"' || echo "Linux")
+        OS_VERSION=$(uname -r 2>/dev/null || echo "unknown")
+        IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "0.0.0.0")
+        AGENT_VERSION=$("$BINARY" version 2>/dev/null || echo "unknown")
 
         echo "[defensia] Registering K8s node '${NODE_NAME}' with ${SERVER_URL}..."
+
+        # Build JSON payload (avoid multiline -d issues in Alpine curl)
+        PAYLOAD="{\"api_key\":\"${DEFENSIA_API_KEY}\",\"name\":\"${NODE_NAME}\",\"hostname\":\"${NODE_NAME}\",\"ip_address\":\"${IP_ADDR}\",\"os\":\"${OS_INFO}\",\"os_version\":\"${OS_VERSION}\",\"version\":\"${AGENT_VERSION}\",\"node_name\":\"${NODE_NAME}\",\"cluster_name\":\"${CLUSTER_NAME}\"}"
 
         RESPONSE=$(curl -fsSL -X POST "${SERVER_URL}/api/v1/agents/register-k8s" \
             -H "Content-Type: application/json" \
             -H "User-Agent: DefensiaAgent/${AGENT_VERSION}" \
-            -d "{
-                \"api_key\": \"${DEFENSIA_API_KEY}\",
-                \"name\": \"${NODE_NAME}\",
-                \"hostname\": \"${NODE_NAME}\",
-                \"ip_address\": \"${IP_ADDR}\",
-                \"os\": \"${OS_INFO}\",
-                \"os_version\": \"${OS_VERSION}\",
-                \"version\": \"${AGENT_VERSION}\",
-                \"node_name\": \"${NODE_NAME}\",
-                \"cluster_name\": \"${CLUSTER_NAME}\"
-            }" 2>&1) || {
+            -d "${PAYLOAD}" 2>&1) || {
             echo "[defensia] ERROR: K8s registration failed."
             echo "[defensia] Response: ${RESPONSE}"
             echo "[defensia] Check: API key is valid, server slots available, server URL reachable."
