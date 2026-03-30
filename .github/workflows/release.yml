@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
@@ -66,6 +68,15 @@ jobs:
           sha256sum defensia-agent-linux-amd64-k8s > defensia-agent-linux-amd64-k8s.sha256
           sha256sum defensia-agent-linux-arm64-k8s > defensia-agent-linux-arm64-k8s.sha256
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            build/defensia-agent-linux-amd64
+            build/defensia-agent-linux-arm64
+            build/defensia-agent-linux-amd64-k8s
+            build/defensia-agent-linux-arm64-k8s
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -114,6 +125,7 @@ jobs:
     permissions:
       packages: write
       id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
@@ -164,6 +176,13 @@ jobs:
             org.opencontainers.image.vendor=Defensia
             org.opencontainers.image.source=https://github.com/defensia/agent
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+
+      - name: Attest Docker image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/defensia/agent
+          subject-digest: ${{ steps.docker-build.outputs.digest }}
+          push-to-registry: true
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
