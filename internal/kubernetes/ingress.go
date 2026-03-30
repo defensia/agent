@@ -4,9 +4,9 @@ package kubernetes
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,13 +45,13 @@ func (c *Client) ListIngressHosts() []string {
 	return hosts
 }
 
-// FindIngressLogPaths discovers nginx-ingress controller log paths.
-// The killer feature: WAF on ingress logs protects ALL cluster services.
+// FindIngressLogPaths discovers ingress controller log paths on this node.
+// Searches /var/log/pods/ for nginx-ingress or traefik container logs.
 func (c *Client) FindIngressLogPaths() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Find nginx-ingress controller pods on this node
+	// Find ingress controller pods on this node
 	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
 		FieldSelector: "spec.nodeName=" + c.nodeName,
 	})
@@ -62,65 +62,42 @@ func (c *Client) FindIngressLogPaths() []string {
 	var logPaths []string
 
 	for _, pod := range pods.Items {
-		// Match common ingress controller patterns
-		isIngress := false
-		for _, c := range pod.Spec.Containers {
-			img := strings.ToLower(c.Image)
+		// Match common ingress controller images
+		ingressContainer := ""
+		for _, container := range pod.Spec.Containers {
+			img := strings.ToLower(container.Image)
 			if strings.Contains(img, "ingress-nginx") ||
 				strings.Contains(img, "nginx-ingress") ||
 				strings.Contains(img, "traefik") {
-				isIngress = true
+				ingressContainer = container.Name
 				break
 			}
 		}
-		if !isIngress {
+		if ingressContainer == "" {
 			continue
 		}
 
-		// Ingress controller logs go to stdout → Docker/containerd captures them.
-		// The log file is at /var/log/pods/<namespace>_<pod>_<uid>/<container>/0.log
-		// Or /var/log/containers/<pod>_<namespace>_<container>-<id>.log
-		logDir := fmt.Sprintf("/var/log/pods/%s_%s_*", pod.Namespace, pod.Name)
+		// Search /var/log/pods/<namespace>_<podname>_<uid>/<container>/0.log
+		// The UID is in the pod metadata
+		uid := string(pod.UID)
+		podLogDir := filepath.Join("/var/log/pods",
+			pod.Namespace+"_"+pod.Name+"_"+uid,
+			ingressContainer)
 
-		// Also check if there's a volume mount for access logs
-		for _, c := range pod.Spec.Containers {
-			for _, vm := range c.VolumeMounts {
-				if strings.Contains(vm.MountPath, "log") {
-					logPaths = append(logPaths, vm.MountPath)
-				}
-			}
+		logFile := filepath.Join(podLogDir, "0.log")
+		if _, err := os.Stat(logFile); err == nil {
+			logPaths = append(logPaths, logFile)
+			log.Printf("[kubernetes] found ingress log: %s", logFile)
+			continue
 		}
 
-		// Try the standard container log path
-		containerLogPattern := fmt.Sprintf("/var/log/containers/%s_%s_*.log", pod.Name, pod.Namespace)
-		if matches, _ := findGlobPaths(containerLogPattern); len(matches) > 0 {
-			logPaths = append(logPaths, matches...)
-		} else if matches, _ := findGlobPaths(logDir + "/*/0.log"); len(matches) > 0 {
-			logPaths = append(logPaths, matches...)
-		}
-
-		if len(logPaths) > 0 {
-			log.Printf("[kubernetes] found ingress controller logs: %v", logPaths)
+		// Fallback: glob for rotated logs in the same dir
+		matches, _ := filepath.Glob(filepath.Join(podLogDir, "*.log"))
+		if len(matches) > 0 {
+			logPaths = append(logPaths, matches[0])
+			log.Printf("[kubernetes] found ingress log (glob): %s", matches[0])
 		}
 	}
 
 	return logPaths
-}
-
-// findGlobPaths matches a glob pattern on the filesystem.
-func findGlobPaths(pattern string) ([]string, error) {
-	// Use filepath.Glob but we import os for PathSeparator
-	entries, err := os.ReadDir("/var/log/containers")
-	if err != nil {
-		return nil, err
-	}
-
-	var matches []string
-	prefix := strings.TrimSuffix(strings.TrimPrefix(pattern, "/var/log/containers/"), "*.log")
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) && strings.HasSuffix(e.Name(), ".log") {
-			matches = append(matches, "/var/log/containers/"+e.Name())
-		}
-	}
-	return matches, nil
 }

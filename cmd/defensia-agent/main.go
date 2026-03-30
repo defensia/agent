@@ -28,7 +28,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.89"
+var version = "0.9.90"
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -220,6 +220,21 @@ func runAgent() {
 	var webW *watcher.WebWatcher
 	var monitoredDomains []string
 	var monitoredLogPaths []string
+
+	// In K8s: auto-discover ingress controller log paths
+	if k8sClient != nil {
+		if ingressPaths := k8sClient.FindIngressLogPaths(); len(ingressPaths) > 0 {
+			log.Printf("[main] K8s ingress logs discovered: %v", ingressPaths)
+			// Set WEB_LOG_PATH so the web watcher picks them up
+			existing := os.Getenv("WEB_LOG_PATH")
+			combined := strings.Join(ingressPaths, ",")
+			if existing != "" {
+				combined = existing + "," + combined
+			}
+			os.Setenv("WEB_LOG_PATH", combined)
+		}
+	}
+
 	if webLogInfos, domainMap := watcher.DetectWebLogInfo(); len(webLogInfos) > 0 {
 		webLogPaths := make([]string, len(webLogInfos))
 		for i, info := range webLogInfos {
