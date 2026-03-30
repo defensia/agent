@@ -1,10 +1,14 @@
 # Defensia Agent — Helm values
 # Full docs: https://github.com/defensia/agent
 
-# Required: your install token from https://defensia.cloud/dashboard
+# For Kubernetes: use apiKey (multi-use, one key for the whole cluster)
+# Each DaemonSet pod registers as 1 server slot. Billing limits apply.
+apiKey: ""
+
+# For single-server Docker: use token (single-use install token)
 token: ""
 
-# Or reference an existing Secret (key must be "token")
+# Or reference an existing Secret (key: "api-key" or "token")
 existingSecret: ""
 
 # Defensia panel URL

@@ -2,8 +2,8 @@ apiVersion: v2
 name: defensia-agent
 description: Kubernetes-native security agent — Ingress WAF, pod monitoring, NetworkPolicy audit, SSH brute force detection, CVE scanning, and automated threat blocking. Deploys as a DaemonSet on every node.
 type: application
-version: 0.3.1
-appVersion: "0.9.85"
+version: 0.3.2
+appVersion: "0.9.87"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent

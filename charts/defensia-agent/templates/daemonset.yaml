@@ -40,8 +40,13 @@ spec:
           securityContext:
             privileged: true
           env:
+            {{- if .Values.apiKey }}
+            - name: DEFENSIA_API_KEY_FILE
+              value: /run/secrets/defensia/api-key
+            {{- else }}
             - name: DEFENSIA_TOKEN_FILE
               value: /run/secrets/defensia/token
+            {{- end }}
             - name: DEFENSIA_SERVER_URL
               value: {{ .Values.serverUrl | quote }}
             - name: NODE_NAME
@@ -81,5 +86,10 @@ spec:
           secret:
             secretName: {{ include "defensia-agent.secretName" . }}
             items:
+              {{- if .Values.apiKey }}
+              - key: api-key
+                path: api-key
+              {{- else }}
               - key: token
                 path: token
+              {{- end }}
