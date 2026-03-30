@@ -31,10 +31,10 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     if [[ -n "${DEFENSIA_API_KEY:-}" ]]; then
         NODE_NAME="${NODE_NAME:-$(hostname -s)}"
         CLUSTER_NAME="${CLUSTER_NAME:-}"
-        OS_INFO=$(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME=' | cut -d= -f2 | tr -d '"' || echo "Linux")
-        OS_VERSION=$(uname -r 2>/dev/null || echo "unknown")
-        IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "0.0.0.0")
-        AGENT_VERSION=$("$BINARY" version 2>/dev/null || echo "unknown")
+        OS_INFO=$(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME=' | cut -d= -f2 | tr -d '"\n' || echo "Linux")
+        OS_VERSION=$(uname -r 2>/dev/null | tr -d '\n' || echo "unknown")
+        IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' | tr -d '\n' || echo "0.0.0.0")
+        AGENT_VERSION=$("$BINARY" version 2>/dev/null | tr -d '\n' || echo "unknown")
 
         echo "[defensia] Registering K8s node '${NODE_NAME}' with ${SERVER_URL}..."
 
