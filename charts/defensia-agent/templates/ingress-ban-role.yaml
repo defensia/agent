@@ -1,6 +1,6 @@
 {{/*
-Role for writing banned IPs to a ConfigMap in the ingress controller namespace.
-Only grants access to the specific ConfigMap "defensia-blocked-ips".
+Role for patching the ingress controller's ConfigMap with deny rules.
+Only grants access to the specific ConfigMap used by nginx-ingress.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -12,12 +12,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "create", "update"]
-    resourceNames: ["defensia-blocked-ips"]
-  # Need create without resourceNames for initial creation
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["create"]
+    verbs: ["get", "update"]
+    resourceNames: ["ingress-nginx-controller"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

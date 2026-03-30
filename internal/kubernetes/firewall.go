@@ -10,21 +10,25 @@ import (
 	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	// ConfigMap name and namespace for blocked IPs
-	banConfigMapName = "defensia-blocked-ips"
-	banDataKey       = "blocked-ips.conf"
-
-	// Namespace where the ingress controller runs
 	defaultIngressNamespace = "ingress-nginx"
+
+	// nginx-ingress controller's own ConfigMap — it watches this and auto-reloads
+	ingressConfigMapName = "ingress-nginx-controller"
+
+	// Key in the ConfigMap that nginx-ingress reads for global server-level config
+	serverSnippetKey = "server-snippet"
+
+	// Markers so we only modify our section, not user's existing snippets
+	markerStart = "# -- defensia-blocked-ips-start --"
+	markerEnd   = "# -- defensia-blocked-ips-end --"
 )
 
-// K8sFirewall manages a ConfigMap with nginx deny directives for ingress-level blocking.
+// K8sFirewall manages blocked IPs by injecting deny rules into the nginx-ingress
+// controller's ConfigMap server-snippet. nginx-ingress auto-reloads on ConfigMap changes.
 type K8sFirewall struct {
 	client    *Client
 	namespace string
@@ -32,8 +36,7 @@ type K8sFirewall struct {
 	blocked   map[string]bool
 }
 
-// NewK8sFirewall creates a K8s-native firewall that writes banned IPs to a ConfigMap.
-// The nginx-ingress controller reads this ConfigMap for deny rules.
+// NewK8sFirewall creates a K8s-native firewall.
 func NewK8sFirewall(client *Client) *K8sFirewall {
 	if client == nil {
 		return nil
@@ -47,14 +50,14 @@ func NewK8sFirewall(client *Client) *K8sFirewall {
 		blocked:   make(map[string]bool),
 	}
 
-	// Load existing bans from ConfigMap on startup
+	// Load existing bans from the ConfigMap on startup
 	fw.loadExisting()
 
 	log.Printf("[k8s-firewall] initialized, namespace: %s, existing bans: %d", ns, len(fw.blocked))
 	return fw
 }
 
-// BanIP adds an IP to the ConfigMap deny list.
+// BanIP adds an IP to the ingress deny list.
 func (fw *K8sFirewall) BanIP(ip string) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
@@ -64,10 +67,10 @@ func (fw *K8sFirewall) BanIP(ip string) error {
 	}
 
 	fw.blocked[ip] = true
-	return fw.syncConfigMap()
+	return fw.syncToIngress()
 }
 
-// UnbanIP removes an IP from the ConfigMap deny list.
+// UnbanIP removes an IP from the ingress deny list.
 func (fw *K8sFirewall) UnbanIP(ip string) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
@@ -77,68 +80,101 @@ func (fw *K8sFirewall) UnbanIP(ip string) error {
 	}
 
 	delete(fw.blocked, ip)
-	return fw.syncConfigMap()
+	return fw.syncToIngress()
 }
 
-// syncConfigMap writes the current blocked IPs to the ConfigMap.
-func (fw *K8sFirewall) syncConfigMap() error {
+// syncToIngress patches the nginx-ingress controller ConfigMap's server-snippet
+// with deny rules. nginx-ingress detects the change and auto-reloads.
+func (fw *K8sFirewall) syncToIngress() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Build nginx deny directives
-	var lines []string
-	for ip := range fw.blocked {
-		lines = append(lines, fmt.Sprintf("deny %s;", ip))
-	}
-	// Always end with empty line for clean nginx include
-	content := strings.Join(lines, "\n")
-	if len(lines) > 0 {
-		content += "\n"
-	}
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      banConfigMapName,
-			Namespace: fw.namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "defensia-agent",
-				"app.kubernetes.io/component":  "firewall",
-			},
-		},
-		Data: map[string]string{
-			banDataKey: content,
-		},
-	}
-
-	// Try update first, create if doesn't exist
-	_, err := fw.client.clientset.CoreV1().ConfigMaps(fw.namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	// Get the existing ingress controller ConfigMap
+	cm, err := fw.client.clientset.CoreV1().ConfigMaps(fw.namespace).Get(ctx, ingressConfigMapName, metav1.GetOptions{})
 	if err != nil {
-		if errors.IsNotFound(err) {
-			_, err = fw.client.clientset.CoreV1().ConfigMaps(fw.namespace).Create(ctx, cm, metav1.CreateOptions{})
-		}
-	}
-
-	if err != nil {
-		log.Printf("[k8s-firewall] failed to sync ConfigMap: %v", err)
+		log.Printf("[k8s-firewall] ingress ConfigMap %s/%s not found: %v", fw.namespace, ingressConfigMapName, err)
 		return err
 	}
 
-	log.Printf("[k8s-firewall] synced %d blocked IPs to ConfigMap %s/%s", len(fw.blocked), fw.namespace, banConfigMapName)
+	// Build our deny block
+	var denyLines []string
+	for ip := range fw.blocked {
+		denyLines = append(denyLines, fmt.Sprintf("deny %s;", ip))
+	}
+	defBlock := markerStart + "\n"
+	if len(denyLines) > 0 {
+		defBlock += strings.Join(denyLines, "\n") + "\n"
+	}
+	defBlock += markerEnd
+
+	// Get existing server-snippet (may have user's own rules)
+	existing := ""
+	if cm.Data != nil {
+		existing = cm.Data[serverSnippetKey]
+	}
+
+	// Replace our section, or append if not present
+	var newSnippet string
+	startIdx := strings.Index(existing, markerStart)
+	endIdx := strings.Index(existing, markerEnd)
+
+	if startIdx >= 0 && endIdx >= 0 {
+		// Replace existing defensia block
+		newSnippet = existing[:startIdx] + defBlock + existing[endIdx+len(markerEnd):]
+	} else {
+		// Append our block
+		if existing != "" && !strings.HasSuffix(existing, "\n") {
+			existing += "\n"
+		}
+		newSnippet = existing + defBlock
+	}
+
+	// Clean up: if no blocked IPs and no other snippet content, remove the key entirely
+	cleanSnippet := strings.TrimSpace(strings.Replace(strings.Replace(newSnippet, markerStart, "", 1), markerEnd, "", 1))
+	if cleanSnippet == "" {
+		delete(cm.Data, serverSnippetKey)
+	} else {
+		if cm.Data == nil {
+			cm.Data = make(map[string]string)
+		}
+		cm.Data[serverSnippetKey] = strings.TrimSpace(newSnippet) + "\n"
+	}
+
+	// Update the ConfigMap — nginx-ingress watches it and auto-reloads
+	_, err = fw.client.clientset.CoreV1().ConfigMaps(fw.namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	if err != nil {
+		log.Printf("[k8s-firewall] failed to update ingress ConfigMap: %v", err)
+		return err
+	}
+
+	log.Printf("[k8s-firewall] synced %d blocked IPs to %s/%s server-snippet", len(fw.blocked), fw.namespace, ingressConfigMapName)
 	return nil
 }
 
-// loadExisting reads the current ConfigMap to restore state on startup.
+// loadExisting reads blocked IPs from the existing ingress ConfigMap on startup.
 func (fw *K8sFirewall) loadExisting() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cm, err := fw.client.clientset.CoreV1().ConfigMaps(fw.namespace).Get(ctx, banConfigMapName, metav1.GetOptions{})
+	cm, err := fw.client.clientset.CoreV1().ConfigMaps(fw.namespace).Get(ctx, ingressConfigMapName, metav1.GetOptions{})
 	if err != nil {
-		return // ConfigMap doesn't exist yet — that's fine
+		return
 	}
 
-	content := cm.Data[banDataKey]
-	for _, line := range strings.Split(content, "\n") {
+	snippet := cm.Data[serverSnippetKey]
+	if snippet == "" {
+		return
+	}
+
+	// Only parse between our markers
+	startIdx := strings.Index(snippet, markerStart)
+	endIdx := strings.Index(snippet, markerEnd)
+	if startIdx < 0 || endIdx < 0 {
+		return
+	}
+
+	block := snippet[startIdx+len(markerStart) : endIdx]
+	for _, line := range strings.Split(block, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "deny ") && strings.HasSuffix(line, ";") {
 			ip := strings.TrimSuffix(strings.TrimPrefix(line, "deny "), ";")
