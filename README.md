@@ -1,145 +1,181 @@
-# Defensia Agent
+<p align="center">
+  <img src="https://defensia.cloud/img/logo.svg" alt="Defensia" width="200">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
-[![Platform](https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white)](https://github.com/defensia/agent)
-[![GitHub Release](https://img.shields.io/github/v/release/defensia/agent?label=version&color=brightgreen)](https://github.com/defensia/agent/releases)
-[![Docker](https://img.shields.io/badge/Docker_Hub-defensiacloud-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/defensiacloud/agent)
-[![GHCR](https://img.shields.io/badge/GHCR-defensia%2Fagent-2496ED?logo=github&logoColor=white)](https://github.com/defensia/agent/pkgs/container/agent)
-[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/defensia-agent)](https://artifacthub.io/packages/helm/defensia-agent/defensia-agent)
-[![DigitalOcean Marketplace](https://img.shields.io/badge/DigitalOcean-Marketplace-0080FF?logo=digitalocean&logoColor=white)](https://marketplace.digitalocean.com/apps/defensia-agent)
-[![Dashboard](https://img.shields.io/badge/Dashboard-defensia.cloud-0D1B2A)](https://defensia.cloud)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/defensia/agent/badge)](https://securityscorecards.dev/viewer/?uri=github.com/defensia/agent)
-[![GitHub stars](https://img.shields.io/github/stars/defensia/agent?style=social)](https://github.com/defensia/agent)
+<h3 align="center">Server security that installs in 30 seconds</h3>
 
-> **If Defensia helps protect your servers, give us a star — it helps others find the project.**
+<p align="center">
+  Lightweight Go agent that detects attacks in real time and blocks them automatically.<br>
+  SSH brute force, WAF, bot management, Docker and Kubernetes — zero configuration.
+</p>
 
-**Your server is being attacked right now. You just don't know it.**
+<p align="center">
+  <a href="https://github.com/defensia/agent/releases"><img src="https://img.shields.io/github/v/release/defensia/agent?label=version&color=brightgreen" alt="Version"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
+  <a href="https://github.com/defensia/agent"><img src="https://img.shields.io/badge/Platform-Linux-orange?logo=linux&logoColor=white" alt="Platform"></a>
+  <a href="https://github.com/defensia/agent/pkgs/container/agent"><img src="https://img.shields.io/badge/Docker-ghcr.io-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
+  <a href="https://artifacthub.io/packages/helm/defensia/defensia-agent"><img src="https://img.shields.io/badge/Helm-Artifact_Hub-0F1689?logo=helm&logoColor=white" alt="Helm"></a>
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/defensia/agent"><img src="https://api.securityscorecards.dev/projects/github.com/defensia/agent/badge" alt="OpenSSF Scorecard"></a>
+</p>
 
-The average Linux VPS receives its first automated attack within 4 minutes of going online — SSH brute force, port scans, web exploits. Most developers find out when it's already too late.
+<p align="center">
+  <a href="https://defensia.cloud">Website</a> ·
+  <a href="https://defensia.cloud/docs">Docs</a> ·
+  <a href="https://defensia.cloud/docs/installation">Install Guide</a> ·
+  <a href="https://defensia.cloud/pricing">Pricing</a> ·
+  <a href="https://github.com/defensia/agent/issues">Issues</a>
+</p>
 
-Defensia is a lightweight Go agent that detects every attack in real time and blocks them automatically. One command to install, zero configuration.
+---
+
+## The problem
+
+The average Linux VPS receives its first automated attack **within 4 minutes** of going online. SSH brute force, web exploits, bot scraping, port scans.
+
+Most developers find out when it's already too late — or never.
+
+**fail2ban** blocks after the fact, with no visibility. **CrowdSec** requires complex setup. Enterprise tools cost $20-200+/host.
+
+Defensia fills the gap: **one command to install, real-time dashboard, automatic blocking, €9/server**.
+
+## Quick start
 
 ```bash
+# Linux (one-liner)
 curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
-```
 
-**Or with Docker:**
-
-```bash
-docker run -d --privileged --net=host --pid=host \
+# Docker
+docker run -d --name defensia-agent --restart unless-stopped \
+  --network host --pid host \
   -v /var/log:/var/log:ro \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -e DEFENSIA_TOKEN=<YOUR_TOKEN> \
   ghcr.io/defensia/agent:latest
+
+# Kubernetes (Helm)
+helm install defensia-agent \
+  oci://ghcr.io/defensia/charts/defensia-agent \
+  --set config.organizationApiKey=<YOUR_API_KEY> \
+  --namespace defensia-system --create-namespace
 ```
 
-→ **[Get your token at defensia.cloud](https://defensia.cloud)**
-→ First attack visible in your dashboard in under 15 minutes.
+> **[Get your token at defensia.cloud](https://defensia.cloud)** — free tier includes 1 server with full protection.
 
 ---
 
 ## Why Defensia
 
-| | fail2ban | CrowdSec | Defensia |
-|--|---------|---------|---------|
-| Real-time dashboard | ❌ | Partial | ✅ |
-| One-command install | ❌ | ❌ | ✅ |
-| SSH detection (15 patterns) | ✅ | ✅ | ✅ |
-| WAF (15 OWASP types) | ❌ | Partial | ✅ |
-| Bot management (70+ fingerprints) | ❌ | ❌ | ✅ |
-| Monitor mode (detect without blocking) | ❌ | ❌ | ✅ |
-| Network ban sharing | ❌ | ✅ | ✅ |
-| Zero configuration | ❌ | ❌ | ✅ |
-| Community hub required | ❌ | ✅ | ❌ |
-
-- **fail2ban** blocks after the fact. Defensia shows you while it's happening.
-- **CrowdSec** requires a community hub and complex setup. Defensia is one agent, one dashboard.
-- You'll see your first blocked attack within 15 minutes of installing.
-
----
-
-## Dashboard
-
-![Dashboard](docs/01-dashboard.png)
-
-<details>
-<summary>Events feed & WAF analytics</summary>
-
-![Events](docs/02-events.png)
-![WAF](docs/04-waf.png)
-
-</details>
+| | fail2ban | CrowdSec | BitNinja | **Defensia** |
+|---|:---:|:---:|:---:|:---:|
+| Real-time dashboard | — | Paid ($2K+/yr) | Yes | **Yes** |
+| One-command install | — | — | cPanel only | **Yes** |
+| SSH detection | Yes | Yes | Yes | **Yes (15 patterns)** |
+| Web Application Firewall | — | Partial | Yes | **Yes (15 OWASP types)** |
+| Bot management | — | — | Yes | **Yes (70+ fingerprints)** |
+| Docker container awareness | — | — | — | **Yes** |
+| Kubernetes / Helm | — | Yes | — | **Yes (DaemonSet)** |
+| Monitor mode (detect only) | — | — | — | **Yes** |
+| Works on any Linux | Yes | Yes | cPanel/Plesk | **Yes** |
+| Price | Free | Free / $2K+ | €14-52/srv | **€9/srv** |
 
 ---
 
 ## What it detects
 
-**SSH & brute force** — 15 detection patterns covering auth failures, pre-auth scanning, protocol mismatches, PAM failures, and kex negotiation drops. Patterns are synced from the dashboard and can be enabled/disabled per server.
+### SSH & brute force
+15 detection patterns: failed passwords, invalid users, PAM failures, pre-auth scanning, protocol mismatches, kex negotiation drops. Patterns are synced from the dashboard — enable/disable per server without restarting the agent.
 
-**Web Application Firewall (WAF)** — 15 OWASP attack types across Nginx/Apache logs:
+### Web Application Firewall
 
-| Attack type | Default score | Mode |
-|-------------|:---:|------|
+| Attack type | Score | Mode |
+|---|:---:|---|
 | RCE / Web shell / Shellshock | +50 | Score-based |
-| Scanner User-Agent (sqlmap, nikto, nmap...) | +50 | Score-based |
+| Scanner UA (sqlmap, nikto, nmap, nuclei...) | +50 | Score-based |
 | SQL injection / SSRF / Web exploit | +40 | Score-based |
-| Honeypot trap | +40 | Score-based |
+| Honeypot trap (50+ decoy endpoints) | +40 | Score-based |
 | Path traversal / Header injection | +30 | Score-based |
 | WordPress brute force | +30 | Threshold (10 req / 2 min) |
 | XSS / `.env` probe / XMLRPC | +25 | Score-based |
 | Config probing / Scanner pattern | +20 | Score-based |
 | 404 flood | +15 | Threshold (30 req / 5 min) |
 
-**Mail server protection** *(v0.9.79+)* — 11 patterns for Postfix SASL, Dovecot IMAP/POP3, and Roundcube. Auto-detects `/var/log/mail.log` or `/var/log/maillog`. Detects SMTP brute force, relay scans, and suspicious connections.
+Each detection adds points to a per-IP score. Scores decay at -5 pts/min. Action levels: **observe** (30) → **throttle** (60) → **block 1h** (80) → **blacklist 24h** (100+). All weights configurable per server.
 
-**Database auth monitoring** *(v0.9.80+)* — 8 patterns for MySQL/MariaDB, PostgreSQL, and MongoDB. Auto-detects error logs. Bans IPs after repeated auth failures. Proactive port exposure check: alerts if MySQL (3306), PostgreSQL (5432), MongoDB (27017), or Redis (6379) are publicly accessible.
+### Bot management
+70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners). Per-org policies: **allow** / **log** / **block**. Blocked bots are rejected at nginx/Apache level — connection closed before your app is reached.
 
-**Bot Scoring Engine** — each detection adds points to a per-IP score. Scores decay at 5 pts/min when idle. Thresholds: observe (30) → throttle (60) → block/1h (80) → blacklist/24h (100+). Score weights are configurable per server from the dashboard.
+### And more
+- **Docker-aware** — auto-detects web containers, reads logs via bind mounts and volumes
+- **GeoIP blocking** — block entire countries from the dashboard
+- **Network ban propagation** — ban on one server applies to all your servers
+- **Security scanner** — 30+ hardening checks with auto-remediation
+- **Vulnerability scanning** — CVE matching via NVD + Exploit-DB, EPSS scoring
+- **Monitor mode** — detect threats without blocking (new servers default to this)
+- **System metrics** — CPU, memory, disk reported to dashboard
 
-**Bot Management** — 70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners, monitoring). Per-org policies: allow/log/block per fingerprint. Allowed bots (Googlebot, Bingbot) are tracked as events without blocking. Bots with policy **block** are rejected at the web server level (nginx `map+include` / Apache `SetEnvIfNoCase`) — connection closed before PHP/app is ever reached.
+---
 
-**Monitor Mode** — new servers start in monitor mode by default: all threats are detected and reported to the dashboard, but no IPs are banned. Switch to enforcement mode when ready.
+## How it works
 
-**Dynamic Detection Rules** — SSH detection patterns are synced from the dashboard and compiled at runtime. Enable/disable individual rules per server without agent updates.
+```
+auth.log / web access logs / Docker logs / K8s ingress logs
+    │
+    ▼
+Log auto-detection
+    │  nginx -T / apachectl -S / docker inspect / K8s API
+    │  Resolves bind mounts, volumes, symlinks
+    ▼
+Watcher goroutines
+    │  Detect brute force, SQLi, XSS, SSRF, path traversal, web shells...
+    ▼
+Bot Scoring Engine (per-IP, decaying)
+    │
+    ├─ < 30 pts  → observe (log only)
+    ├─ ≥ 30 pts  → throttle
+    ├─ ≥ 80 pts  → block 1h
+    └─ ≥ 100 pts → blacklist 24h
+            │
+            ▼
+    ipset add defensia-bans <IP>
+            │  Falls back to iptables -I INPUT -s <IP> -j DROP
+            │  ipset: 65K+ IPs  ·  iptables fallback: 500 (FIFO rotation)
+            │
+            ├──► POST /api/v1/agent/bans → dashboard
+            └──► WebSocket propagates ban to all your servers
+```
 
-**Docker-aware** — auto-detects web servers inside Docker containers, reads logs via bind mounts, volumes, or container stdout
-
-**Kubernetes-native** *(v0.9.83+)* — deploys as a DaemonSet via Helm. Auto-detects K8s API, lists pods per node, discovers Ingress hosts for cluster-wide WAF, watches pod events (CrashLoop, OOM, evictions), audits NetworkPolicy. The container image includes `client-go` — if `KUBERNETES_SERVICE_HOST` is present, K8s mode activates automatically.
-
-**GeoIP blocking** — block entire countries from the dashboard
-**Network propagation** — bans detected on one server instantly applied to all your servers
-**Security scanner** — detects vulnerable software versions and misconfigurations
-**System metrics** — CPU, memory, disk, network reported to the dashboard
+The agent **never bans** reserved IPs, your server's own IPs, or the Defensia API endpoint — even if the backend sends a bad rule.
 
 ---
 
 ## Install
 
-### One-liner (recommended)
+### Linux (recommended)
 
 ```bash
 curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
 ```
 
-**Supported systems:** Ubuntu 20+, Debian 11+, CentOS 7+, RHEL 8+, Amazon Linux 2023
-**Requirements:** `iptables`, `systemd` (or upstart/sysvinit), root access
-**Recommended:** `ipset` (auto-detected — increases ban capacity from 500 to 65,000+)
+**Supported:** Ubuntu 20+, Debian 11+, CentOS 7+, RHEL 8+, Rocky, Alma, Amazon Linux 2023, Fedora
+**Requires:** `iptables`, `systemd`, root access · **Recommended:** `ipset` (increases ban capacity to 65K+)
 
 ### Docker
 
 ```bash
-docker run -d --privileged --net=host --pid=host \
+docker run -d --name defensia-agent --restart unless-stopped \
+  --network host --pid host \
   -v /var/log:/var/log:ro \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v defensia-config:/etc/defensia \
   -e DEFENSIA_TOKEN=<YOUR_TOKEN> \
-  --name defensia-agent \
-  --restart unless-stopped \
   ghcr.io/defensia/agent:latest
 ```
 
-Or add to your existing `docker-compose.yml`:
+**Image:** `ghcr.io/defensia/agent` — multi-arch (amd64 + arm64), ~40MB
+
+<details>
+<summary>Docker Compose</summary>
 
 ```yaml
 services:
@@ -165,72 +201,65 @@ volumes:
 DEFENSIA_TOKEN=<YOUR_TOKEN> docker compose up -d defensia-agent
 ```
 
-The agent auto-registers on first start and persists its config in the `defensia-config` volume. Subsequent restarts don't need the token.
+</details>
 
-**Image:** `ghcr.io/defensia/agent` — multi-arch (amd64 + arm64), ~40MB
-
-### Docker Swarm
-
-Deploy one agent per node in the cluster:
+<details>
+<summary>Docker Swarm (global service)</summary>
 
 ```bash
 # Store token as a Docker secret
 echo "<YOUR_TOKEN>" | docker secret create defensia_token -
 
-# Deploy as a global service (1 agent per node)
+# Deploy 1 agent per node
 docker stack deploy -c docker-compose.swarm.yml defensia
 ```
 
-Each agent auto-registers using the hostname of the Swarm node it runs on. The token is read from Docker secrets (`DEFENSIA_TOKEN_FILE`), not environment variables — safe for multi-node deployments.
-
 See [docker-compose.swarm.yml](docker-compose.swarm.yml) for the full stack definition.
+
+</details>
 
 ### Kubernetes (Helm)
 
 ```bash
-helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
-  --set token=<YOUR_TOKEN>
+helm install defensia-agent \
+  oci://ghcr.io/defensia/charts/defensia-agent \
+  --set config.organizationApiKey=<YOUR_API_KEY> \
+  --set config.serverUrl=https://defensia.cloud \
+  --namespace defensia-system --create-namespace
 ```
 
-This deploys a DaemonSet — one agent per node, including masters. The agent runs privileged with host networking to manage iptables and read system logs.
+Deploys a **DaemonSet** — one agent per node (including control-plane). RBAC, tolerations, and resource limits pre-configured.
 
-**With an existing Secret:**
-
-```bash
-kubectl create secret generic defensia-token --from-literal=token=<YOUR_TOKEN>
-helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
-  --set existingSecret=defensia-token
-```
-
-**Custom values:**
+<details>
+<summary>Custom values.yaml</summary>
 
 ```yaml
-# values.yaml
-token: "<YOUR_TOKEN>"
-serverUrl: "https://defensia.cloud"
+config:
+  organizationApiKey: "your-org-api-key"
+  serverUrl: "https://defensia.cloud"
+  clusterName: "production"    # auto-detected if omitted
+
 resources:
   limits:
-    cpu: 200m
+    cpu: 100m
     memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
 tolerations:
-  - operator: Exists    # run on all nodes
-extraEnv:
-  - name: WEB_LOG_PATH
-    value: "/var/log/nginx/access.log"
+  - operator: Exists           # run on all nodes
 ```
 
 ```bash
-helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent -f values.yaml
+helm install defensia-agent \
+  oci://ghcr.io/defensia/charts/defensia-agent \
+  -f values.yaml -n defensia-system --create-namespace
 ```
 
-**Upgrade / Uninstall:**
+</details>
 
-```bash
-helm upgrade defensia-agent oci://ghcr.io/defensia/charts/defensia-agent
-helm uninstall defensia-agent
-```
-
-See [charts/defensia-agent/](charts/defensia-agent/) for the full chart source.
+**Chart:** [Artifact Hub](https://artifacthub.io/packages/helm/defensia/defensia-agent) · Images signed with [Cosign](https://github.com/sigstore/cosign) · Helm chart with GPG provenance
 
 ### Uninstall
 
@@ -240,218 +269,109 @@ curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --uninstall
 
 ---
 
-## How it works
+## Configuration
 
-```
-auth.log / web access logs / Docker container logs
-    │
-    ▼
-Log auto-detection
-    │  nginx -T / apachectl -S / docker inspect / docker logs
-    │  Resolves bind mounts, volumes, symlinks, relative paths
-    ▼
-Watcher goroutines
-    │  Detect brute force, SQLi, XSS, SSRF, path traversal, web shells...
-    ▼
-Bot Scoring Engine
-    │  Each detection adds points to per-IP score (decay: -5 pts/min)
-    │  Score weights configurable per server from dashboard
-    │
-    ├─ < 30 pts  → observe (log only)
-    ├─ ≥ 30 pts  → throttle
-    ├─ ≥ 80 pts  → block 1h
-    └─ ≥ 100 pts → blacklist 24h
-            │
-            ▼
-    BanIP → ipset add defensia-bans <IP>
-            │  Falls back to iptables -I INPUT -s <IP> -j DROP
-            │  ipset: 65K+ IPs  ·  iptables fallback: 500 (FIFO rotation)
-            │
-            ├──► POST /api/v1/agent/bans → dashboard + propagates to all servers
-            │
-            └──► WebSocket receives ban.created from other servers → BanIP
-```
-
-The agent never bans reserved IPs (`127.x`, `10.x`, `192.168.x`), your own server's IPs, or the Defensia API endpoint — even if the backend somehow sends a bad rule. Bans use `ipset` when available (65K+ capacity); without it, falls back to iptables with automatic FIFO rotation at 500 rules.
-
-### How it works on Kubernetes *(v0.9.84+)*
-
-On bare metal, `iptables INPUT` blocks everything. On Kubernetes, web traffic bypasses INPUT (goes through FORWARD → kube-proxy → pod). Defensia solves this with **3-layer blocking**:
-
-```
-Attacker
-    │
-    ├─── SSH to node ──► iptables INPUT ──► DROP ✓
-    │
-    └─── HTTP to ingress
-              │
-              ▼
-         LoadBalancer → NodePort → kube-proxy
-              │
-              ▼
-         nginx-ingress controller
-              │  reads ConfigMap "defensia-blocked-ips"
-              │  (managed by Defensia agent)
-              │
-              ├─ IP in deny list? → 403 Forbidden ✓
-              │
-              └─ IP allowed → forward to backend pod
-                                │
-                                ▼
-                          access log written
-                                │
-                                ▼
-                     Defensia agent (DaemonSet)
-                          │  WAF: SQLi, XSS, RCE, path traversal...
-                          │  Bot scoring engine (same as bare metal)
-                          │
-                          └─ Score ≥ threshold → BanIP
-                                │         │
-                                │         └──► ConfigMap: deny <IP>;
-                                │              nginx-ingress reloads → 403
-                                │
-                                └──► iptables INPUT: DROP <IP>
-                                     (protects SSH on this node)
-```
-
-**Three layers of protection:**
-
-| Layer | Protects | Mechanism |
-|-------|----------|-----------|
-| **iptables INPUT** | SSH to the node | `iptables -I INPUT -s <IP> -j DROP` |
-| **ConfigMap → nginx deny** | All web traffic via ingress | Agent writes `deny <IP>;` to ConfigMap, nginx-ingress reads it |
-| **Dashboard propagation** | All servers + nodes | Ban synced via WebSocket to every agent in the organization |
-
-The ConfigMap approach is **CNI-agnostic** — works with Cilium, Calico, Flannel, or any networking plugin. The agent only needs write access to one ConfigMap in the ingress namespace (least-privilege RBAC).
-
----
-
-## Per-server WAF configuration *(v0.9.3+)*
+<details>
+<summary><strong>Per-server WAF configuration</strong></summary>
 
 Each attack type can be independently configured from the dashboard (Server → Web Protection). Changes sync within 60 seconds.
 
 - **Enable/disable types** — disable rules irrelevant to your stack (e.g. `wp_bruteforce` on a non-WordPress server)
-- **Detect-only mode** — record events without banning. Useful for audit-only policies or testing before enforcement
+- **Detect-only mode** — record events without banning
 - **Custom thresholds** — override defaults for `wp_bruteforce`, `xmlrpc_abuse`, `scanner_detected`, `404_flood`
-- **Custom score weights** *(v0.9.34+)* — adjust points per detection type. E.g. set `404_flood` to 0 to ignore in scoring, or increase `sql_injection` to 80 for instant blocking on first detection
+- **Custom score weights** — adjust points per detection type
 
-`null` WAF config → all 15 types active, default thresholds and score weights (fully backward compatible).
+`null` WAF config → all 15 types active with default thresholds (fully backward compatible).
 
----
+</details>
 
-## SSH detection rules *(v0.9.44+)*
+<details>
+<summary><strong>Docker labels</strong></summary>
 
-The agent ships with 15 built-in SSH detection patterns covering:
-
-| Category | Patterns | Examples |
-|----------|:--------:|---------|
-| Auth failures | 9 | Failed password, Invalid user, PAM auth failure, Max auth attempts, Root login refused |
-| Pre-auth scanning | 6 | No identification string, Bad protocol version, Unable to negotiate, Connection closed/reset preauth, Timeout before auth |
-
-All patterns are visible and configurable from the dashboard (Server → SSH Protection → Detection Rules). Disable individual rules per server without restarting the agent — changes sync via the heartbeat.
-
----
-
-## Docker support *(v0.9.20+)*
-
-The agent **automatically detects Docker** and reports all running containers to the dashboard. Web containers (nginx, apache, caddy, or any container exposing ports 80/443/8080) get special treatment:
-
-1. Runs `nginx -T` or `apachectl -S` **inside** the container to discover log paths and domain names
-2. Maps container log paths to host paths via bind mounts and Docker volumes
-3. Falls back to scanning mount directories for `*access*.log` files
-4. Last resort: reads container stdout via `docker logs -f` if logs go to stdout (common with official nginx image)
-
-### Docker labels *(v0.9.62+)*
-
-Use Docker labels to configure monitoring per container — no agent restart needed:
+Configure monitoring per container via Docker labels — no agent restart needed:
 
 ```yaml
 services:
   nginx:
     image: nginx
     labels:
-      defensia.monitor: "true"          # force-monitor (even non-web images)
-      defensia.log-path: "/var/log/nginx/access.log"  # explicit host log path
-      defensia.domain: "example.com,api.example.com"   # associate domains
-      defensia.waf: "true"              # informational (WAF config from panel)
+      defensia.monitor: "true"
+      defensia.log-path: "/var/log/nginx/access.log"
+      defensia.domain: "example.com,api.example.com"
     volumes:
       - /var/log/nginx:/var/log/nginx
-
-  my-custom-app:
-    image: myapp:latest
-    labels:
-      defensia.monitor: "true"          # monitor even though not a web keyword image
-      defensia.log-path: "/var/log/myapp/access.log"
-
-  internal-nginx:
-    image: nginx
-    labels:
-      defensia.monitor: "false"         # skip this container
 ```
 
 | Label | Values | Effect |
-|-------|--------|--------|
-| `defensia.monitor` | `true` / `false` | Force-include or exclude a container from monitoring |
-| `defensia.log-path` | Host path(s), comma-separated | Explicit log path — skips auto-detection |
-| `defensia.domain` | Domain(s), comma-separated | Associate domain names with this container's logs |
-| `defensia.waf` | `true` / `false` | Informational — WAF on/off is controlled from the panel |
+|---|---|---|
+| `defensia.monitor` | `true` / `false` | Force-include or exclude a container |
+| `defensia.log-path` | Host path(s), comma-separated | Explicit log path (skips auto-detection) |
+| `defensia.domain` | Domain(s), comma-separated | Associate domain names with logs |
+| `defensia.waf` | `true` / `false` | Informational (WAF is controlled from the panel) |
 
-**Priority**: `defensia.log-path` label > `nginx -T` auto-detection > bind-mount scan.
-**Without labels**: the agent falls back to image-name detection (same as before).
+**Priority**: `defensia.log-path` label > `nginx -T` auto-detection > bind-mount scan > `docker logs`.
 
-**Dashboard** — the server detail page shows a dedicated Docker tab with all containers, web detection status, and the WAF tab shows which log sources are being monitored.
+</details>
 
-```bash
-journalctl -u defensia-agent | grep webwatcher
-# [webwatcher] docker: container my-custom-app selected via defensia.monitor label
-# [webwatcher] docker: watching /var/log/myapp/access.log from container my-custom-app (defensia.log-path label)
-# [webwatcher] docker: watching /var/log/nginx/access.log from container nginx
-# [webwatcher] detected 3 access log(s), 5 domain(s)
-```
+<details>
+<summary><strong>Manual log path override</strong></summary>
 
----
-
-## Manual log path configuration
-
-If auto-detection doesn't find your logs (custom paths, piped logs, non-standard setups), set the `WEB_LOG_PATH` environment variable:
+If auto-detection doesn't find your logs, set `WEB_LOG_PATH`:
 
 ```bash
 sudo systemctl edit defensia-agent
 ```
 
-Add:
-
 ```ini
 [Service]
-Environment="WEB_LOG_PATH=/var/log/httpd/access_log,/var/log/nginx/custom-access.log"
+Environment="WEB_LOG_PATH=/var/log/httpd/access_log,/var/log/nginx/custom.log"
 ```
-
-Then restart:
 
 ```bash
 sudo systemctl restart defensia-agent
 ```
 
-`WEB_LOG_PATH` overrides all auto-detection. Multiple paths are comma-separated.
+</details>
+
+<details>
+<summary><strong>Environment variables</strong></summary>
+
+Stored in `/etc/defensia/agent.conf`:
+
+| Variable | Description | Default |
+|---|---|---|
+| `DEFENSIA_TOKEN` | Agent auth token | *(from registration)* |
+| `DEFENSIA_SERVER` | Panel server URL | `https://defensia.cloud` |
+| `DEFENSIA_LOG_PATH` | Auth log file path | *(auto-detected)* |
+| `DEFENSIA_HEARTBEAT` | Heartbeat interval (seconds) | `30` |
+| `DEFENSIA_BAN_THRESHOLD` | Failed attempts before ban | `5` |
+| `DEFENSIA_WS_ENABLED` | Enable WebSocket | `true` |
+| `DEFENSIA_GEOIP_ENABLED` | Enable GeoIP lookups | `true` |
+| `WEB_LOG_PATH` | Override web log paths | *(auto-detected)* |
+
+</details>
 
 ---
 
-## FAQ
+## Troubleshooting
 
-### `"Peer's Certificate issuer is not recognized"` during install
+<details>
+<summary><code>"Peer's Certificate issuer is not recognized"</code> during install</summary>
 
-Affects CentOS 7, RHEL 7, and systems with `ca-certificates` not updated since 2024.
+Affects CentOS 7, RHEL 7, and systems with outdated `ca-certificates`:
 
 ```bash
-curl -sk https://letsencrypt.org/certs/isrgrootx1.pem \
-  -o /tmp/isrg-root-x1.pem
-export CURL_CA_BUNDLE=/tmp/isrg-root-x1.pem
-curl -fsSL https://defensia.cloud/install.sh | bash -s -- --token <YOUR_TOKEN>
+curl -sk https://letsencrypt.org/certs/isrgrootx1.pem -o /tmp/isrg.pem
+export CURL_CA_BUNDLE=/tmp/isrg.pem
+curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
 ```
 
-### Agent shows `203/EXEC` in the dashboard
+</details>
 
-Binary missing or not executable. Restore from backup:
+<details>
+<summary>Agent shows <code>203/EXEC</code> — service fails to start</summary>
+
+Binary missing or corrupted. Restore from backup:
 
 ```bash
 cp /usr/local/bin/defensia-agent.bak /usr/local/bin/defensia-agent
@@ -459,91 +379,108 @@ chmod 755 /usr/local/bin/defensia-agent
 systemctl reset-failed defensia-agent && systemctl start defensia-agent
 ```
 
-If `systemctl start` fails with `start-limit-hit`:
+If `start-limit-hit`:
 
 ```bash
-grep -q StartLimitIntervalSec /etc/systemd/system/defensia-agent.service || \
-  sed -i '/^\[Unit\]/a StartLimitIntervalSec=0' /etc/systemd/system/defensia-agent.service
-systemctl daemon-reload && systemctl reset-failed defensia-agent && systemctl start defensia-agent
+systemctl reset-failed defensia-agent
+systemctl start defensia-agent
 ```
+
+</details>
+
+<details>
+<summary>WAF not detecting attacks</summary>
+
+Check which logs the agent is monitoring:
+
+```bash
+journalctl -u defensia-agent | grep webwatcher
+```
+
+If no logs found: your web server logs must be accessible on the host. For Docker web servers, bind-mount the log directory:
+
+```yaml
+volumes:
+  - /var/log/nginx:/var/log/nginx
+```
+
+</details>
+
+More troubleshooting at [defensia.cloud/docs/troubleshooting](https://defensia.cloud/docs/troubleshooting).
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Defensia Cloud                        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │
+│  │ Dashboard │  │ REST API │  │ WebSocket│  │ Threat │  │
+│  │  (Vue 3) │  │ (Laravel)│  │ (Reverb) │  │  Intel │  │
+│  └──────────┘  └──────────┘  └──────────┘  └────────┘  │
+└───────────────────────┬─────────────────────────────────┘
+                        │ HTTPS + WSS
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+   ┌─────────┐    ┌─────────┐    ┌─────────────┐
+   │  Agent  │    │  Agent  │    │ Agent (K8s) │
+   │  (VPS)  │    │(Docker) │    │ (DaemonSet) │
+   └─────────┘    └─────────┘    └─────────────┘
+   SSH + WAF      SSH + WAF +     Ingress WAF +
+   + GeoIP        Docker detect   Pod events +
+   + Metrics      + Container     API audit
+                  inventory
+```
+
+The agent is a single static Go binary (~12MB). No dependencies, no runtime, no garbage. Runs as `systemd` service, Docker container, or Kubernetes DaemonSet.
+
+**Resource usage:** <1% CPU, <30MB RAM on a typical server.
 
 ---
 
 ## Changelog
 
-| Version | Changes |
-|---------|---------|
-| v0.9.83 | **Kubernetes Level 5**: K8s API integration via `client-go` (build tags). Pod inventory, Ingress host discovery, NetworkPolicy audit, pod event watcher (CrashLoop, OOM, evictions). Containerd log adapter for Ingress WAF. WAF request counter in heartbeat. Dual binary release (bare metal 7MB + K8s 33MB) |
-| v0.9.82 | FTP brute force detection (vsftpd, ProFTPD, Pure-FTPd) |
-| v0.9.81 | Helm chart v0.2.0 (appVersion 0.9.80, mail+DB watchers) |
-| v0.9.80 | **Database auth monitoring**: MySQL/MariaDB, PostgreSQL, MongoDB brute force detection (8 patterns). Proactive port exposure check — alerts if DB ports are publicly accessible |
-| v0.9.79 | **Mail server protection**: Postfix SASL, Dovecot IMAP/POP3, Roundcube brute force detection (11 patterns). Auto-detects mail.log/maillog/dovecot.log |
-| v0.9.78 | Fix: WAF scored bans no longer override backend escalation logic |
-| v0.9.77 | Fix: geoblocking reads `blocked_countries` from sync config (was silently ignored) |
-| v0.9.64 | **Kubernetes Helm chart**: DaemonSet (1 agent per node), OCI chart on GHCR (`oci://ghcr.io/defensia/charts/defensia-agent`), token via Secret or existingSecret, tolerations for all nodes, resource limits, extraEnv support |
-| v0.9.63 | **Docker Swarm support**: `docker-compose.swarm.yml` with `deploy: mode: global` (1 agent per node), Docker secrets support (`DEFENSIA_TOKEN_FILE`) for secure multi-node deployments |
-| v0.9.62 | **Docker labels autoconf**: `defensia.monitor`, `defensia.log-path`, `defensia.domain`, `defensia.waf` — configure monitoring per container via Docker labels without agent restart |
-| v0.9.61 | **Docker image published to GHCR** (`ghcr.io/defensia/agent`): multi-arch (amd64+arm64), auto-register via `DEFENSIA_TOKEN` env var, docker-compose snippet included. Automated build+push on every release tag |
-| v0.9.60 | Apply threat feed (Spamhaus DROP/EDROP, Feodo Tracker, CINS Army) to firewall — pre-emptive blocking of known-bad IPs |
-| v0.9.59 | Virtual patching: apply dynamic WAF rules from panel (regex patterns synced via heartbeat) |
-| v0.9.58 | Heartbeat reports `auth_watcher_method`, `firewall_mode`, `ban_capacity`, `active_bans_count` for dashboard visibility |
-| v0.9.57 | Fix: web log detection for Docker containers with non-standard log paths; improved Apache log discovery on cPanel servers |
-| v0.9.56 | Agent reports all bot actions (allow/log/block) as events for full dashboard visibility |
-| v0.9.55 | UA bot blocking at the web server level: bots with policy **block** are rejected by nginx (`map+include /etc/defensia/ua-blocklist.conf`) or Apache (`SetEnvIfNoCase`) — zero app load, graceful reload on every policy change |
-| v0.9.54 | Emit `bot_unknown` events for unrecognized bot User-Agents (not in fingerprint list) — surfaces unknown crawlers in the dashboard |
-| v0.9.53 | Restore ipset firewall backend: `defensia-bans` hash:ip set (65K capacity), automatic FIFO rotation at 500 bans when ipset absent, migrates existing DROP rules on first run |
-| v0.9.52 | Skip private/reserved IPs (Docker bridge, localhost) in both SSH and WAF watchers — no more noise from `172.20.0.1` |
-| v0.9.51 | Fix: deduplicate WAF scoring when same request appears in multiple log files |
-| v0.9.50 | Cumulative per-IP WAF scoring engine with configurable weights |
-| v0.9.49 | Fix: check WAF patterns against both raw and decoded URI to catch encoded attacks; private IP filter |
-| v0.9.47 | Fix: connect WAF config from panel sync to web watcher — WAF detection was completely disabled |
-| v0.9.46 | Fix: remove duplicate EventFunc declaration |
-| v0.9.45 | User-Agent `DefensiaAgent/{version}` header; allowed bots reported as `bot_crawl` events |
-| v0.9.44 | Dynamic detection rules from panel sync — SSH patterns configurable per server from dashboard |
-| v0.9.43 | Expanded SSH detection: 15 patterns (9 auth failures + 6 pre-auth scanning) |
-| v0.9.42 | Monitor mode: detect threats without blocking; new servers default to monitor mode |
-| v0.9.41 | Bot fingerprint detection with pre-filter gate before WAF scoring |
-| v0.9.40 | Bot management: allow/log/block policies per fingerprint, synced from panel |
-| v0.9.39 | Regex support for dynamic WAF rules (OWASP CRS compatible) |
-| v0.9.38 | Fix: nil pointer crash in `syncAndApply` when WAF disabled and BotFingerprints non-empty |
-| v0.9.37 | Dynamic WAF rules synced from panel (Phase 1) |
-| v0.9.35 | Bot scoring engine replaced malware detection; per-IP cumulative scoring with decay |
-| v0.9.34 | Configurable score weights per server via WAF config from dashboard |
-| v0.9.33 | ipset firewall backend (65K+ ban capacity) with iptables FIFO fallback (500 bans, auto-rotation); startup trim for existing rules exceeding capacity |
-| v0.9.32 | Malware detection expansion: cryptominers, rootkits, web shells (60+ signatures) |
-| v0.9.31 | Bot scoring engine: per-IP cumulative scoring with decay, 4 action levels (observe/throttle/block/blacklist), category classification |
-| v0.9.30 | File integrity monitoring, port scan detection, SYN flood monitoring |
-| v0.9.29 | Fix: auto-update download URL constructed from target_version (prevents update loop) |
-| v0.9.28 | Honeypot trap detection (50+ decoy endpoints) |
-| v0.9.27 | Security scanner: 30+ hardening checks (SSH, web server, file permissions, CVEs) |
-| v0.9.26 | Auto-remediation: agent can fix 12 security findings on demand from dashboard |
-| v0.9.25 | Timed bans via iptables with auto-expiry; ban duration from WAF score action |
-| v0.9.24 | CloudLinux/cPanel: cPHulk SQLite polling, journald fallback, extended SSH regex |
-| v0.9.23 | Fix: nginx global `access_log` with `server_name` in server blocks now correctly associates domains with log paths |
-| v0.9.22 | Improved Apache detection for CentOS/RHEL: ServerRoot resolution, symlink following, `apachectl -S` discovery, well-known RHEL paths fallback |
-| v0.9.21 | Fix: web container detection matches container port (`->80/tcp`) not host port (`:80->`) |
-| v0.9.20 | Docker container detection, stdout log reader, Docker info in heartbeat, bind mount + volume log discovery |
-| v0.9.19 | Whitelisted IPs are detected (events reported) but never banned |
-| v0.9.18 | Raw access log line included in event details for attack evidence |
-| v0.9.17 | Fix: Apache `${APACHE_LOG_DIR}` resolution, monitored domains/log paths reported in heartbeat |
-| v0.9.16 | Instant whitelist propagation via `sync.requested` WebSocket event |
-| v0.9.15 | Fix: false rollback on `"signal: terminated"` — systemd kills the calling process on restart, now correctly treated as success |
-| v0.9.14 | Fix: removed `updateServiceFile()` from updater — caused a regression loop on every update |
-| v0.9.13 | Fix: `StartLimitIntervalSec=0` moved to `[Unit]` section to prevent start-limit-hit |
-| v0.9.12 | Improved updater diagnostics; `recent_logs` in failure event payloads |
-| v0.9.10 | Fix: health-check window extended; stale ban cleanup on sync |
-| v0.9.9 | Fix: cross-device rename failure in updater |
-| v0.9.8 | Fix: preflight check uses `check` subcommand; atomic rollback |
-| v0.9.7 | Docker container log detection via bind-mounts |
-| v0.9.6 | Added `web_exploit` detection (Spring4Shell, Log4Shell, Struts OGNL...) |
-| v0.9.5 | Atomic binary replacement + 15s post-restart health check; rollback on crash |
-| v0.9.3 | Per-server WAF config: enable/disable types, detect-only mode, custom thresholds |
-| v0.9.2 | XSS, SSRF, web shell, header injection detection |
-| v0.9.0 | Initial WAF: SQLi, path traversal, RCE, shellshock, env/config probe, wp_bruteforce, xmlrpc, 404_flood, scanner |
-| v0.6.x | Brute-force detection, GeoIP, zombie processes, auto-update, IP safety |
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+
+Recent highlights:
+
+| Version | Highlight |
+|---|---|
+| v0.9.80+ | Kubernetes DaemonSet support, Helm chart, ingress WAF |
+| v0.9.63 | Docker Swarm global service, Docker secrets |
+| v0.9.62 | Docker labels (`defensia.monitor`, `defensia.log-path`, `defensia.domain`) |
+| v0.9.50+ | Cumulative per-IP WAF scoring engine with configurable weights |
+| v0.9.44 | Dynamic detection rules from dashboard (SSH patterns per server) |
+| v0.9.42 | Monitor mode (detect without blocking) |
+| v0.9.40 | Bot management with allow/log/block policies |
+| v0.9.33 | ipset firewall backend (65K+ ban capacity) |
+| v0.9.27 | Security scanner (30+ hardening checks) |
+| v0.9.20 | Docker container detection and log discovery |
+| v0.9.0 | Initial WAF: 15 OWASP attack types |
+
+---
+
+## Contributing
+
+Contributions are welcome. Please [open an issue](https://github.com/defensia/agent/issues) before submitting large changes.
+
+```bash
+# Build
+go build -o defensia-agent ./cmd/defensia-agent
+
+# Run locally
+./defensia-agent start
+```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+[MIT](LICENSE) — use it however you want.
+
+---
+
+<p align="center">
+  <a href="https://defensia.cloud">defensia.cloud</a> · Built for developers who run their own servers
+</p>
