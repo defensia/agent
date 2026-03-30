@@ -25,12 +25,22 @@ const (
 	iptablesMax  = 500
 )
 
+// K8sBanHook is called on every ban/unban when running in K8s mode.
+// Set by main.go to write bans to the ingress ConfigMap.
+type K8sBanHook interface {
+	BanIP(ip string) error
+	UnbanIP(ip string) error
+}
+
 var (
 	mu       sync.Mutex
 	useIPSet bool
 	maxBans  int = iptablesMax
 	banSet   map[string]bool
 	banOrder []string // FIFO for iptables mode rotation
+
+	// K8s ingress-level firewall (nil if not in K8s)
+	k8sHook K8sBanHook
 )
 
 // Status reports the current firewall backend state.
@@ -38,6 +48,15 @@ type Status struct {
 	Mode       string `json:"mode"`
 	Capacity   int    `json:"capacity"`
 	ActiveBans int    `json:"active_bans"`
+}
+
+// SetK8sHook registers a Kubernetes ingress-level firewall.
+// When set, every BanIP/UnbanIP also writes to the ingress ConfigMap.
+func SetK8sHook(hook K8sBanHook) {
+	mu.Lock()
+	defer mu.Unlock()
+	k8sHook = hook
+	log.Println("[firewall] K8s ingress firewall hook registered")
 }
 
 // Init detects ipset availability and sets up the firewall backend.
@@ -347,10 +366,21 @@ func BanIP(ip string) error {
 		return nil
 	}
 
+	var err error
 	if useIPSet {
-		return banIPSet(ip)
+		err = banIPSet(ip)
+	} else {
+		err = banIPTables(ip)
 	}
-	return banIPTables(ip)
+
+	// Also ban at ingress level in K8s mode (non-blocking)
+	if err == nil && k8sHook != nil {
+		if k8sErr := k8sHook.BanIP(ip); k8sErr != nil {
+			log.Printf("[firewall] k8s ingress ban failed for %s: %v", ip, k8sErr)
+		}
+	}
+
+	return err
 }
 
 // banIPSet adds an IP to the ipset.
@@ -401,10 +431,21 @@ func UnbanIP(ip string) error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	var err error
 	if useIPSet {
-		return unbanIPSet(ip)
+		err = unbanIPSet(ip)
+	} else {
+		err = unbanIPTables(ip)
 	}
-	return unbanIPTables(ip)
+
+	// Also unban at ingress level in K8s mode
+	if k8sHook != nil {
+		if k8sErr := k8sHook.UnbanIP(ip); k8sErr != nil {
+			log.Printf("[firewall] k8s ingress unban failed for %s: %v", ip, k8sErr)
+		}
+	}
+
+	return err
 }
 
 // unbanIPSet removes an IP from the ipset.

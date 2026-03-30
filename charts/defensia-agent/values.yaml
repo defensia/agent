@@ -16,6 +16,9 @@ agentName: ""
 # Cluster name (optional — auto-detected from kubeadm config if not set)
 clusterName: ""
 
+# Namespace where the ingress controller runs (for ban ConfigMap)
+ingressNamespace: "ingress-nginx"
+
 image:
   repository: ghcr.io/defensia/agent
   tag: ""  # defaults to appVersion

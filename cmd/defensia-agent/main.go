@@ -161,6 +161,12 @@ func runAgent() {
 	k8sClient := kubernetes.NewClient()
 	if k8sClient != nil {
 		log.Printf("[main] Kubernetes mode enabled, node: %s", k8sClient.NodeName())
+
+		// Register K8s ingress-level firewall (ConfigMap with nginx deny rules)
+		if k8sFw := kubernetes.NewK8sFirewall(k8sClient); k8sFw != nil {
+			firewall.SetK8sHook(k8sFw)
+		}
+
 		go k8sClient.WatchEvents(func(event kubernetes.K8sEvent) {
 			log.Printf("[kubernetes] event: %s (%s)", event.Type, event.Severity)
 			_ = apiClient.ReportEvents([]api.EventRequest{{
