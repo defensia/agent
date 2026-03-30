@@ -65,9 +65,6 @@ spec:
             - name: host-log
               mountPath: /var/log
               readOnly: true
-            - name: docker-socket
-              mountPath: /var/run/docker.sock
-              readOnly: true
             - name: config
               mountPath: /etc/defensia
             - name: token
@@ -78,10 +75,6 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.log }}
             type: DirectoryOrCreate
-        - name: docker-socket
-          hostPath:
-            path: {{ .Values.hostPaths.dockerSocket }}
-            type: Socket
         - name: config
           emptyDir: {}
         - name: token
