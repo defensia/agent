@@ -13,6 +13,9 @@ serverUrl: "https://defensia.cloud"
 # Agent name override (default: node hostname)
 agentName: ""
 
+# Cluster name (optional — auto-detected from kubeadm config if not set)
+clusterName: ""
+
 image:
   repository: ghcr.io/defensia/agent
   tag: ""  # defaults to appVersion
@@ -38,6 +41,12 @@ affinity: {}
 hostPaths:
   log: /var/log
   dockerSocket: /var/run/docker.sock
+
+# Service account for K8s API access (pod inventory, ingress discovery, NetworkPolicy audit)
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
 
 # Extra environment variables
 extraEnv: []

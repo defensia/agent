@@ -52,6 +52,17 @@ Secret name for the token
 {{- end }}
 
 {{/*
+Service account name
+*/}}
+{{- define "defensia-agent.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "defensia-agent.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
 Image tag — defaults to appVersion
 */}}
 {{- define "defensia-agent.imageTag" -}}

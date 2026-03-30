@@ -1,9 +1,9 @@
 apiVersion: v2
 name: defensia-agent
-description: Real-time attack detection and blocking for Linux servers — SSH brute force, WAF, bot management, geo-blocking, and threat intelligence in a single lightweight agent.
+description: Kubernetes-native security agent — Ingress WAF, pod monitoring, NetworkPolicy audit, SSH brute force detection, CVE scanning, and automated threat blocking. Deploys as a DaemonSet on every node.
 type: application
-version: 0.2.0
-appVersion: "0.9.80"
+version: 0.3.0
+appVersion: "0.9.83"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent
@@ -12,12 +12,18 @@ keywords:
   - waf
   - firewall
   - intrusion-detection
-  - linux
-  - server
+  - kubernetes
+  - k8s
+  - daemonset
+  - ingress
+  - runtime-security
+  - container-security
   - bot-detection
   - brute-force
   - threat-intelligence
   - server-monitoring
+  - networkpolicy
+  - pod-monitoring
 kubeVersion: ">=1.22.0-0"
 maintainers:
   - name: Defensia
@@ -34,6 +40,10 @@ annotations:
       url: https://github.com/defensia/agent/issues
     - name: Dashboard
       url: https://defensia.cloud
+    - name: Kubernetes Security
+      url: https://defensia.cloud/kubernetes-security
+    - name: OpenSSF Scorecard
+      url: https://securityscorecards.dev/viewer/?uri=github.com/defensia/agent
   artifacthub.io/screenshots: |
     - title: Dashboard
       url: https://raw.githubusercontent.com/defensia/agent/main/docs/01-dashboard.png
@@ -43,15 +53,21 @@ annotations:
       url: https://raw.githubusercontent.com/defensia/agent/main/docs/04-waf.png
   artifacthub.io/changes: |
     - kind: added
-      description: Mail server protection — Postfix SASL, Dovecot IMAP/POP3, Roundcube (11 patterns)
+      description: "Kubernetes Level 5: K8s API integration via client-go — pod inventory, Ingress host discovery, NetworkPolicy audit, pod event watcher (CrashLoop, OOM, evictions)"
     - kind: added
-      description: Database auth monitoring — MySQL, PostgreSQL, MongoDB brute force + port exposure alerts
+      description: "Ingress WAF: reads nginx-ingress/Traefik logs for cluster-wide OWASP attack detection"
     - kind: added
-      description: Geoblocking fix — blocked_countries now correctly read from sync config
+      description: "Containerd log adapter: strips CRI-O prefix from K8s container logs automatically"
+    - kind: added
+      description: "RBAC templates: ServiceAccount, ClusterRole (read-only), ClusterRoleBinding"
+    - kind: added
+      description: "FTP brute force detection: vsftpd, ProFTPD, Pure-FTPd"
+    - kind: added
+      description: "WAF request counter in heartbeat for analytics"
     - kind: security
-      description: Upgrade Go from 1.22 to 1.26 — fixes 25 CVEs in stdlib
+      description: "OpenSSF Scorecard, SECURITY.md, Dependabot, scoped token permissions"
   artifacthub.io/images: |
     - name: defensia-agent
-      image: ghcr.io/defensia/agent:0.9.80
+      image: ghcr.io/defensia/agent:0.9.83
   artifacthub.io/prerelease: "false"
-  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/containsSecurityUpdates: "true"
