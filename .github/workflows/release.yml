@@ -271,8 +271,7 @@ jobs:
              '.layers += [{"mediaType": "application/vnd.cncf.helm.chart.provenance.v1.prov", "digest": $digest, "size": $size}]' \
              /tmp/manifest.json > /tmp/manifest-signed.json
 
-          MEDIA_TYPE=$(jq -r .mediaType /tmp/manifest-signed.json)
           oras manifest push \
-            --media-type "${MEDIA_TYPE}" \
+            --media-type "application/vnd.oci.image.manifest.v1+json" \
             ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} \
             /tmp/manifest-signed.json
