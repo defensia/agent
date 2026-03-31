@@ -67,6 +67,32 @@ jobs:
           sha256sum defensia-agent-linux-arm64 > defensia-agent-linux-arm64.sha256
           sha256sum defensia-agent-linux-amd64-k8s > defensia-agent-linux-amd64-k8s.sha256
           sha256sum defensia-agent-linux-arm64-k8s > defensia-agent-linux-arm64-k8s.sha256
+          cat *.sha256 > checksums.txt
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release artifacts
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        working-directory: build
+        run: |
+          cosign sign-blob --key env://COSIGN_PRIVATE_KEY --yes \
+            --output-signature defensia-agent-linux-amd64.sig \
+            defensia-agent-linux-amd64
+          cosign sign-blob --key env://COSIGN_PRIVATE_KEY --yes \
+            --output-signature defensia-agent-linux-arm64.sig \
+            defensia-agent-linux-arm64
+          cosign sign-blob --key env://COSIGN_PRIVATE_KEY --yes \
+            --output-signature defensia-agent-linux-amd64-k8s.sig \
+            defensia-agent-linux-amd64-k8s
+          cosign sign-blob --key env://COSIGN_PRIVATE_KEY --yes \
+            --output-signature defensia-agent-linux-arm64-k8s.sig \
+            defensia-agent-linux-arm64-k8s
+          cosign sign-blob --key env://COSIGN_PRIVATE_KEY --yes \
+            --output-signature checksums.txt.sig \
+            checksums.txt
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
@@ -110,12 +136,18 @@ jobs:
           files: |
             build/defensia-agent-linux-amd64
             build/defensia-agent-linux-amd64.sha256
+            build/defensia-agent-linux-amd64.sig
             build/defensia-agent-linux-arm64
             build/defensia-agent-linux-arm64.sha256
+            build/defensia-agent-linux-arm64.sig
             build/defensia-agent-linux-amd64-k8s
             build/defensia-agent-linux-amd64-k8s.sha256
+            build/defensia-agent-linux-amd64-k8s.sig
             build/defensia-agent-linux-arm64-k8s
             build/defensia-agent-linux-arm64-k8s.sha256
+            build/defensia-agent-linux-arm64-k8s.sig
+            build/checksums.txt
+            build/checksums.txt.sig
             install.sh
 
   docker:
