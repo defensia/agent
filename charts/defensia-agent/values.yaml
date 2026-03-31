@@ -1,63 +1,45 @@
-# Defensia Agent — Helm values
-# Full docs: https://github.com/defensia/agent
+# Defensia Agent Helm Chart — values.yaml
 
-# For Kubernetes: use apiKey (multi-use, one key for the whole cluster)
-# Each DaemonSet pod registers as 1 server slot. Billing limits apply.
+# Required: your organization API key from defensia.cloud
 apiKey: ""
 
-# For single-server Docker: use token (single-use install token)
-token: ""
-
-# Or reference an existing Secret (key: "api-key" or "token")
-existingSecret: ""
-
-# Defensia panel URL
+# Defensia server URL (change only for self-hosted)
 serverUrl: "https://defensia.cloud"
 
-# Agent name override (default: node hostname)
-agentName: ""
-
-# Cluster name (optional — auto-detected from kubeadm config if not set)
+# Optional: cluster name (auto-detected if not set)
 clusterName: ""
-
-# Namespace where the ingress controller runs (for ban ConfigMap)
-ingressNamespace: "ingress-nginx"
 
 image:
   repository: ghcr.io/defensia/agent
-  tag: ""  # defaults to appVersion
+  tag: ""  # Defaults to appVersion
   pullPolicy: IfNotPresent
 
+# Resource limits for the agent container
 resources:
-  limits:
-    cpu: 200m
-    memory: 128Mi
   requests:
     cpu: 50m
     memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
 
-# Run on ALL nodes including masters/control-plane
+# DaemonSet tolerations — run on ALL nodes (including masters)
 tolerations:
   - operator: Exists
 
+# Node selector (optional — restrict to specific nodes)
 nodeSelector: {}
 
-affinity: {}
+# Priority class (optional — ensure agent isn't evicted first)
+priorityClassName: ""
 
-# Host paths to mount (read-only)
-hostPaths:
-  log: /var/log
-  dockerSocket: /var/run/docker.sock
+# Extra environment variables
+extraEnv: []
+#  - name: GEOIP_DB_PATH
+#    value: /etc/defensia/GeoLite2-Country.mmdb
 
-# Service account for K8s API access (pod inventory, ingress discovery, NetworkPolicy audit)
+# Service account
 serviceAccount:
   create: true
   name: ""
   annotations: {}
-
-# Extra environment variables
-extraEnv: []
-#  - name: WEB_LOG_PATH
-#    value: "/var/log/nginx/access.log"
-#  - name: GEOIP_DB_PATH
-#    value: "/usr/share/GeoIP/GeoLite2-Country.mmdb"

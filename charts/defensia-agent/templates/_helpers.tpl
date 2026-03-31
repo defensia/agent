@@ -9,9 +9,6 @@ Expand the name of the chart.
 Create a default fully qualified app name.
 */}}
 {{- define "defensia-agent.fullname" -}}
-{{- if .Values.fullnameOverride }}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
-{{- else }}
 {{- $name := default .Chart.Name .Values.nameOverride }}
 {{- if contains $name .Release.Name }}
 {{- .Release.Name | trunc 63 | trimSuffix "-" }}
@@ -19,17 +16,15 @@ Create a default fully qualified app name.
 {{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 {{- end }}
-{{- end }}
 
 {{/*
 Common labels
 */}}
 {{- define "defensia-agent.labels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-app.kubernetes.io/name: {{ include "defensia-agent.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+{{ include "defensia-agent.selectorLabels" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{/*
@@ -41,17 +36,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Secret name for the token
-*/}}
-{{- define "defensia-agent.secretName" -}}
-{{- if .Values.existingSecret }}
-{{- .Values.existingSecret }}
-{{- else }}
-{{- include "defensia-agent.fullname" . }}
-{{- end }}
-{{- end }}
-
-{{/*
 Service account name
 */}}
 {{- define "defensia-agent.serviceAccountName" -}}
@@ -60,11 +44,4 @@ Service account name
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
-{{- end }}
-
-{{/*
-Image tag — defaults to appVersion
-*/}}
-{{- define "defensia-agent.imageTag" -}}
-{{- default .Chart.AppVersion .Values.image.tag }}
 {{- end }}
