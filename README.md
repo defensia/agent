@@ -475,6 +475,12 @@ go build -o defensia-agent ./cmd/defensia-agent
 
 ---
 
+## Blog
+
+- [I analyzed 250,000 attacks on my Linux servers. Here's what I found.](https://dev.to/defensia/i-analyzed-250000-attacks-on-my-linux-servers-heres-what-i-found-20o8) — Real data from 14 production servers: SSH brute force, RCE, env probing, path traversal, and more.
+
+---
+
 ## License
 
 [MIT](LICENSE) — use it however you want.
