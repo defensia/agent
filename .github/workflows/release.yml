@@ -237,24 +237,40 @@ jobs:
             --sign --key "Defensia" --keyring /tmp/secring.gpg \
             -d /tmp/charts
 
-      - name: Push chart to GHCR
-        id: helm-push
-        run: |
-          OUTPUT=$(helm push /tmp/charts/defensia-agent-*.tgz oci://ghcr.io/defensia/charts 2>&1)
-          echo "$OUTPUT"
-          DIGEST=$(echo "$OUTPUT" | grep -oP 'sha256:[a-f0-9]+')
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-
       - name: Install oras
         run: |
           curl -sLO https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz
           tar xzf oras_1.2.2_linux_amd64.tar.gz -C /usr/local/bin oras
           rm oras_1.2.2_linux_amd64.tar.gz
 
-      - name: Attach provenance file
+      - name: Push chart with provenance to GHCR
+        id: helm-push
         run: |
           CHART_VERSION=$(grep '^version:' charts/defensia-agent/Chart.yaml | awk '{print $2}')
-          oras attach ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} \
-            --artifact-type "application/vnd.cncf.helm.chart.provenance.v1.prov" \
-            --disable-path-validation \
-            /tmp/charts/defensia-agent-${CHART_VERSION}.tgz.prov:application/vnd.cncf.helm.chart.provenance.v1.prov
+          CHART_TGZ="/tmp/charts/defensia-agent-${CHART_VERSION}.tgz"
+          CHART_PROV="${CHART_TGZ}.prov"
+
+          # Push chart normally (creates correct Helm OCI manifest)
+          OUTPUT=$(helm push "${CHART_TGZ}" oci://ghcr.io/defensia/charts 2>&1)
+          echo "$OUTPUT"
+          DIGEST=$(echo "$OUTPUT" | grep -oP 'sha256:[a-f0-9]+')
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+          # Upload .prov blob to registry
+          PROV_BLOB_OUTPUT=$(oras blob push ghcr.io/defensia/charts/defensia-agent "${CHART_PROV}" 2>&1)
+          echo "$PROV_BLOB_OUTPUT"
+          PROV_DIGEST=$(echo "$PROV_BLOB_OUTPUT" | grep -oP 'sha256:[a-f0-9]+' | head -1)
+          PROV_SIZE=$(wc -c < "${CHART_PROV}" | tr -d ' ')
+
+          # Fetch manifest, add .prov as layer, re-push
+          # (oras attach uses referrers API which GHCR doesn't support)
+          oras manifest fetch ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} > /tmp/manifest.json
+
+          jq --arg digest "${PROV_DIGEST}" \
+             --argjson size ${PROV_SIZE} \
+             '.layers += [{"mediaType": "application/vnd.cncf.helm.chart.provenance.v1.prov", "digest": $digest, "size": $size}]' \
+             /tmp/manifest.json > /tmp/manifest-signed.json
+
+          oras manifest push \
+            ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} \
+            /tmp/manifest-signed.json
