@@ -1259,15 +1259,8 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		return
 	}
 
-	var paths []string
-	domainMap := make(map[string]string)
 	apiWebRoots := make([]api.MalwareScanWebRoot, len(webRoots))
-
 	for i, root := range webRoots {
-		paths = append(paths, root.Path)
-		if root.Domain != "" {
-			domainMap[root.Path] = root.Domain
-		}
 		apiWebRoots[i] = api.MalwareScanWebRoot{
 			Path:             root.Path,
 			Domain:           root.Domain,
@@ -1277,7 +1270,9 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	}
 
 	scanner := malware.New()
-	result, err := scanner.ScanPaths(paths, domainMap, intensity)
+	// TODO: load user-ignored entries from sync cache
+	// scanner.AllowList.SetUserIgnored(loadIgnoredCache())
+	result, err := scanner.ScanWebRoots(webRoots, intensity)
 	if err != nil {
 		log.Printf("[malware] scan error: %v", err)
 		return
