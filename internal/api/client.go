@@ -325,6 +325,50 @@ func (c *Client) SubmitSoftwareAudit(req SoftwareAuditRequest) error {
 	return c.post("/api/v1/agent/software-audit-results", c.token, req, nil)
 }
 
+// MalwareScanResultRequest sends malware scan results to the server.
+type MalwareScanResultRequest struct {
+	WebRoots          []MalwareScanWebRoot    `json:"web_roots"`
+	Findings          []MalwareScanFinding    `json:"findings"`
+	FrameworkFindings []MalwareFrameworkIssue `json:"framework_findings"`
+	FilesScanned      int64                   `json:"files_scanned"`
+	FilesSkipped      int64                   `json:"files_skipped"`
+	DurationSeconds   float64                 `json:"duration_seconds"`
+}
+
+type MalwareScanWebRoot struct {
+	Path             string `json:"path"`
+	Domain           string `json:"domain,omitempty"`
+	FrameworkName    string `json:"framework_name"`
+	FrameworkVersion string `json:"framework_version,omitempty"`
+}
+
+type MalwareScanFinding struct {
+	FilePath    string `json:"file_path"`
+	SignatureID string `json:"signature_id"`
+	Name        string `json:"name"`
+	Severity    string `json:"severity"`
+	Type        string `json:"type"`
+	MatchLine   int    `json:"match_line"`
+	MatchText   string `json:"match_text"`
+	Domain      string `json:"domain,omitempty"`
+	Framework   string `json:"framework,omitempty"`
+}
+
+type MalwareFrameworkIssue struct {
+	CheckID     string `json:"check_id"`
+	Title       string `json:"title"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+	FilePath    string `json:"file_path"`
+	Domain      string `json:"domain,omitempty"`
+	Framework   string `json:"framework"`
+}
+
+// SubmitMalwareScanResults sends malware scan results to the server.
+func (c *Client) SubmitMalwareScanResults(req MalwareScanResultRequest) error {
+	return c.post("/api/v1/agent/malware-scan-results", c.token, req, nil)
+}
+
 func (c *Client) post(path, token string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {

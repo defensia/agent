@@ -81,17 +81,24 @@ type UpdateRequestedPayload struct {
 	AgentID int64 `json:"agent_id"`
 }
 
+// MalwareScanRequestedPayload matches the broadcastWith() from MalwareScanRequested event.
+type MalwareScanRequestedPayload struct {
+	AgentID   int64  `json:"agent_id"`
+	Intensity string `json:"intensity"` // "low", "medium", "high"
+}
+
 // Handlers called when events are received from the server.
 type Handlers struct {
-	OnBanCreated       func(BanCreatedPayload)
-	OnBanRemoved       func(BanRemovedPayload)
-	OnRuleCreated      func(RuleCreatedPayload)
-	OnRuleRemoved      func(RuleRemovedPayload)
-	OnScanRequested    func(ScanRequestedPayload)
-	OnImportRequested  func(ImportRequestedPayload)
-	OnAuditRequested   func(AuditRequestedPayload)
-	OnSyncRequested    func(SyncRequestedPayload)
-	OnUpdateRequested  func(UpdateRequestedPayload)
+	OnBanCreated              func(BanCreatedPayload)
+	OnBanRemoved              func(BanRemovedPayload)
+	OnRuleCreated             func(RuleCreatedPayload)
+	OnRuleRemoved             func(RuleRemovedPayload)
+	OnScanRequested           func(ScanRequestedPayload)
+	OnImportRequested         func(ImportRequestedPayload)
+	OnAuditRequested          func(AuditRequestedPayload)
+	OnSyncRequested           func(SyncRequestedPayload)
+	OnUpdateRequested         func(UpdateRequestedPayload)
+	OnMalwareScanRequested    func(MalwareScanRequestedPayload)
 }
 
 // Client manages the WebSocket connection to Reverb.
@@ -375,6 +382,14 @@ func (c *Client) dispatch(event string, rawData json.RawMessage) {
 			var p UpdateRequestedPayload
 			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
 				c.handlers.OnUpdateRequested(p)
+			}
+		}
+
+	case "malware_scan.requested":
+		if c.handlers.OnMalwareScanRequested != nil {
+			var p MalwareScanRequestedPayload
+			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
+				c.handlers.OnMalwareScanRequested(p)
 			}
 		}
 	}

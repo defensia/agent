@@ -20,6 +20,7 @@ import (
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
 	"github.com/defensia/agent/internal/kubernetes"
+	"github.com/defensia/agent/internal/malware"
 	"github.com/defensia/agent/internal/monitor"
 	"github.com/defensia/agent/internal/scanner"
 	"github.com/defensia/agent/internal/updater"
@@ -568,6 +569,10 @@ func runAgent() {
 				if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
 					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 				}
+			},
+			OnMalwareScanRequested: func(p ws.MalwareScanRequestedPayload) {
+				log.Printf("[reverb] malware_scan.requested: intensity=%s", p.Intensity)
+				go runMalwareScan(apiClient, p.Intensity)
 			},
 		},
 	)
@@ -1221,4 +1226,118 @@ func loadThreatFeedCache() {
 	}
 	log.Printf("[threat-feed] applying %d cached entries at startup", len(entries))
 	applyThreatFeed(entries)
+}
+
+// runMalwareScan detects web roots, runs malware signature scanning and framework checks.
+func runMalwareScan(client *api.Client, intensityStr string) {
+	log.Printf("[malware] starting scan (intensity=%s)", intensityStr)
+
+	_ = client.ReportEvents([]api.EventRequest{{
+		Type:       "malware_scan_started",
+		Severity:   "info",
+		Details:    map[string]string{"intensity": intensityStr},
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
+	intensity := malware.IntensityMedium
+	switch intensityStr {
+	case "low":
+		intensity = malware.IntensityLow
+	case "high":
+		intensity = malware.IntensityHigh
+	}
+
+	webRoots := malware.DetectWebRoots()
+	if len(webRoots) == 0 {
+		log.Printf("[malware] no web roots found — skipping scan")
+		_ = client.ReportEvents([]api.EventRequest{{
+			Type:       "malware_scan_completed",
+			Severity:   "info",
+			Details:    map[string]string{"result": "no_web_roots"},
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+		return
+	}
+
+	var paths []string
+	domainMap := make(map[string]string)
+	apiWebRoots := make([]api.MalwareScanWebRoot, len(webRoots))
+
+	for i, root := range webRoots {
+		paths = append(paths, root.Path)
+		if root.Domain != "" {
+			domainMap[root.Path] = root.Domain
+		}
+		apiWebRoots[i] = api.MalwareScanWebRoot{
+			Path:             root.Path,
+			Domain:           root.Domain,
+			FrameworkName:    root.Framework.Name,
+			FrameworkVersion: root.Framework.Version,
+		}
+	}
+
+	scanner := malware.New()
+	result, err := scanner.ScanPaths(paths, domainMap, intensity)
+	if err != nil {
+		log.Printf("[malware] scan error: %v", err)
+		return
+	}
+
+	var frameworkFindings []api.MalwareFrameworkIssue
+	for _, root := range webRoots {
+		for _, ff := range malware.CheckFramework(root) {
+			frameworkFindings = append(frameworkFindings, api.MalwareFrameworkIssue{
+				CheckID:     ff.CheckID,
+				Title:       ff.Title,
+				Severity:    ff.Severity,
+				Description: ff.Description,
+				FilePath:    ff.FilePath,
+				Domain:      ff.Domain,
+				Framework:   ff.Framework,
+			})
+		}
+	}
+
+	apiFindings := make([]api.MalwareScanFinding, len(result.Findings))
+	for i, f := range result.Findings {
+		apiFindings[i] = api.MalwareScanFinding{
+			FilePath:    f.FilePath,
+			SignatureID: f.SignatureID,
+			Name:        f.Name,
+			Severity:    f.Severity,
+			Type:        f.Type,
+			MatchLine:   f.MatchLine,
+			MatchText:   f.MatchText,
+			Domain:      f.Domain,
+			Framework:   f.Framework,
+		}
+	}
+
+	if err := client.SubmitMalwareScanResults(api.MalwareScanResultRequest{
+		WebRoots:          apiWebRoots,
+		Findings:          apiFindings,
+		FrameworkFindings: frameworkFindings,
+		FilesScanned:      result.FilesScanned,
+		FilesSkipped:      result.FilesSkipped,
+		DurationSeconds:   result.Duration.Seconds(),
+	}); err != nil {
+		log.Printf("[malware] failed to submit results: %v", err)
+		return
+	}
+
+	log.Printf("[malware] scan complete — %d files scanned, %d malware findings, %d framework issues in %s",
+		result.FilesScanned, len(result.Findings), len(frameworkFindings), result.Duration.Round(time.Second))
+
+	_ = client.ReportEvents([]api.EventRequest{{
+		Type:     "malware_scan_completed",
+		Severity: "info",
+		Details: map[string]string{
+			"files_scanned":      fmt.Sprintf("%d", result.FilesScanned),
+			"malware_findings":   fmt.Sprintf("%d", len(result.Findings)),
+			"framework_findings": fmt.Sprintf("%d", len(frameworkFindings)),
+			"web_roots":          fmt.Sprintf("%d", len(webRoots)),
+			"duration_seconds":   fmt.Sprintf("%.1f", result.Duration.Seconds()),
+		},
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
 }
