@@ -153,24 +153,40 @@ type DetectionRule struct {
 
 // SyncResponse is the initial state fetched at startup.
 type SyncResponse struct {
-	Config          SyncConfig       `json:"config"`
-	Rules           []Rule           `json:"rules"`
-	Bans            []Ban            `json:"bans"`
-	Whitelists      []WhitelistEntry `json:"whitelists"`
-	AgentUpdate     *AgentUpdateInfo `json:"agent_update,omitempty"`
-	DetectionRules  []DetectionRule  `json:"detection_rules"`
-	BotFingerprints []BotFingerprint `json:"bot_fingerprints"`
-	WafRules        []WafRule        `json:"waf_rules"`
-	ThreatFeed      []ThreatEntry    `json:"threat_feed"`
+	Config            SyncConfig          `json:"config"`
+	Rules             []Rule              `json:"rules"`
+	Bans              []Ban               `json:"bans"`
+	Whitelists        []WhitelistEntry    `json:"whitelists"`
+	AgentUpdate       *AgentUpdateInfo    `json:"agent_update,omitempty"`
+	DetectionRules    []DetectionRule     `json:"detection_rules"`
+	BotFingerprints   []BotFingerprint    `json:"bot_fingerprints"`
+	WafRules          []WafRule           `json:"waf_rules"`
+	ThreatFeed        []ThreatEntry       `json:"threat_feed"`
+	MalwareAllowlist  []MalwareIgnoreEntry `json:"malware_allowlist"`
+}
+
+// MalwareIgnoreEntry is a user-ignored malware finding synced from the backend.
+type MalwareIgnoreEntry struct {
+	FilePath    string `json:"file_path"`
+	SignatureID string `json:"signature_id"`
 }
 
 type SyncConfig struct {
-	BFThreshold      int        `json:"bf_threshold"`
-	BFWindow         int        `json:"bf_window"`
-	BFBanDuration    *int       `json:"bf_ban_duration"`
-	MonitorMode      bool       `json:"monitor_mode"`
-	WAFConfig        *WAFConfig `json:"waf_config"`
-	BlockedCountries []string   `json:"blocked_countries"`
+	BFThreshold       int               `json:"bf_threshold"`
+	BFWindow          int               `json:"bf_window"`
+	BFBanDuration     *int              `json:"bf_ban_duration"`
+	MonitorMode       bool              `json:"monitor_mode"`
+	WAFConfig         *WAFConfig        `json:"waf_config"`
+	BlockedCountries  []string          `json:"blocked_countries"`
+	MalwareScanConfig *MalwareScanConfig `json:"malware_scan_config,omitempty"`
+}
+
+// MalwareScanConfig controls scheduled malware scanning.
+type MalwareScanConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Frequency string `json:"frequency"` // "daily", "weekly", "disabled"
+	Time      string `json:"time"`      // "03:00" (HH:MM in server local time)
+	Intensity string `json:"intensity"` // "low", "medium", "high"
 }
 
 type WAFConfig struct {

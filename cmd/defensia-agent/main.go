@@ -31,6 +31,10 @@ import (
 
 var version = "0.9.92"
 
+// Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
+var malwareScheduler *malware.Scheduler
+var malwareAllowList *malware.AllowList
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
@@ -477,6 +481,12 @@ func runAgent() {
 		}
 	}()
 
+	// Initialize malware scanner globals
+	malwareAllowList = malware.NewAllowList()
+	malwareScheduler = malware.NewScheduler(func(intensity string) {
+		go runMalwareScan(apiClient, intensity)
+	})
+
 	// Initial sync (applies config, whitelists, rules, bans)
 	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
@@ -858,6 +868,24 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				}
 			}(uaFps)
 		}
+	}
+
+	// Apply malware scan schedule config
+	if sync.Config.MalwareScanConfig != nil {
+		cfg := sync.Config.MalwareScanConfig
+		malwareScheduler.UpdateConfig(cfg.Enabled, cfg.Frequency, cfg.Time, cfg.Intensity)
+	}
+
+	// Apply malware allowlist (user-ignored findings)
+	if len(sync.MalwareAllowlist) > 0 {
+		entries := make([]malware.IgnoreEntry, len(sync.MalwareAllowlist))
+		for i, e := range sync.MalwareAllowlist {
+			entries[i] = malware.IgnoreEntry{
+				FilePath:    e.FilePath,
+				SignatureID: e.SignatureID,
+			}
+		}
+		malwareAllowList.SetUserIgnored(entries)
 	}
 
 	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",
@@ -1270,8 +1298,9 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	}
 
 	scanner := malware.New()
-	// TODO: load user-ignored entries from sync cache
-	// scanner.AllowList.SetUserIgnored(loadIgnoredCache())
+	if malwareAllowList != nil {
+		scanner.AllowList = malwareAllowList
+	}
 	result, err := scanner.ScanWebRoots(webRoots, intensity)
 	if err != nil {
 		log.Printf("[malware] scan error: %v", err)
