@@ -162,7 +162,19 @@ type SyncResponse struct {
 	BotFingerprints   []BotFingerprint    `json:"bot_fingerprints"`
 	WafRules          []WafRule           `json:"waf_rules"`
 	ThreatFeed        []ThreatEntry       `json:"threat_feed"`
-	MalwareAllowlist  []MalwareIgnoreEntry `json:"malware_allowlist"`
+	MalwareAllowlist   []MalwareIgnoreEntry  `json:"malware_allowlist"`
+	MalwareSignatures  []MalwareSyncSignature `json:"malware_signatures"`
+}
+
+// MalwareSyncSignature is a dynamic malware signature synced from the backend.
+type MalwareSyncSignature struct {
+	SignatureID string `json:"signature_id"`
+	Name        string `json:"name"`
+	Pattern     string `json:"pattern"`
+	Severity    string `json:"severity"`
+	Type        string `json:"type"`
+	IsRegex     bool   `json:"is_regex"`
+	PHPOnly     bool   `json:"php_only"`
 }
 
 // MalwareIgnoreEntry is a user-ignored malware finding synced from the backend.

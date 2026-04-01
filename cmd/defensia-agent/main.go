@@ -34,6 +34,7 @@ var version = "0.9.92"
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScheduler *malware.Scheduler
 var malwareAllowList *malware.AllowList
+var malwareScanner   *malware.Scanner
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -482,6 +483,7 @@ func runAgent() {
 	}()
 
 	// Initialize malware scanner globals
+	malwareScanner = malware.New()
 	malwareAllowList = malware.NewAllowList()
 	malwareScheduler = malware.NewScheduler(func(intensity string) {
 		go runMalwareScan(apiClient, intensity)
@@ -868,6 +870,23 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				}
 			}(uaFps)
 		}
+	}
+
+	// Apply dynamic malware signatures from backend
+	if len(sync.MalwareSignatures) > 0 && malwareScanner != nil {
+		dynSigs := make([]malware.Signature, len(sync.MalwareSignatures))
+		for i, s := range sync.MalwareSignatures {
+			dynSigs[i] = malware.Signature{
+				ID:       s.SignatureID,
+				Name:     s.Name,
+				Pattern:  s.Pattern,
+				Severity: s.Severity,
+				Type:     s.Type,
+				IsRegex:  s.IsRegex,
+				PHPOnly:  s.PHPOnly,
+			}
+		}
+		malwareScanner.LoadDynamicSignatures(dynSigs)
 	}
 
 	// Apply malware scan schedule config
@@ -1297,7 +1316,10 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}
 	}
 
-	scanner := malware.New()
+	scanner := malwareScanner
+	if scanner == nil {
+		scanner = malware.New()
+	}
 	if malwareAllowList != nil {
 		scanner.AllowList = malwareAllowList
 	}
