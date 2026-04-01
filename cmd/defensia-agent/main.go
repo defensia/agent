@@ -484,6 +484,25 @@ func runAgent() {
 
 	// Initialize malware scanner globals
 	malwareScanner = malware.New()
+	malwareScanner.HashLookup = func(hashes []string) map[string]string {
+		resp, err := apiClient.LookupMalwareHashes(hashes)
+		if err != nil {
+			log.Printf("[malware] hash lookup failed: %v", err)
+			return nil
+		}
+		result := make(map[string]string, resp.Found)
+		for sha, match := range resp.Matches {
+			name := match.Name
+			if name == "" {
+				name = match.Type
+			}
+			result[sha] = name
+		}
+		if resp.Found > 0 {
+			log.Printf("[malware] hash lookup: %d/%d matches found", resp.Found, resp.Checked)
+		}
+		return result
+	}
 	malwareAllowList = malware.NewAllowList()
 	malwareScheduler = malware.NewScheduler(func(intensity string) {
 		go runMalwareScan(apiClient, intensity)

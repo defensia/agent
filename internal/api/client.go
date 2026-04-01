@@ -397,6 +397,34 @@ func (c *Client) SubmitMalwareScanResults(req MalwareScanResultRequest) error {
 	return c.post("/api/v1/agent/malware-scan-results", c.token, req, nil)
 }
 
+// HashLookupRequest is a batch of SHA256 hashes to check against known malware.
+type HashLookupRequest struct {
+	Hashes []string `json:"hashes"`
+}
+
+// HashLookupResponse returns which hashes are known malware.
+type HashLookupResponse struct {
+	Matches map[string]HashMatch `json:"matches"`
+	Checked int                  `json:"checked"`
+	Found   int                  `json:"found"`
+}
+
+// HashMatch is a single known malware hash.
+type HashMatch struct {
+	SHA256 string `json:"sha256"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Source string `json:"source"`
+	Tags   string `json:"tags"`
+}
+
+// LookupMalwareHashes checks a batch of file hashes against the backend's malware DB.
+func (c *Client) LookupMalwareHashes(hashes []string) (*HashLookupResponse, error) {
+	var resp HashLookupResponse
+	err := c.post("/api/v1/agent/malware-hash-lookup", c.token, HashLookupRequest{Hashes: hashes}, &resp)
+	return &resp, err
+}
+
 func (c *Client) post(path, token string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
