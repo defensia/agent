@@ -32,9 +32,10 @@ import (
 var version = "0.9.92"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
-var malwareScheduler *malware.Scheduler
-var malwareAllowList *malware.AllowList
-var malwareScanner   *malware.Scanner
+var malwareScheduler  *malware.Scheduler
+var malwareAllowList  *malware.AllowList
+var malwareScanner    *malware.Scanner
+var malwareRTWatcher  *malware.RealtimeWatcher
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -484,6 +485,35 @@ func runAgent() {
 
 	// Initialize malware scanner globals
 	malwareScanner = malware.New()
+
+	// Realtime watcher: polls upload directories for new PHP files
+	malwareRTWatcher = malware.NewRealtimeWatcher(func(path, domain string) {
+		// Scan the single file immediately
+		findings := malwareScanner.ScanSingleFile(path, domain)
+		if len(findings) == 0 {
+			return
+		}
+		// Report as security events
+		var events []api.EventRequest
+		for _, f := range findings {
+			events = append(events, api.EventRequest{
+				Type:     "malware_realtime",
+				Severity: f.Severity,
+				Details: map[string]string{
+					"file_path":    f.FilePath,
+					"signature_id": f.SignatureID,
+					"name":         f.Name,
+					"type":         f.Type,
+					"domain":       f.Domain,
+				},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+		if err := apiClient.ReportEvents(events); err != nil {
+			log.Printf("[malware-rt] failed to report: %v", err)
+		}
+		log.Printf("[malware-rt] detected %d findings in %s", len(findings), path)
+	})
 	malwareScanner.HashLookup = func(hashes []string) map[string]string {
 		resp, err := apiClient.LookupMalwareHashes(hashes)
 		if err != nil {
@@ -512,6 +542,16 @@ func runAgent() {
 	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
+
+	// Start realtime malware watcher (detects new PHP in upload dirs)
+	go func() {
+		webRoots := malware.DetectWebRoots()
+		if len(webRoots) > 0 && malwareRTWatcher != nil {
+			malwareRTWatcher.SetDirectories(webRoots)
+			malwareRTWatcher.Start()
+			log.Printf("[malware-rt] started realtime monitoring")
+		}
+	}()
 
 	// Import existing iptables rules on first startup
 	go importExistingRules(apiClient)
@@ -1346,6 +1386,15 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	if err != nil {
 		log.Printf("[malware] scan error: %v", err)
 		return
+	}
+
+	// System integrity + rootkit checks
+	sysResult := malware.CheckSystemIntegrity()
+	for _, f := range sysResult.ModifiedBinaries {
+		result.Findings = append(result.Findings, f)
+	}
+	for _, f := range sysResult.RootkitIndicators {
+		result.Findings = append(result.Findings, f)
 	}
 
 	var frameworkFindings []api.MalwareFrameworkIssue
