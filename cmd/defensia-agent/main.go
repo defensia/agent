@@ -1395,6 +1395,12 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		return
 	}
 
+	// Credential scan
+	credFindings := malware.CheckCredentials(webRoots)
+	for _, f := range credFindings {
+		result.Findings = append(result.Findings, f)
+	}
+
 	// System integrity + rootkit checks
 	sysResult := malware.CheckSystemIntegrity()
 	for _, f := range sysResult.ModifiedBinaries {
