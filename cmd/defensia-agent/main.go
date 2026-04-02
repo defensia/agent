@@ -543,15 +543,9 @@ func runAgent() {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
-	// Start realtime malware watcher (detects new PHP in upload dirs)
-	go func() {
-		webRoots := malware.DetectWebRoots()
-		if len(webRoots) > 0 && malwareRTWatcher != nil {
-			malwareRTWatcher.SetDirectories(webRoots)
-			malwareRTWatcher.Start()
-			log.Printf("[malware-rt] started realtime monitoring")
-		}
-	}()
+	// NOTE: Realtime malware watcher is NOT started here.
+	// It only starts when malware scanning is enabled via dashboard config.
+	// The scheduler's UpdateConfig in syncAndApply handles starting/stopping it.
 
 	// Import existing iptables rules on first startup
 	go importExistingRules(apiClient)
@@ -948,10 +942,23 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		malwareScanner.LoadDynamicSignatures(dynSigs)
 	}
 
-	// Apply malware scan schedule config
+	// Apply malware scan schedule config + realtime watcher
 	if sync.Config.MalwareScanConfig != nil {
 		cfg := sync.Config.MalwareScanConfig
 		malwareScheduler.UpdateConfig(cfg.Enabled, cfg.Frequency, cfg.Time, cfg.Intensity)
+
+		// Start/stop realtime watcher based on malware scan being enabled
+		if cfg.Enabled && malwareRTWatcher != nil {
+			go func() {
+				webRoots := malware.DetectWebRoots()
+				if len(webRoots) > 0 {
+					malwareRTWatcher.SetDirectories(webRoots)
+					malwareRTWatcher.Start()
+				}
+			}()
+		} else if !cfg.Enabled && malwareRTWatcher != nil {
+			malwareRTWatcher.Stop()
+		}
 	}
 
 	// Apply malware allowlist (user-ignored findings)
