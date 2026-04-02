@@ -361,6 +361,16 @@ type MalwareScanResultRequest struct {
 	FilesScanned      int64                   `json:"files_scanned"`
 	FilesSkipped      int64                   `json:"files_skipped"`
 	DurationSeconds   float64                 `json:"duration_seconds"`
+	SecurityScore     *MalwareSecurityScore   `json:"security_score,omitempty"`
+}
+
+type MalwareSecurityScore struct {
+	Score                int    `json:"score"`
+	Grade                string `json:"grade"`
+	MalwareDeductions    int    `json:"malware_deductions"`
+	FrameworkDeductions  int    `json:"framework_deductions"`
+	CredentialDeductions int    `json:"credential_deductions"`
+	IntegrityDeductions  int    `json:"integrity_deductions"`
 }
 
 type MalwareScanWebRoot struct {

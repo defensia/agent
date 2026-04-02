@@ -1401,6 +1401,20 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		result.Findings = append(result.Findings, f)
 	}
 
+	// WordPress database scanning
+	for _, root := range webRoots {
+		dbFindings := malware.CheckWordPressDatabase(root)
+		for _, f := range dbFindings {
+			result.Findings = append(result.Findings, f)
+		}
+	}
+
+	// Malicious process detection (crypto miners, reverse shells)
+	procFindings := malware.CheckMaliciousProcesses()
+	for _, f := range procFindings {
+		result.Findings = append(result.Findings, f)
+	}
+
 	// System integrity + rootkit checks
 	sysResult := malware.CheckSystemIntegrity()
 	for _, f := range sysResult.ModifiedBinaries {
@@ -1440,6 +1454,14 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}
 	}
 
+	// Calculate security posture score
+	var fwFindings []malware.FrameworkFinding
+	for _, root := range webRoots {
+		fwFindings = append(fwFindings, malware.CheckFramework(root)...)
+	}
+	secScore := malware.CalculateScore(result.Findings, fwFindings)
+	log.Printf("[malware] security score: %d/100 (grade %s)", secScore.Score, secScore.Grade)
+
 	if err := client.SubmitMalwareScanResults(api.MalwareScanResultRequest{
 		WebRoots:          apiWebRoots,
 		Findings:          apiFindings,
@@ -1447,6 +1469,14 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		FilesScanned:      result.FilesScanned,
 		FilesSkipped:      result.FilesSkipped,
 		DurationSeconds:   result.Duration.Seconds(),
+		SecurityScore: &api.MalwareSecurityScore{
+			Score:                secScore.Score,
+			Grade:                secScore.Grade,
+			MalwareDeductions:    secScore.MalwareDeductions,
+			FrameworkDeductions:  secScore.FrameworkDeductions,
+			CredentialDeductions: secScore.CredentialDeductions,
+			IntegrityDeductions:  secScore.IntegrityDeductions,
+		},
 	}); err != nil {
 		log.Printf("[malware] failed to submit results: %v", err)
 		return
