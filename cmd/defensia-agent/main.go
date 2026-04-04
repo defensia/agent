@@ -647,6 +647,28 @@ func runAgent() {
 				log.Printf("[reverb] malware_scan.requested: intensity=%s", p.Intensity)
 				go runMalwareScan(apiClient, p.Intensity)
 			},
+			OnYaraInstallRequested: func(p ws.YaraInstallRequestedPayload) {
+				log.Printf("[reverb] yara_install.requested")
+				go func() {
+					if err := malware.InstallYara(); err != nil {
+						_ = apiClient.ReportEvents([]api.EventRequest{{
+							Type:       "yara_install_failed",
+							Severity:   "warning",
+							Details:    map[string]string{"error": err.Error()},
+							OccurredAt: time.Now().UTC().Format(time.RFC3339),
+						}})
+						return
+					}
+					// Re-initialize YARA scanner after install
+					yaraScanner = malware.NewYaraScanner()
+					_ = apiClient.ReportEvents([]api.EventRequest{{
+						Type:       "yara_installed",
+						Severity:   "info",
+						Details:    map[string]string{"status": "ok"},
+						OccurredAt: time.Now().UTC().Format(time.RFC3339),
+					}})
+				}()
+			},
 		},
 	)
 	go wsClient.Run()
@@ -683,6 +705,7 @@ func runAgent() {
 				BanCapacity:       fwStatus.Capacity,
 				ActiveBans:        fwStatus.ActiveBans,
 				KubernetesInfo:    collectK8sInfo(k8sClient),
+				YaraInstalled:    yaraScanner != nil && yaraScanner.IsAvailable(),
 				RequestsAnalyzed: reqAnalyzed,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,

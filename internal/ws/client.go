@@ -87,6 +87,11 @@ type MalwareScanRequestedPayload struct {
 	Intensity string `json:"intensity"` // "low", "medium", "high"
 }
 
+// YaraInstallRequestedPayload matches the broadcastWith() from YaraInstallRequested event.
+type YaraInstallRequestedPayload struct {
+	AgentID int64 `json:"agent_id"`
+}
+
 // Handlers called when events are received from the server.
 type Handlers struct {
 	OnBanCreated              func(BanCreatedPayload)
@@ -99,6 +104,7 @@ type Handlers struct {
 	OnSyncRequested           func(SyncRequestedPayload)
 	OnUpdateRequested         func(UpdateRequestedPayload)
 	OnMalwareScanRequested    func(MalwareScanRequestedPayload)
+	OnYaraInstallRequested    func(YaraInstallRequestedPayload)
 }
 
 // Client manages the WebSocket connection to Reverb.
@@ -390,6 +396,14 @@ func (c *Client) dispatch(event string, rawData json.RawMessage) {
 			var p MalwareScanRequestedPayload
 			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
 				c.handlers.OnMalwareScanRequested(p)
+			}
+		}
+
+	case "yara_install.requested":
+		if c.handlers.OnYaraInstallRequested != nil {
+			var p YaraInstallRequestedPayload
+			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
+				c.handlers.OnYaraInstallRequested(p)
 			}
 		}
 	}
