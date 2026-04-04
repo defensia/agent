@@ -36,6 +36,7 @@ var malwareScheduler  *malware.Scheduler
 var malwareAllowList  *malware.AllowList
 var malwareScanner    *malware.Scanner
 var malwareRTWatcher  *malware.RealtimeWatcher
+var yaraScanner       *malware.YaraScanner
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -485,6 +486,13 @@ func runAgent() {
 
 	// Initialize malware scanner globals
 	malwareScanner = malware.New()
+	yaraScanner = malware.NewYaraScanner()
+	if yaraScanner.IsAvailable() {
+		// Load cached YARA rules if available
+		if cached := yaraScanner.LoadRulesCache(); cached != nil {
+			yaraScanner.UpdateRules(cached.Rules)
+		}
+	}
 
 	// Realtime watcher: polls upload directories for new PHP files
 	malwareRTWatcher = malware.NewRealtimeWatcher(func(path, domain string) {
@@ -942,6 +950,18 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		malwareScanner.LoadDynamicSignatures(dynSigs)
 	}
 
+	// Apply YARA rules from backend
+	if sync.YaraRules != nil && yaraScanner != nil && yaraScanner.IsAvailable() {
+		if err := yaraScanner.UpdateRules(sync.YaraRules.Rules); err != nil {
+			log.Printf("[yara] failed to update rules: %v", err)
+		} else {
+			yaraScanner.SaveRulesCache(malware.YaraRulesSync{
+				Rules:   sync.YaraRules.Rules,
+				Version: sync.YaraRules.Version,
+			})
+		}
+	}
+
 	// Apply malware scan schedule config + realtime watcher
 	if sync.Config.MalwareScanConfig != nil {
 		cfg := sync.Config.MalwareScanConfig
@@ -1393,6 +1413,16 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	if err != nil {
 		log.Printf("[malware] scan error: %v", err)
 		return
+	}
+
+	// YARA scan (if yara CLI available on the server)
+	if yaraScanner != nil && yaraScanner.IsAvailable() {
+		for _, root := range webRoots {
+			yaraFindings := yaraScanner.ScanDirectory(root.Path, root.Domain)
+			for _, f := range yaraFindings {
+				result.Findings = append(result.Findings, f)
+			}
+		}
 	}
 
 	// Credential scan

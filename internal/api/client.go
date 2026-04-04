@@ -164,6 +164,13 @@ type SyncResponse struct {
 	ThreatFeed        []ThreatEntry       `json:"threat_feed"`
 	MalwareAllowlist   []MalwareIgnoreEntry  `json:"malware_allowlist"`
 	MalwareSignatures  []MalwareSyncSignature `json:"malware_signatures"`
+	YaraRules          *YaraRulesSync         `json:"yara_rules,omitempty"`
+}
+
+// YaraRulesSync is the YARA rules content synced from the backend.
+type YaraRulesSync struct {
+	Rules   string `json:"rules"`
+	Version string `json:"version"`
 }
 
 // MalwareSyncSignature is a dynamic malware signature synced from the backend.
