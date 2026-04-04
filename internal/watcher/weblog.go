@@ -1749,9 +1749,9 @@ func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[s
 	action := ActionForScore(score)
 	severity := SeverityForAction(action)
 
-	details["waf_score"] = strconv.Itoa(score)
-	details["waf_action"] = action
-	details["waf_category"] = category
+	details["bot_score"] = strconv.Itoa(score)
+	details["bot_action"] = action
+	details["bot_category"] = category
 	details = w.enrichDetails(logPath, line, details)
 
 	// Always report the event when score reaches observe level (30+)
