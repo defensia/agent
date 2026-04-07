@@ -89,6 +89,7 @@ type HeartbeatRequest struct {
 	ActiveBans         int            `json:"active_bans,omitempty"`
 	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`
 	YaraInstalled      bool           `json:"yara_installed,omitempty"`
+	ModsecActive       bool           `json:"modsec_active,omitempty"`
 	RequestsAnalyzed   uint64         `json:"requests_analyzed,omitempty"`
 }
 

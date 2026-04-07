@@ -21,6 +21,7 @@ import (
 	"github.com/defensia/agent/internal/geoip"
 	"github.com/defensia/agent/internal/kubernetes"
 	"github.com/defensia/agent/internal/malware"
+	"github.com/defensia/agent/internal/modsecurity"
 	"github.com/defensia/agent/internal/monitor"
 	"github.com/defensia/agent/internal/scanner"
 	"github.com/defensia/agent/internal/updater"
@@ -37,6 +38,7 @@ var malwareAllowList  *malware.AllowList
 var malwareScanner    *malware.Scanner
 var malwareRTWatcher  *malware.RealtimeWatcher
 var yaraScanner       *malware.YaraScanner
+var modsecEngine      *modsecurity.Engine
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -159,6 +161,21 @@ func runAgent() {
 
 	// Initialize firewall backend (detects ipset, falls back to iptables)
 	firewall.Init()
+
+	// Initialize ModSecurity engine (auto-detects if Apache + mod_security installed)
+	modsecEngine = modsecurity.New()
+	if modsecEngine.IsAvailable() {
+		if err := modsecEngine.Setup(); err != nil {
+			log.Printf("[modsec] setup failed: %v", err)
+		} else {
+			_ = apiClient.ReportEvents([]api.EventRequest{{
+				Type:       "modsecurity_enabled",
+				Severity:   "info",
+				Details:    map[string]string{"status": "active"},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}
+	}
 
 	// Initialize GeoIP lookup
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
@@ -706,6 +723,7 @@ func runAgent() {
 				ActiveBans:        fwStatus.ActiveBans,
 				KubernetesInfo:    collectK8sInfo(k8sClient),
 				YaraInstalled:    yaraScanner != nil && yaraScanner.IsAvailable(),
+				ModsecActive:     modsecEngine != nil && modsecEngine.IsAvailable(),
 				RequestsAnalyzed: reqAnalyzed,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
