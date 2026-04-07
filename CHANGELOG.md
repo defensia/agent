@@ -2,6 +2,87 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.2.0
+- **ModSecurity inline WAF** — auto-detects Apache + mod_security2, writes 14 static rules (SQLi, XSS, RCE, SSRF, Shellshock, Log4Shell, Spring4Shell), configures Include + graceful reload. Blocks on first request. Zero impact without ModSecurity.
+- Reports `modsec_active` in heartbeat
+
+## v1.1.5
+- **YARA install from dashboard** — "Install YARA" button auto-detects apt/dnf/yum/apk
+- Reports `yara_installed` in heartbeat
+
+## v1.1.4
+- **YARA engine** — uses yara CLI if installed, 229 web rules from LMD synced from backend, cached locally
+
+## v1.1.3
+- Cap dynamic signatures at 200 to prevent scan stall on large servers
+- Disabled LMD HEX regex patterns (need native YARA for performance)
+
+## v1.1.2
+- Removed UPLOAD_SHELL_PNG (too many FPs), skip WP <5.0 checksums, core file cap at 10
+
+## v1.1.1
+- Cap CORE_FILE_MODIFIED at 10 in scanner walk
+
+## v1.1.0
+- **Phase 3 complete** — WP database scanning, malicious process detection, quarantine, security posture score (0-100, A-F grade)
+
+## v1.0.8
+- Disabled exe/cmdline mismatch rootkit check (too many FPs on production servers)
+
+## v1.0.7
+- Fix rootkit exe/cmdline FPs (cron, php-fpm, redis, postgres, case-insensitive)
+- Fix hash lookup empty JSON response
+
+## v1.0.6
+- Fix rootkit exe/cmdline FPs (python, busybox, interpreters)
+
+## v1.0.5
+- **Credential scan** — .env exposure, SSH key permissions, .git in web root, cloud credentials
+
+## v1.0.4
+- Malware scanner fully opt-in — nothing runs until user enables from dashboard
+
+## v1.0.3
+- **Phase 2 complete** — entropy analysis, timestamp anomalies, realtime watcher, system integrity (dpkg -V/rpm -Va), rootkit checks
+
+## v1.0.2
+- **Hash matching** — 64K+ hashes from MalwareBazaar + LMD, lookup via backend API
+
+## v1.0.1
+- **Dynamic signatures** — admin panel management, synced to agents via /sync
+
+## v1.0.0
+- **Scheduled malware scans** — configurable frequency/time/intensity from dashboard
+- Allowlist sync from backend for user-ignored findings
+
+## v0.9.99
+- **Symfony, CakePHP, CodeIgniter** detection and security checks
+
+## v0.9.98
+- Framework checks FP prevention — production-only debug checks, line-level parsing
+
+## v0.9.97
+- Signature test suite — FP and detection tests for all signatures
+- Fixed patterns with | (OR) using IsRegex
+- Reduced FPs: MINER_GENERIC PHPOnly, narrowed PHISH_PAYPAL, FilesMan context
+
+## v0.9.96
+- Removed OBFUSC_HEX_DECODE and OBFUSC_LONG_BASE64 (getID3, theme configs FPs)
+- Cap modified core files at 20
+
+## v0.9.95
+- **3-layer FP prevention** — WP core checksums, context-based severity, user allowlist with herd immunity
+
+## v0.9.94
+- Reduced malware signatures from 40 to 26 (removed TimThumb, preg_replace, iframe, PHPMailer FPs)
+- PHPOnly flag, minified file skip, expanded exclusion dirs
+
+## v0.9.93
+- **Malware scanner Phase 1** — 40 signatures, framework detection (10 frameworks), framework security checks, dashboard tab with scan history
+
+## v0.9.92
+- **Malware scanner foundation** — scan engine, web root detection, signature matching
+
 ## v0.9.90
 - Fix: auto-discover ingress logs from `/var/log/pods/` using pod UID
 

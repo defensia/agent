@@ -105,7 +105,33 @@ Each detection adds points to a per-IP score. Scores decay at -5 pts/min. Action
 ### Bot management
 70+ bot fingerprints (search engines, AI crawlers, SEO tools, scanners). Per-org policies: **allow** / **log** / **block**. Blocked bots are rejected at nginx/Apache level — connection closed before your app is reached.
 
+### Malware scanner
+- **Signature scanning** — 24 built-in patterns for webshells, backdoors, crypto miners, phishing kits
+- **Hash matching** — 64,000+ known malware hashes from MalwareBazaar and Linux Malware Detect
+- **YARA engine** — 229 web-relevant rules (uses yara CLI if installed, optional)
+- **Framework detection** — auto-detects Laravel, WordPress, Django, Symfony, CakePHP, CodeIgniter, Node/Express, Rails, Joomla, Drupal
+- **Framework security checks** — .env exposure, DEBUG mode, APP_KEY, loose permissions, Telescope, wp-config
+- **Heuristic analysis** — Shannon entropy detection, timestamp anomalies in upload directories
+- **System integrity** — `dpkg -V` / `rpm -Va` for modified binaries, rootkit indicators (ld.so.preload, hidden processes, /tmp executables)
+- **Credential scan** — exposed .env files, SSH key permissions, .git in web root, cloud provider credentials
+- **WP database scan** — injected scripts in posts/options, rogue admin users
+- **Process detection** — running crypto miners, reverse shells, suspicious scripts from /tmp
+- **Security posture score** — 0-100 (A-F grade) with breakdown by category
+- **Quarantine** — move malicious files to `/var/lib/defensia/quarantine/` with restore capability
+- **Scheduled scans** — configurable frequency, time, and intensity from the dashboard
+- **Realtime watcher** — polls upload directories every 30s for new PHP files
+- **False positive prevention** — WP core checksums, context-based severity, user allowlist with cross-network herd immunity
+
+### ModSecurity inline WAF
+- **Auto-detects** Apache + mod_security2 at startup (standard on cPanel/WHM)
+- **14 static rules** — SQL injection, XSS, RCE, SSRF, path traversal, Shellshock, Log4Shell, Spring4Shell, scanner blocking
+- **Blocks on first request** — ModSecurity intercepts before traffic reaches your application
+- **IP ban rules** — banned IPs synced from dashboard to ModSecurity for HTTP-level blocking
+- **Zero config** — automatically writes rules, configures Include, graceful reload (no downtime)
+- **No impact** on servers without ModSecurity — falls back to iptables-only blocking
+
 ### And more
+- **Mail & FTP protection** — Postfix, Dovecot, Pure-FTPD, MySQL brute force detection
 - **Docker-aware** — auto-detects web containers, reads logs via bind mounts and volumes
 - **GeoIP blocking** — block entire countries from the dashboard
 - **Network ban propagation** — ban on one server applies to all your servers
@@ -113,6 +139,7 @@ Each detection adds points to a per-IP score. Scores decay at -5 pts/min. Action
 - **Vulnerability scanning** — CVE matching via NVD + Exploit-DB, EPSS scoring
 - **Monitor mode** — detect threats without blocking (new servers default to this)
 - **System metrics** — CPU, memory, disk reported to dashboard
+- **cPanel/WHM addon** — native sidebar integration with cPHulk and domlog auto-detection
 
 ---
 
