@@ -1510,9 +1510,17 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}
 	}
 
-	apiFindings := make([]api.MalwareScanFinding, len(result.Findings))
-	for i, f := range result.Findings {
-		apiFindings[i] = api.MalwareScanFinding{
+	// Filter: only report actual malware findings to the malware endpoint.
+	// Credential exposure and ROOTKIT_EXEC_IN_TMP belong in the hardening tab.
+	var apiFindings []api.MalwareScanFinding
+	for _, f := range result.Findings {
+		if f.Type == "credential_exposure" {
+			continue
+		}
+		if f.SignatureID == "ROOTKIT_EXEC_IN_TMP" {
+			continue
+		}
+		apiFindings = append(apiFindings, api.MalwareScanFinding{
 			FilePath:    f.FilePath,
 			SignatureID: f.SignatureID,
 			Name:        f.Name,
@@ -1522,7 +1530,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 			MatchText:   f.MatchText,
 			Domain:      f.Domain,
 			Framework:   f.Framework,
-		}
+		})
 	}
 
 	// Calculate security posture score
@@ -1553,15 +1561,15 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		return
 	}
 
-	log.Printf("[malware] scan complete — %d files scanned, %d malware findings, %d framework issues in %s",
-		result.FilesScanned, len(result.Findings), len(frameworkFindings), result.Duration.Round(time.Second))
+	log.Printf("[malware] scan complete — %d files scanned, %d malware findings, %d credential/hardening, %d framework issues in %s",
+		result.FilesScanned, len(apiFindings), len(result.Findings)-len(apiFindings), len(frameworkFindings), result.Duration.Round(time.Second))
 
 	_ = client.ReportEvents([]api.EventRequest{{
 		Type:     "malware_scan_completed",
 		Severity: "info",
 		Details: map[string]string{
 			"files_scanned":      fmt.Sprintf("%d", result.FilesScanned),
-			"malware_findings":   fmt.Sprintf("%d", len(result.Findings)),
+			"malware_findings":   fmt.Sprintf("%d", len(apiFindings)),
 			"framework_findings": fmt.Sprintf("%d", len(frameworkFindings)),
 			"web_roots":          fmt.Sprintf("%d", len(webRoots)),
 			"duration_seconds":   fmt.Sprintf("%.1f", result.Duration.Seconds()),
