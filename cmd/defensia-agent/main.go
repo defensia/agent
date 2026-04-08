@@ -991,6 +991,31 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		malwareScanner.LoadDynamicSignatures(dynSigs)
 	}
 
+	// Install YARA if requested via dashboard (sync-based, no WebSocket needed)
+	if sync.YaraInstallRequested && (yaraScanner == nil || !yaraScanner.IsAvailable()) {
+		log.Printf("[yara] install requested via sync — installing...")
+		go func() {
+			if err := malware.InstallYara(); err != nil {
+				log.Printf("[yara] install failed: %v", err)
+				_ = client.ReportEvents([]api.EventRequest{{
+					Type:       "yara_install_failed",
+					Severity:   "warning",
+					Details:    map[string]string{"error": err.Error()},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+				return
+			}
+			yaraScanner = malware.NewYaraScanner()
+			log.Printf("[yara] installed successfully")
+			_ = client.ReportEvents([]api.EventRequest{{
+				Type:       "yara_installed",
+				Severity:   "info",
+				Details:    map[string]string{"status": "ok"},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}()
+	}
+
 	// Apply YARA rules from backend
 	if sync.YaraRules != nil && yaraScanner != nil && yaraScanner.IsAvailable() {
 		if err := yaraScanner.UpdateRules(sync.YaraRules.Rules); err != nil {
