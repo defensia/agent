@@ -1491,11 +1491,8 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}
 	}
 
-	// Credential scan
-	credFindings := malware.CheckCredentials(webRoots)
-	for _, f := range credFindings {
-		result.Findings = append(result.Findings, f)
-	}
+	// NOTE: Credential checks (CRED_*) moved to hardening scanner (scanner.Run()).
+	// They no longer appear in the malware tab.
 
 	// WordPress database scanning
 	for _, root := range webRoots {
@@ -1535,13 +1532,9 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}
 	}
 
-	// Filter: only report actual malware findings to the malware endpoint.
-	// Credential exposure and ROOTKIT_EXEC_IN_TMP belong in the hardening tab.
+	// Filter out ROOTKIT_EXEC_IN_TMP (not real malware, handled by hardening).
 	var apiFindings []api.MalwareScanFinding
 	for _, f := range result.Findings {
-		if f.Type == "credential_exposure" {
-			continue
-		}
 		if f.SignatureID == "ROOTKIT_EXEC_IN_TMP" {
 			continue
 		}

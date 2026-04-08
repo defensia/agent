@@ -31,6 +31,7 @@ func Run() []Finding {
 	findings = append(findings, checkFirewall()...)
 	findings = append(findings, checkProcesses()...)
 	findings = append(findings, checkWebServer()...)
+	findings = append(findings, checkCredentialExposure()...)
 
 	// Software version checks
 	findings = append(findings, checkOSVersion()...)
