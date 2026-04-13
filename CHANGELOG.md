@@ -2,6 +2,16 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.2.8
+- **monitor action** — new bot fingerprint action that passes silently with no event emitted; use for health checkers (UptimeRobot, etc.) to avoid polluting security stats
+
+## v1.2.7
+- Fix: expanded Apache vhost discovery to include `/etc/httpd/sites-available` and `sites-enabled` directories
+
+## v1.2.6
+- Fix: recursive Apache `Include` directive parsing for vhost detection on cPanel servers
+- Fix: increased heartbeat rate limit from 3 to 6 per minute
+
 ## v1.2.0
 - **ModSecurity inline WAF** — auto-detects Apache + mod_security2, writes 14 static rules (SQLi, XSS, RCE, SSRF, Shellshock, Log4Shell, Spring4Shell), configures Include + graceful reload. Blocks on first request. Zero impact without ModSecurity.
 - Reports `modsec_active` in heartbeat
