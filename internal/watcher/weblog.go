@@ -546,8 +546,11 @@ func detectApacheLogInfo() []LogPathInfo {
 	}
 	for _, pattern := range []string{
 		"/etc/apache2/sites-enabled/*.conf",
-		"/etc/httpd/conf.d/*.conf",
+		"/etc/apache2/sites-available/*.conf",
 		"/etc/apache2/conf-enabled/*.conf",
+		"/etc/httpd/conf.d/*.conf",
+		"/etc/httpd/sites-enabled/*.conf",
+		"/etc/httpd/sites-available/*.conf",
 	} {
 		matches, _ := filepath.Glob(pattern)
 		roots = append(roots, matches...)
