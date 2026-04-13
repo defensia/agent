@@ -30,7 +30,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.2.8"
+var version = "1.2.9"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScheduler  *malware.Scheduler
