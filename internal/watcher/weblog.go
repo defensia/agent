@@ -450,7 +450,83 @@ func resolveApacheEnvVars(path string) string {
 	return path
 }
 
+// collectApacheConfigFiles starts from root config files and follows Include /
+// IncludeOptional directives recursively, returning a deduplicated flat list of
+// all reachable config files. Relative paths are resolved relative to the
+// directory of the including file (works for all major distro layouts).
+// A depth limit of 10 prevents infinite loops from misconfigured servers.
+func collectApacheConfigFiles(roots []string) []string {
+	visited := make(map[string]bool)
+	var result []string
+
+	var walk func(files []string, depth int)
+	walk = func(files []string, depth int) {
+		if depth > 10 {
+			return
+		}
+		for _, f := range files {
+			if visited[f] {
+				continue
+			}
+			visited[f] = true
+
+			fi, err := os.Stat(f)
+			if err != nil || fi.IsDir() {
+				continue
+			}
+			result = append(result, f)
+
+			data, err := os.ReadFile(f)
+			if err != nil {
+				continue
+			}
+
+			dir := filepath.Dir(f)
+			var children []string
+			for _, line := range strings.Split(string(data), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				lower := strings.ToLower(trimmed)
+				var rest string
+				switch {
+				case strings.HasPrefix(lower, "includeoptional "):
+					rest = strings.TrimSpace(trimmed[len("includeoptional "):])
+				case strings.HasPrefix(lower, "include "):
+					rest = strings.TrimSpace(trimmed[len("include "):])
+				default:
+					continue
+				}
+				rest = strings.Trim(rest, "\"'")
+				if rest == "" {
+					continue
+				}
+				if !filepath.IsAbs(rest) {
+					rest = filepath.Join(dir, rest)
+				}
+				matches, globErr := filepath.Glob(rest)
+				if globErr != nil || len(matches) == 0 {
+					// bare directory: include all *.conf inside
+					if fi2, statErr := os.Stat(rest); statErr == nil && fi2.IsDir() {
+						dirMatches, _ := filepath.Glob(filepath.Join(rest, "*.conf"))
+						children = append(children, dirMatches...)
+					}
+					continue
+				}
+				children = append(children, matches...)
+			}
+			walk(children, depth+1)
+		}
+	}
+
+	walk(roots, 0)
+	return result
+}
+
 // detectApacheLogInfo parses apache config to find ALL CustomLog paths with their ServerNames.
+// It follows Include/IncludeOptional directives recursively so non-standard vhost
+// layouts (e.g. servers with 1000+ domains in separate include files) are fully discovered.
 func detectApacheLogInfo() []LogPathInfo {
 	apacheInstalled := false
 	for _, cmd := range []string{"apache2ctl", "apachectl", "httpd"} {
@@ -463,17 +539,21 @@ func detectApacheLogInfo() []LogPathInfo {
 		return nil
 	}
 
-	configFiles := []string{
+	roots := []string{
 		"/etc/apache2/apache2.conf",
 		"/etc/httpd/conf/httpd.conf",
 		"/usr/local/apache/conf/httpd.conf",
 	}
-	vhostFiles, _ := filepath.Glob("/etc/apache2/sites-enabled/*.conf")
-	configFiles = append(configFiles, vhostFiles...)
-	vhostFiles2, _ := filepath.Glob("/etc/httpd/conf.d/*.conf")
-	configFiles = append(configFiles, vhostFiles2...)
-	confFiles, _ := filepath.Glob("/etc/apache2/conf-enabled/*.conf")
-	configFiles = append(configFiles, confFiles...)
+	for _, pattern := range []string{
+		"/etc/apache2/sites-enabled/*.conf",
+		"/etc/httpd/conf.d/*.conf",
+		"/etc/apache2/conf-enabled/*.conf",
+	} {
+		matches, _ := filepath.Glob(pattern)
+		roots = append(roots, matches...)
+	}
+
+	configFiles := collectApacheConfigFiles(roots)
 
 	pathDomains := make(map[string]map[string]bool)
 
