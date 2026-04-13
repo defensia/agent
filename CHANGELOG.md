@@ -80,6 +80,9 @@ All notable changes to the Defensia Agent.
 ## v0.9.93
 - **Malware scanner Phase 1** — 40 signatures, framework detection (10 frameworks), framework security checks, dashboard tab with scan history
 
+## v0.9.100
+- **Monitor action silent passthrough** — bot fingerprints with action=monitor produce zero events; health checkers (UptimeRobot etc.) no longer appear in crawl stats
+
 ## v0.9.92
 - **Malware scanner foundation** — scan engine, web root detection, signature matching
 

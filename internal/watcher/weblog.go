@@ -1542,10 +1542,11 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				go w.onEvent(ip, "bot_detected", "warning", details)
 			} else if bot.Action == "log" || (bot.Action == "block" && w.monitorMode) {
 				go w.onEvent(ip, "bot_detected", "info", details)
-			} else {
-				// allow — log as crawl (lower noise)
+			} else if bot.Action == "allow" {
+				// allow — log as crawl (lower noise, traffic stats)
 				go w.onEvent(ip, "bot_crawl", "info", details)
 			}
+			// monitor (or unknown) — silent passthrough, no event
 			return
 		}
 	}
