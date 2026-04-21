@@ -30,7 +30,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.2.9"
+var version = "0.9.92"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScheduler  *malware.Scheduler
@@ -1319,6 +1319,48 @@ func detectWebServerInfo() (name, version string) {
 		out, err := exec.Command("httpd", "-v").CombinedOutput()
 		if err == nil {
 			return "apache", parseApacheVersion(string(out))
+		}
+	}
+
+	// Try Caddy
+	if path, err := exec.LookPath("caddy"); err == nil && path != "" {
+		out, err := exec.Command("caddy", "version").CombinedOutput()
+		if err == nil {
+			fields := strings.Fields(strings.TrimSpace(string(out)))
+			if len(fields) > 0 {
+				version = strings.TrimPrefix(fields[0], "v")
+			}
+			return "caddy", version
+		}
+	}
+
+	// Try LiteSpeed / OpenLiteSpeed
+	if _, err := os.Stat("/usr/local/lsws/bin/lshttpd"); err == nil {
+		out, err := exec.Command("/usr/local/lsws/bin/lshttpd", "-v").CombinedOutput()
+		if err == nil {
+			s := strings.TrimSpace(string(out))
+			if idx := strings.Index(s, "LiteSpeed/"); idx >= 0 {
+				fields := strings.Fields(s[idx+10:])
+				if len(fields) > 0 {
+					version = fields[0]
+				}
+			}
+			return "litespeed", version
+		}
+	}
+
+	// Try Traefik
+	if path, err := exec.LookPath("traefik"); err == nil && path != "" {
+		out, err := exec.Command("traefik", "version").CombinedOutput()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "Version:") {
+					version = strings.TrimSpace(strings.TrimPrefix(line, "Version:"))
+					break
+				}
+			}
+			return "traefik", version
 		}
 	}
 

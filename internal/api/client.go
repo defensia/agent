@@ -90,7 +90,7 @@ type HeartbeatRequest struct {
 	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`
 	YaraInstalled      bool           `json:"yara_installed,omitempty"`
 	ModsecActive       bool           `json:"modsec_active,omitempty"`
-	RequestsAnalyzed   uint64         `json:"requests_analyzed"`
+	RequestsAnalyzed   uint64         `json:"requests_analyzed,omitempty"`
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.

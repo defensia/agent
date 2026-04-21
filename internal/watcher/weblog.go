@@ -172,13 +172,28 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 4. Docker containers running web servers (always checked — a host may run
+	// 4. Parse Caddy config for log output paths
+	for _, info := range detectCaddyLogInfo() {
+		add(info)
+	}
+
+	// 5. Parse LiteSpeed config for accesslog paths
+	for _, info := range detectLiteSpeedLogInfo() {
+		add(info)
+	}
+
+	// 6. Parse Traefik config for accessLog.filePath
+	for _, info := range detectTraefikLogInfo() {
+		add(info)
+	}
+
+	// 7. Docker containers running web servers (always checked — a host may run
 	//    both a native web server and additional services inside Docker).
 	for _, info := range detectDockerLogInfo() {
 		add(info)
 	}
 
-	// 5. Well-known static paths (always checked — add() deduplicates)
+	// 8. Well-known static paths (always checked — add() deduplicates)
 	knownPaths := []string{
 		"/var/log/nginx/access.log",
 		"/var/log/apache2/access.log",
@@ -190,10 +205,25 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		"/var/log/caddy/access.log",
 		"/var/log/nginx-access.log",
 		"/var/log/access.log",
+		"/var/log/lighttpd/access.log",
+		"/var/log/traefik/access.log",
+		"/var/log/gunicorn/access.log",
 	}
 	for _, p := range knownPaths {
 		if _, err := os.Stat(p); err == nil {
 			add(LogPathInfo{Path: p})
+		}
+	}
+
+	// 9. Tomcat access logs (glob — date-rotated filenames)
+	for _, pattern := range []string{
+		"/var/log/tomcat*/localhost_access_log.*.txt",
+		"/opt/tomcat/logs/localhost_access_log.*.txt",
+	} {
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			add(LogPathInfo{Path: matches[len(matches)-1]})
 		}
 	}
 
@@ -659,6 +689,299 @@ func parseApacheVhosts(content string) []apacheVhost {
 		}
 	}
 	return results
+}
+
+// ── Caddy log detection ─────────────────────────────────────────────
+
+// detectCaddyLogInfo parses Caddyfile to find log output paths with their site addresses.
+func detectCaddyLogInfo() []LogPathInfo {
+	if _, err := exec.LookPath("caddy"); err != nil {
+		return nil
+	}
+
+	configPaths := []string{
+		"/etc/caddy/Caddyfile",
+		"/etc/caddy/caddyfile",
+		"/opt/caddy/Caddyfile",
+	}
+
+	pathDomains := make(map[string]map[string]bool)
+
+	for _, cf := range configPaths {
+		data, err := os.ReadFile(cf)
+		if err != nil {
+			continue
+		}
+		for _, entry := range parseCaddyfile(string(data)) {
+			for _, lp := range entry.logPaths {
+				if _, err := os.Stat(lp); err != nil {
+					continue
+				}
+				if pathDomains[lp] == nil {
+					pathDomains[lp] = make(map[string]bool)
+				}
+				for _, d := range entry.domains {
+					pathDomains[lp][d] = true
+				}
+			}
+		}
+	}
+
+	var result []LogPathInfo
+	for path, domainSet := range pathDomains {
+		var domains []string
+		for d := range domainSet {
+			domains = append(domains, d)
+		}
+		sort.Strings(domains)
+		result = append(result, LogPathInfo{Path: path, Domains: domains})
+	}
+	return result
+}
+
+type caddySiteBlock struct {
+	domains  []string
+	logPaths []string
+}
+
+// parseCaddyfile extracts site addresses and log output file paths from a Caddyfile.
+// Format:
+//
+//	example.com {
+//	    log {
+//	        output file /var/log/caddy/example.access.log
+//	    }
+//	}
+func parseCaddyfile(content string) []caddySiteBlock {
+	var results []caddySiteBlock
+	var current *caddySiteBlock
+	depth := 0
+	inLogBlock := false
+	logDepth := 0
+
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		opens := strings.Count(trimmed, "{")
+		closes := strings.Count(trimmed, "}")
+
+		// Site block start: "example.com {" or "example.com, www.example.com {"
+		if depth == 0 && opens > 0 && current == nil {
+			addr := strings.TrimRight(trimmed, " {")
+			var domains []string
+			for _, part := range strings.Split(addr, ",") {
+				part = strings.TrimSpace(part)
+				part = strings.TrimPrefix(part, "https://")
+				part = strings.TrimPrefix(part, "http://")
+				if idx := strings.Index(part, ":"); idx > 0 {
+					part = part[:idx]
+				}
+				if part != "" && part != "*" && !strings.HasPrefix(part, ":") {
+					domains = append(domains, part)
+				}
+			}
+			current = &caddySiteBlock{domains: domains}
+		}
+
+		// "log {" block inside a site block
+		if current != nil && depth >= 1 && strings.HasPrefix(trimmed, "log") && opens > 0 {
+			inLogBlock = true
+			logDepth = depth + opens
+		}
+
+		// "output file /path" inside log block
+		if inLogBlock && strings.Contains(trimmed, "output") && strings.Contains(trimmed, "file") {
+			fields := strings.Fields(trimmed)
+			for i, f := range fields {
+				if f == "file" && i+1 < len(fields) {
+					path := strings.Trim(fields[i+1], "\"'")
+					if path != "" {
+						current.logPaths = append(current.logPaths, path)
+					}
+					break
+				}
+			}
+		}
+
+		depth += opens - closes
+
+		if inLogBlock && depth < logDepth {
+			inLogBlock = false
+		}
+
+		if depth == 0 && current != nil {
+			if len(current.logPaths) > 0 {
+				results = append(results, *current)
+			}
+			current = nil
+		}
+	}
+	return results
+}
+
+// ── LiteSpeed log detection ─────────────────────────────────────────
+
+// detectLiteSpeedLogInfo parses LiteSpeed/OpenLiteSpeed configs for access log paths.
+func detectLiteSpeedLogInfo() []LogPathInfo {
+	if _, err := os.Stat("/usr/local/lsws/bin/lshttpd"); err != nil {
+		return nil
+	}
+
+	configFiles := []string{"/usr/local/lsws/conf/httpd_config.conf"}
+	vhostFiles, _ := filepath.Glob("/usr/local/lsws/conf/vhosts/*/vhconf.conf")
+	configFiles = append(configFiles, vhostFiles...)
+
+	pathDomains := make(map[string]map[string]bool)
+
+	for _, cf := range configFiles {
+		data, err := os.ReadFile(cf)
+		if err != nil {
+			continue
+		}
+		for _, vhost := range parseLiteSpeedConfig(string(data)) {
+			for _, lp := range vhost.logPaths {
+				lp = strings.ReplaceAll(lp, "$SERVER_ROOT", "/usr/local/lsws")
+				lp = strings.ReplaceAll(lp, "$VH_ROOT", filepath.Dir(filepath.Dir(cf)))
+				if _, err := os.Stat(lp); err != nil {
+					continue
+				}
+				if pathDomains[lp] == nil {
+					pathDomains[lp] = make(map[string]bool)
+				}
+				for _, d := range vhost.domains {
+					pathDomains[lp][d] = true
+				}
+			}
+		}
+	}
+
+	var result []LogPathInfo
+	for path, domainSet := range pathDomains {
+		var domains []string
+		for d := range domainSet {
+			domains = append(domains, d)
+		}
+		sort.Strings(domains)
+		result = append(result, LogPathInfo{Path: path, Domains: domains})
+	}
+	return result
+}
+
+type lsVhost struct {
+	domains  []string
+	logPaths []string
+}
+
+// parseLiteSpeedConfig extracts accesslog paths and vhDomain from LiteSpeed config.
+func parseLiteSpeedConfig(content string) []lsVhost {
+	var result []lsVhost
+	entry := lsVhost{}
+
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "accesslog ") {
+			fields := strings.Fields(trimmed)
+			if len(fields) >= 2 {
+				path := strings.Trim(fields[1], "\"'")
+				if path != "" && path != "{" {
+					entry.logPaths = append(entry.logPaths, path)
+				}
+			}
+		}
+
+		if strings.HasPrefix(lower, "vhdomain ") {
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				for _, d := range strings.Split(parts[1], ",") {
+					d = strings.TrimSpace(d)
+					if d != "" {
+						entry.domains = append(entry.domains, d)
+					}
+				}
+			}
+		}
+	}
+
+	if len(entry.logPaths) > 0 {
+		result = append(result, entry)
+	}
+	return result
+}
+
+// ── Traefik log detection ───────────────────────────────────────────
+
+// detectTraefikLogInfo finds Traefik's access log path from its config files.
+func detectTraefikLogInfo() []LogPathInfo {
+	if _, err := exec.LookPath("traefik"); err != nil {
+		return nil
+	}
+
+	configFiles := []string{
+		"/etc/traefik/traefik.yml",
+		"/etc/traefik/traefik.yaml",
+		"/etc/traefik/traefik.toml",
+	}
+
+	for _, cf := range configFiles {
+		data, err := os.ReadFile(cf)
+		if err != nil {
+			continue
+		}
+		isToml := strings.HasSuffix(cf, ".toml")
+		path := parseTraefikAccessLogPath(string(data), isToml)
+		if path != "" {
+			if _, err := os.Stat(path); err == nil {
+				return []LogPathInfo{{Path: path}}
+			}
+		}
+	}
+	return nil
+}
+
+// parseTraefikAccessLogPath extracts the access log file path from Traefik config.
+func parseTraefikAccessLogPath(content string, isToml bool) string {
+	inAccessLog := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		if isToml {
+			if trimmed == "[accessLog]" {
+				inAccessLog = true
+				continue
+			}
+			if strings.HasPrefix(trimmed, "[") && inAccessLog {
+				break
+			}
+			if inAccessLog && strings.HasPrefix(trimmed, "filePath") {
+				if idx := strings.Index(trimmed, "="); idx >= 0 {
+					path := strings.TrimSpace(trimmed[idx+1:])
+					return strings.Trim(path, "\"'")
+				}
+			}
+		} else {
+			// YAML
+			if strings.HasPrefix(trimmed, "accessLog:") {
+				inAccessLog = true
+				continue
+			}
+			if inAccessLog && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && trimmed != "" {
+				break
+			}
+			if inAccessLog && strings.HasPrefix(trimmed, "filePath:") {
+				path := strings.TrimSpace(strings.TrimPrefix(trimmed, "filePath:"))
+				return strings.Trim(path, "\"'")
+			}
+		}
+	}
+	return ""
 }
 
 // ── Docker container log detection ──────────────────────────────────
@@ -1542,11 +1865,10 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				go w.onEvent(ip, "bot_detected", "warning", details)
 			} else if bot.Action == "log" || (bot.Action == "block" && w.monitorMode) {
 				go w.onEvent(ip, "bot_detected", "info", details)
-			} else if bot.Action == "allow" {
-				// allow — log as crawl (lower noise, traffic stats)
+			} else {
+				// allow — log as crawl (lower noise)
 				go w.onEvent(ip, "bot_crawl", "info", details)
 			}
-			// monitor (or unknown) — silent passthrough, no event
 			return
 		}
 	}
