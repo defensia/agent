@@ -1006,11 +1006,131 @@ func parseTraefikAccessLogPath(content string, isToml bool) string {
 //	defensia.waf=true         — (informational) reported in heartbeat, WAF config comes from panel
 //	defensia.domain=example   — associate domain(s) with this container's logs, comma-separated
 func detectDockerLogInfo() []LogPathInfo {
+	// Try CLI first, then fall back to Docker socket API
 	dockerBin := monitor.FindDockerBinary()
-	if dockerBin == "" {
+	if dockerBin != "" {
+		return detectDockerLogInfoCLI(dockerBin)
+	}
+	// No CLI — try socket API directly
+	if monitor.HasDockerSocket() {
+		return detectDockerLogInfoAPI()
+	}
+	return nil
+}
+
+// detectDockerLogInfoAPI discovers web container logs via the Docker socket API.
+// Used when the docker CLI is not available (e.g. Snap installs, rootless Docker).
+func detectDockerLogInfoAPI() []LogPathInfo {
+	containers, err := monitor.ListDockerContainers()
+	if err != nil {
+		log.Printf("[webwatcher] docker API: %v", err)
 		return nil
 	}
 
+	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik", "litespeed"}
+	seen := make(map[string]bool)
+	var result []LogPathInfo
+
+	for _, c := range containers {
+		image := strings.ToLower(c.Image)
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		labels := c.Labels
+		if labels == nil {
+			labels = map[string]string{}
+		}
+
+		// Label-based override
+		if v, ok := labels["defensia.monitor"]; ok {
+			if v == "false" || v == "0" || v == "no" {
+				continue
+			}
+		}
+
+		// Determine if web container
+		isWeb := false
+		if v, ok := labels["defensia.monitor"]; ok && (v == "true" || v == "1" || v == "yes") {
+			isWeb = true
+			log.Printf("[webwatcher] docker-api: container %s selected via defensia.monitor label", name)
+		}
+		if !isWeb {
+			for _, kw := range webKeywords {
+				if strings.Contains(image, kw) {
+					isWeb = true
+					break
+				}
+			}
+		}
+		// Also check if container exposes web ports
+		if !isWeb {
+			for _, p := range c.Ports {
+				if p.PrivatePort == 80 || p.PrivatePort == 443 || p.PrivatePort == 8080 {
+					isWeb = true
+					break
+				}
+			}
+		}
+		if !isWeb {
+			continue
+		}
+
+		// Domain labels
+		var labelDomains []string
+		if d, ok := labels["defensia.domain"]; ok && d != "" {
+			for _, dom := range strings.Split(d, ",") {
+				dom = strings.TrimSpace(dom)
+				if dom != "" {
+					labelDomains = append(labelDomains, dom)
+				}
+			}
+		}
+
+		// Explicit log-path label
+		if lp, ok := labels["defensia.log-path"]; ok && lp != "" {
+			for _, p := range strings.Split(lp, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" && !seen[p] {
+					seen[p] = true
+					result = append(result, LogPathInfo{Path: p, Domains: labelDomains})
+					log.Printf("[webwatcher] docker-api: watching %s from container %s (label)", p, name)
+				}
+			}
+			continue
+		}
+
+		// Inspect bind mounts via API
+		mounts := monitor.InspectDockerMounts(c.ID)
+
+		// Scan host-side bind-mount directories for access logs
+		for _, hostDir := range mounts {
+			entries, err := os.ReadDir(hostDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				lower := strings.ToLower(e.Name())
+				if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
+					hostPath := filepath.Join(hostDir, e.Name())
+					if !seen[hostPath] {
+						seen[hostPath] = true
+						result = append(result, LogPathInfo{Path: hostPath, Domains: labelDomains})
+						log.Printf("[webwatcher] docker-api: watching %s (mount scan, container %s)", hostPath, name)
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// detectDockerLogInfoCLI discovers web container logs via the docker CLI.
+func detectDockerLogInfoCLI(dockerBin string) []LogPathInfo {
 	out, err := exec.Command(dockerBin, "ps",
 		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Labels}}",
 		"--filter", "status=running",
@@ -1019,7 +1139,7 @@ func detectDockerLogInfo() []LogPathInfo {
 		return nil
 	}
 
-	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik"}
+	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik", "litespeed"}
 	seen := make(map[string]bool)
 	var result []LogPathInfo
 

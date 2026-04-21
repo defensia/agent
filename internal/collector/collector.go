@@ -321,9 +321,14 @@ func detectPython() KeySoftware {
 func detectDocker() KeySoftware {
 	dockerBin := monitor.FindDockerBinary()
 	if dockerBin == "" {
-		// No CLI found — check if daemon socket exists (Docker running but CLI not in PATH)
-		if monitor.HasDockerSocket() {
-			return KeySoftware{Name: "Docker", Version: "unknown", Status: "up_to_date", Category: "container"}
+		// No CLI found — try Docker socket API for version
+		if v := monitor.DockerVersion(); v != "" {
+			major, _ := parseMajorMinor(v)
+			status := "up_to_date"
+			if major < 24 {
+				status = "outdated"
+			}
+			return KeySoftware{Name: "Docker", Version: v, Status: status, Category: "container"}
 		}
 		return KeySoftware{Name: "Docker", Version: "-", Status: "not_installed", Category: "container"}
 	}
