@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defensia/agent/internal/monitor"
 )
 
 // EventFunc is called when a suspicious event is detected (may or may not result in a ban).
@@ -1004,11 +1006,12 @@ func parseTraefikAccessLogPath(content string, isToml bool) string {
 //	defensia.waf=true         — (informational) reported in heartbeat, WAF config comes from panel
 //	defensia.domain=example   — associate domain(s) with this container's logs, comma-separated
 func detectDockerLogInfo() []LogPathInfo {
-	if _, err := exec.LookPath("docker"); err != nil {
+	dockerBin := monitor.FindDockerBinary()
+	if dockerBin == "" {
 		return nil
 	}
 
-	out, err := exec.Command("docker", "ps",
+	out, err := exec.Command(dockerBin, "ps",
 		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Labels}}",
 		"--filter", "status=running",
 	).Output()
@@ -1085,7 +1088,7 @@ func detectDockerLogInfo() []LogPathInfo {
 		mounts := dockerBindMounts(id)
 
 		// Primary: run nginx -T inside the container to get precise paths + domain names.
-		if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
+		if nginxOut, err := exec.Command(dockerBin, "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
 			for _, info := range nginxBlocksToLogPathInfos(parseNginxBlocks(string(nginxOut)), mounts) {
 				if !seen[info.Path] {
 					seen[info.Path] = true
@@ -1142,7 +1145,11 @@ func parseDockerLabels(raw string) map[string]string {
 
 // dockerBindMounts returns a containerPath→hostPath map for a container's bind mounts.
 func dockerBindMounts(containerID string) map[string]string {
-	out, err := exec.Command("docker", "inspect",
+	dockerBin := monitor.FindDockerBinary()
+	if dockerBin == "" {
+		return nil
+	}
+	out, err := exec.Command(dockerBin, "inspect",
 		"--format", "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Destination}}|{{.Source}}\n{{end}}{{end}}",
 		containerID,
 	).Output()

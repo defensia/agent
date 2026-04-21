@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defensia/agent/internal/monitor"
 )
 
 // AuditResult is the payload sent to the server.
@@ -317,10 +319,15 @@ func detectPython() KeySoftware {
 }
 
 func detectDocker() KeySoftware {
-	if _, err := exec.LookPath("docker"); err != nil {
+	dockerBin := monitor.FindDockerBinary()
+	if dockerBin == "" {
+		// No CLI found — check if daemon socket exists (Docker running but CLI not in PATH)
+		if monitor.HasDockerSocket() {
+			return KeySoftware{Name: "Docker", Version: "unknown", Status: "up_to_date", Category: "container"}
+		}
 		return KeySoftware{Name: "Docker", Version: "-", Status: "not_installed", Category: "container"}
 	}
-	out, err := exec.Command("docker", "--version").Output()
+	out, err := exec.Command(dockerBin, "--version").Output()
 	if err != nil {
 		return KeySoftware{Name: "Docker", Version: "-", Status: "not_installed", Category: "container"}
 	}
