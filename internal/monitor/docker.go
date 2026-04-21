@@ -49,17 +49,7 @@ func FindDockerBinary() string {
 	return dockerBinary
 }
 
-// HasDockerSocket returns true if the Docker daemon socket exists,
-// indicating Docker is running even if the CLI binary isn't in PATH.
+// HasDockerSocket returns true if a Docker/Podman daemon socket exists.
 func HasDockerSocket() bool {
-	for _, sock := range []string{
-		"/var/run/docker.sock",
-		"/run/docker.sock",
-		"/run/podman/podman.sock",
-	} {
-		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			return true
-		}
-	}
-	return false
+	return findDockerSocket() != ""
 }

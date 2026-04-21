@@ -5,28 +5,99 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-// dockerSocketPaths are the locations to check for the Docker daemon socket.
-var dockerSocketPaths = []string{
+// staticSocketPaths are well-known locations for Docker/Podman sockets.
+var staticSocketPaths = []string{
 	"/var/run/docker.sock",
 	"/run/docker.sock",
 	"/run/podman/podman.sock",
+	"/var/snap/docker/common/run/docker.sock",      // Snap Docker
+	"/run/user/0/docker.sock",                       // rootless Docker (root)
+	"/run/user/0/podman/podman.sock",                // rootless Podman (root)
+	"/var/run/podman/podman.sock",                   // system Podman
 }
 
-// findDockerSocket returns the first existing Docker/Podman socket path, or "".
+var (
+	resolvedSocket     string
+	resolvedSocketOnce sync.Once
+)
+
+// findDockerSocket returns the Docker/Podman socket path.
+// First checks static paths, then scans /run for sockets if not found.
 func findDockerSocket() string {
-	for _, sock := range dockerSocketPaths {
-		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			return sock
+	resolvedSocketOnce.Do(func() {
+		// 1. Check static well-known paths
+		for _, sock := range staticSocketPaths {
+			if isSocket(sock) {
+				resolvedSocket = sock
+				log.Printf("[docker] found socket at %s", sock)
+				return
+			}
 		}
-	}
-	return ""
+
+		// 2. Check rootless Docker/Podman for other UIDs in /run/user/
+		entries, err := os.ReadDir("/run/user")
+		if err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if _, err := strconv.Atoi(e.Name()); err != nil {
+					continue
+				}
+				for _, name := range []string{"docker.sock", "podman/podman.sock"} {
+					sock := filepath.Join("/run/user", e.Name(), name)
+					if isSocket(sock) {
+						resolvedSocket = sock
+						log.Printf("[docker] found rootless socket at %s", sock)
+						return
+					}
+				}
+			}
+		}
+
+		// 3. Scan common directories for any docker*.sock or podman*.sock
+		for _, dir := range []string{"/run", "/var/run", "/tmp"} {
+			filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return nil
+				}
+				// Don't recurse too deep
+				if strings.Count(path, "/") > 5 {
+					return filepath.SkipDir
+				}
+				if info.Mode()&os.ModeSocket != 0 {
+					base := strings.ToLower(info.Name())
+					if strings.Contains(base, "docker") || strings.Contains(base, "podman") {
+						resolvedSocket = path
+						log.Printf("[docker] found socket via scan at %s", path)
+						return fmt.Errorf("found") // stop walking
+					}
+				}
+				return nil
+			})
+			if resolvedSocket != "" {
+				return
+			}
+		}
+	})
+	return resolvedSocket
+}
+
+func isSocket(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode()&os.ModeSocket != 0
 }
 
 // dockerHTTPClient creates an HTTP client that talks over a Unix socket.
