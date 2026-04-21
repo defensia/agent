@@ -89,8 +89,16 @@ type HeartbeatRequest struct {
 	ActiveBans         int            `json:"active_bans,omitempty"`
 	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`
 	YaraInstalled      bool           `json:"yara_installed,omitempty"`
-	ModsecActive       bool           `json:"modsec_active,omitempty"`
-	RequestsAnalyzed   uint64         `json:"requests_analyzed,omitempty"`
+	ModsecActive       bool              `json:"modsec_active,omitempty"`
+	RequestsAnalyzed   uint64            `json:"requests_analyzed,omitempty"`
+	ListeningServices  []ListeningService `json:"listening_services,omitempty"`
+}
+
+// ListeningService represents a TCP port in LISTEN state with its process.
+type ListeningService struct {
+	Port    int    `json:"port"`
+	Process string `json:"process"`
+	Proto   string `json:"proto"` // "tcp" or "tcp6"
 }
 
 // HeartbeatResponse is the server's reply to a heartbeat.

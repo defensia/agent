@@ -708,6 +708,16 @@ func runAgent() {
 			}
 
 			fwStatus := firewall.FirewallStatus()
+			// Detect listening services (every heartbeat, cheap /proc read)
+			var listeningServices []api.ListeningService
+			for _, svc := range monitor.DetectListeningServices() {
+				listeningServices = append(listeningServices, api.ListeningService{
+					Port:    svc.Port,
+					Process: svc.Process,
+					Proto:   svc.Proto,
+				})
+			}
+
 			hbReq := api.HeartbeatRequest{
 				Status:            "online",
 				Version:           version,
@@ -725,6 +735,7 @@ func runAgent() {
 				YaraInstalled:    yaraScanner != nil && yaraScanner.IsAvailable(),
 				ModsecActive:     modsecEngine != nil && modsecEngine.IsAvailable(),
 				RequestsAnalyzed: reqAnalyzed,
+				ListeningServices: listeningServices,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
