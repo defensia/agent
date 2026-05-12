@@ -117,6 +117,18 @@ func runRegister(serverURL, name, installToken string) {
 		Version:      version,
 	})
 	if err != nil {
+		msg := err.Error()
+		// Permanent auth errors: a bad/expired install_token will never succeed
+		// without operator action. Print a clear message, sleep so K8s/systemd
+		// restart backoff doesn't spam the API, then exit 64 (EX_USAGE).
+		if strings.Contains(msg, "401") || strings.Contains(msg, "token_not_found") || strings.Contains(msg, "token_invalid") {
+			log.Printf("Registration failed: install token rejected by server.")
+			log.Printf("Cause: %v", err)
+			log.Printf("Action: generate a new install token at %s/account/agents and reinstall.", serverURL)
+			log.Printf("Sleeping 5 minutes before exit to avoid restart-loop hammering the API.")
+			time.Sleep(5 * time.Minute)
+			os.Exit(64)
+		}
 		log.Fatalf("Registration failed: %v", err)
 	}
 
