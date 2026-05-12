@@ -182,6 +182,35 @@ check_deps() {
     fi
 }
 
+# install_ipset installs ipset best-effort. ipset is recommended (raises firewall
+# capacity from 500 to 65 536 entries) but not required — the agent falls back
+# to iptables FIFO rotation if unavailable.
+install_ipset() {
+    if command -v ipset &>/dev/null; then
+        success "ipset already installed — using high-capacity backend (65,536 bans)."
+        return 0
+    fi
+
+    info "Installing ipset (recommended for high-capacity firewall backend)..."
+    local ok=false
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq ipset &>/dev/null && ok=true
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q ipset &>/dev/null && ok=true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q ipset &>/dev/null && ok=true
+    elif command -v apk &>/dev/null; then
+        apk add --quiet ipset &>/dev/null && ok=true
+    fi
+
+    if [[ "$ok" == true ]]; then
+        success "ipset installed — firewall capacity raised to 65,536 bans."
+    else
+        warn "ipset install failed — agent will use iptables backend (500 bans, FIFO)."
+        warn "Install manually later for full capacity: apt/dnf/yum install ipset"
+    fi
+}
+
 # ─── Download ──────────────────────────────────────────────────────────────────
 download_binary() {
     local arch="$1"
@@ -540,6 +569,7 @@ main() {
     info "Detected: Linux ${arch}"
 
     check_deps
+    install_ipset
 
     # Create config directory
     mkdir -p "$CONFIG_DIR"

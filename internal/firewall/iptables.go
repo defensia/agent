@@ -23,6 +23,14 @@ const (
 	ipsetName    = "defensia-bans"
 	ipsetMaxElem = 65536
 	iptablesMax  = 500
+
+	// transientReserve: slots kept in iptables mode for transient bans
+	// (webwatcher, auth) so a large threat-feed can't starve them.
+	// Unused in ipset mode.
+	transientReserve = 100
+
+	originThreatFeed = "threat_feed"
+	originTransient  = "transient"
 )
 
 // K8sBanHook is called on every ban/unban when running in K8s mode.
@@ -36,8 +44,11 @@ var (
 	mu       sync.Mutex
 	useIPSet bool
 	maxBans  int = iptablesMax
-	banSet   map[string]bool
-	banOrder []string // FIFO for iptables mode rotation
+
+	banSet         map[string]bool   // all bans (lookup)
+	banOrigin      map[string]string // ip -> "threat_feed" | "transient"
+	threatFeedSet  map[string]bool   // threat-feed bans (protected from transient FIFO)
+	transientOrder []string          // FIFO for transient bans only (iptables mode)
 
 	// K8s ingress-level firewall (nil if not in K8s)
 	k8sHook K8sBanHook
@@ -66,6 +77,9 @@ func Init() {
 	defer mu.Unlock()
 
 	banSet = make(map[string]bool)
+	banOrigin = make(map[string]string)
+	threatFeedSet = make(map[string]bool)
+	transientOrder = nil
 
 	// Try ipset
 	if tryIPSetInit() {
@@ -77,7 +91,7 @@ func Init() {
 	} else {
 		useIPSet = false
 		maxBans = iptablesMax
-		log.Printf("[firewall] ipset unavailable — using iptables backend (capacity=%d, FIFO rotation)", maxBans)
+		log.Printf("[firewall] ipset unavailable — using iptables backend (capacity=%d, FIFO rotation, transient reserve=%d)", maxBans, transientReserve)
 		populateBanSetFromIPTables()
 	}
 }
@@ -148,15 +162,19 @@ func migrateToIPSet() {
 }
 
 // populateBanSetFromIPSet reads current ipset members into banSet.
+// Pre-existing bans are marked as "transient" — the threat-feed sync will
+// upgrade its own IPs to "threat_feed" origin on first apply.
 func populateBanSetFromIPSet() {
 	members := ipsetMembers()
 	for _, ip := range members {
 		banSet[ip] = true
+		banOrigin[ip] = originTransient
 	}
 	log.Printf("[firewall] loaded %d existing bans from ipset", len(banSet))
 }
 
-// populateBanSetFromIPTables reads current iptables DROP rules into banSet/banOrder.
+// populateBanSetFromIPTables reads current iptables DROP rules into banSet/transientOrder.
+// All pre-existing bans are treated as transient (the threat-feed sync will re-mark its own).
 // If there are more bans than maxBans, trims the oldest to stay within capacity.
 func populateBanSetFromIPTables() {
 	rules, err := listRulesLocked()
@@ -169,7 +187,8 @@ func populateBanSetFromIPTables() {
 		if r.Type == "block" && r.Source != "" && r.Port == 0 && r.Protocol == "all" {
 			if !banSet[r.Source] {
 				banSet[r.Source] = true
-				banOrder = append(banOrder, r.Source)
+				banOrigin[r.Source] = originTransient
+				transientOrder = append(transientOrder, r.Source)
 			}
 		}
 	}
@@ -177,15 +196,16 @@ func populateBanSetFromIPTables() {
 	loaded := len(banSet)
 	log.Printf("[firewall] loaded %d existing bans from iptables", loaded)
 
-	// Trim to capacity: remove oldest bans (first in FIFO) to stay within maxBans.
+	// Trim to capacity: remove oldest transient bans (first in FIFO) to stay within maxBans.
 	// The newest bans (most recent threats) are kept.
 	if loaded > maxBans {
 		excess := loaded - maxBans
 		log.Printf("[firewall] trimming %d oldest bans to fit within %d capacity", excess, maxBans)
-		for i := 0; i < excess && len(banOrder) > 0; i++ {
-			evicted := banOrder[0]
-			banOrder = banOrder[1:]
+		for i := 0; i < excess && len(transientOrder) > 0; i++ {
+			evicted := transientOrder[0]
+			transientOrder = transientOrder[1:]
 			delete(banSet, evicted)
+			delete(banOrigin, evicted)
 			exec.Command("iptables", "-D", "INPUT", "-s", evicted, "-j", "DROP").Run()
 		}
 		log.Printf("[firewall] trimmed to %d bans", len(banSet))
@@ -347,8 +367,21 @@ func isSafeIP(ip net.IP) bool {
 	return isReservedIP(ip) || isLocalIP(ip) || protectedIPs[ip.String()]
 }
 
-// BanIP adds a DROP rule for the given IP address.
+// BanIP adds a transient DROP rule for the given IP (webwatcher, auth, manual).
+// Transient bans use FIFO rotation among themselves and never evict threat-feed bans.
 func BanIP(ip string) error {
+	return banIPWithOrigin(ip, originTransient)
+}
+
+// BanThreatFeedIP adds a protected DROP rule for an IP from an external
+// threat feed (Spamhaus, Feodo, …). Threat-feed bans are not subject to
+// the transient FIFO: they stay until explicitly removed via UnbanIP or
+// until the threat-feed delta drops them.
+func BanThreatFeedIP(ip string) error {
+	return banIPWithOrigin(ip, originThreatFeed)
+}
+
+func banIPWithOrigin(ip, origin string) error {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
@@ -361,16 +394,21 @@ func BanIP(ip string) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Already banned
+	// Already banned — upgrade to threat_feed if needed, but never downgrade.
 	if banSet[ip] {
+		if origin == originThreatFeed && banOrigin[ip] != originThreatFeed {
+			upgradeToThreatFeedLocked(ip)
+		}
 		return nil
 	}
 
 	var err error
 	if useIPSet {
-		err = banIPSet(ip)
+		err = banIPSet(ip, origin)
+	} else if origin == originThreatFeed {
+		err = banThreatFeedIPTables(ip)
 	} else {
-		err = banIPTables(ip)
+		err = banTransientIPTables(ip)
 	}
 
 	// Also ban at ingress level in K8s mode (non-blocking)
@@ -383,42 +421,100 @@ func BanIP(ip string) error {
 	return err
 }
 
-// banIPSet adds an IP to the ipset.
-func banIPSet(ip string) error {
+// upgradeToThreatFeedLocked promotes an existing transient ban to threat-feed
+// status so it becomes protected from FIFO eviction. Caller must hold mu.
+func upgradeToThreatFeedLocked(ip string) {
+	for i, v := range transientOrder {
+		if v == ip {
+			transientOrder = append(transientOrder[:i], transientOrder[i+1:]...)
+			break
+		}
+	}
+	banOrigin[ip] = originThreatFeed
+	threatFeedSet[ip] = true
+}
+
+// banIPSet adds an IP to the ipset and records its origin.
+func banIPSet(ip, origin string) error {
 	if err := exec.Command("ipset", "add", ipsetName, ip, "-exist").Run(); err != nil {
 		return fmt.Errorf("ipset add %s: %w", ip, err)
 	}
 	banSet[ip] = true
-	log.Printf("[firewall] banned %s (ipset, %d/%d)", ip, len(banSet), maxBans)
+	banOrigin[ip] = origin
+	if origin == originThreatFeed {
+		threatFeedSet[ip] = true
+	}
+	log.Printf("[firewall] banned %s (ipset %s, %d/%d)", ip, origin, len(banSet), maxBans)
 	return nil
 }
 
-// banIPTables adds an IP via iptables with FIFO rotation when at capacity.
-func banIPTables(ip string) error {
-	// FIFO rotation: evict oldest ban if at capacity
-	if len(banSet) >= maxBans {
-		evicted := banOrder[0]
-		banOrder = banOrder[1:]
-		delete(banSet, evicted)
-		exec.Command("iptables", "-D", "INPUT", "-s", evicted, "-j", "DROP").Run()
-		log.Printf("[firewall] FIFO evicted %s to make room (at capacity %d)", evicted, maxBans)
-	}
-
-	// Check if rule already exists
-	if exec.Command("iptables", "-C", "INPUT", "-s", ip, "-j", "DROP").Run() == nil {
-		banSet[ip] = true
-		banOrder = append(banOrder, ip)
+// banTransientIPTables adds a transient ban with FIFO rotation among transient bans only.
+// Never evicts threat-feed bans. If threat-feed has filled all slots, the ban is skipped.
+func banTransientIPTables(ip string) error {
+	transientCap := maxBans - len(threatFeedSet)
+	if transientCap <= 0 {
+		log.Printf("[firewall] transient ban for %s skipped: threat-feed fills capacity (%d/%d). Install ipset for 65,536 capacity.", ip, len(threatFeedSet), maxBans)
 		return nil
 	}
 
-	// Insert new rule
+	// FIFO rotation among transient bans only
+	if len(transientOrder) >= transientCap {
+		evicted := transientOrder[0]
+		transientOrder = transientOrder[1:]
+		delete(banSet, evicted)
+		delete(banOrigin, evicted)
+		exec.Command("iptables", "-D", "INPUT", "-s", evicted, "-j", "DROP").Run()
+		log.Printf("[firewall] FIFO evicted transient %s (transient cap=%d)", evicted, transientCap)
+	}
+
+	// Rule may already exist (e.g. leftover from restart)
+	if exec.Command("iptables", "-C", "INPUT", "-s", ip, "-j", "DROP").Run() == nil {
+		banSet[ip] = true
+		banOrigin[ip] = originTransient
+		transientOrder = append(transientOrder, ip)
+		return nil
+	}
+
 	if err := exec.Command("iptables", "-I", "INPUT", "1", "-s", ip, "-j", "DROP").Run(); err != nil {
 		return fmt.Errorf("iptables ban %s: %w", ip, err)
 	}
 
 	banSet[ip] = true
-	banOrder = append(banOrder, ip)
-	log.Printf("[firewall] banned %s (iptables, %d/%d)", ip, len(banSet), maxBans)
+	banOrigin[ip] = originTransient
+	transientOrder = append(transientOrder, ip)
+	log.Printf("[firewall] banned %s (iptables transient, %d transient / %d total / %d max)", ip, len(transientOrder), len(banSet), maxBans)
+	return nil
+}
+
+// banThreatFeedIPTables adds a protected threat-feed ban. Respects a soft cap
+// of (maxBans - transientReserve) so the transient pool is never starved.
+// Never evicts other bans — if full, the ban is skipped with a warning.
+func banThreatFeedIPTables(ip string) error {
+	threatFeedCap := maxBans - transientReserve
+	if threatFeedCap < 0 {
+		threatFeedCap = 0
+	}
+	if len(threatFeedSet) >= threatFeedCap {
+		log.Printf("[firewall] threat-feed ban for %s skipped: %d/%d slots used. Install ipset for 65,536 capacity.", ip, len(threatFeedSet), threatFeedCap)
+		return nil
+	}
+
+	// Rule may already exist (e.g. leftover from restart)
+	if exec.Command("iptables", "-C", "INPUT", "-s", ip, "-j", "DROP").Run() == nil {
+		banSet[ip] = true
+		banOrigin[ip] = originThreatFeed
+		threatFeedSet[ip] = true
+		return nil
+	}
+
+	if err := exec.Command("iptables", "-I", "INPUT", "1", "-s", ip, "-j", "DROP").Run(); err != nil {
+		return fmt.Errorf("iptables threat-feed ban %s: %w", ip, err)
+	}
+
+	banSet[ip] = true
+	banOrigin[ip] = originThreatFeed
+	threatFeedSet[ip] = true
+	log.Printf("[firewall] banned %s (iptables threat-feed, %d/%d)", ip, len(threatFeedSet), threatFeedCap)
 	return nil
 }
 
@@ -454,6 +550,8 @@ func unbanIPSet(ip string) error {
 		return fmt.Errorf("ipset del %s: %w", ip, err)
 	}
 	delete(banSet, ip)
+	delete(banOrigin, ip)
+	delete(threatFeedSet, ip)
 	log.Printf("[firewall] unbanned %s (ipset, %d/%d)", ip, len(banSet), maxBans)
 	return nil
 }
@@ -464,10 +562,11 @@ func unbanIPTables(ip string) error {
 		return fmt.Errorf("iptables unban %s: %w", ip, err)
 	}
 	delete(banSet, ip)
-	// Remove from FIFO order
-	for i, v := range banOrder {
+	delete(banOrigin, ip)
+	delete(threatFeedSet, ip)
+	for i, v := range transientOrder {
 		if v == ip {
-			banOrder = append(banOrder[:i], banOrder[i+1:]...)
+			transientOrder = append(transientOrder[:i], transientOrder[i+1:]...)
 			break
 		}
 	}
@@ -496,7 +595,9 @@ func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]boo
 	return cleanupIPTables(activeBanIPs, activeRuleIPs)
 }
 
-// cleanupIPSet removes stale IPs from the ipset.
+// cleanupIPSet removes stale IPs from the ipset. Threat-feed bans are skipped
+// — they are managed by applyThreatFeed's delta logic (add/remove against
+// the previous feed snapshot), not this generic sync cleanup.
 func cleanupIPSet(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
 	members := ipsetMembers()
 	removed := 0
@@ -505,11 +606,15 @@ func cleanupIPSet(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) i
 		if activeBanIPs[ip] || activeRuleIPs[ip] {
 			continue
 		}
+		if banOrigin[ip] == originThreatFeed {
+			continue
+		}
 
 		if err := exec.Command("ipset", "del", ipsetName, ip, "-exist").Run(); err != nil {
 			log.Printf("[firewall] cleanup: failed to remove %s from ipset: %v", ip, err)
 		} else {
 			delete(banSet, ip)
+			delete(banOrigin, ip)
 			log.Printf("[firewall] cleanup: removed expired ban %s from ipset", ip)
 			removed++
 		}
@@ -518,7 +623,8 @@ func cleanupIPSet(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) i
 	return removed
 }
 
-// cleanupIPTables removes stale IPs from iptables (original logic).
+// cleanupIPTables removes stale IPs from iptables. Threat-feed bans are
+// skipped — they are owned by applyThreatFeed's delta logic.
 func cleanupIPTables(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
 	current, err := listRulesLocked()
 	if err != nil {
@@ -535,15 +641,18 @@ func cleanupIPTables(activeBanIPs map[string]bool, activeRuleIPs map[string]bool
 		if activeBanIPs[r.Source] || activeRuleIPs[r.Source] {
 			continue
 		}
+		if banOrigin[r.Source] == originThreatFeed {
+			continue
+		}
 
 		if err := exec.Command("iptables", "-D", "INPUT", "-s", r.Source, "-j", "DROP").Run(); err != nil {
 			log.Printf("[firewall] cleanup: failed to remove stale ban for %s: %v", r.Source, err)
 		} else {
 			delete(banSet, r.Source)
-			// Remove from FIFO order
-			for i, v := range banOrder {
+			delete(banOrigin, r.Source)
+			for i, v := range transientOrder {
 				if v == r.Source {
-					banOrder = append(banOrder[:i], banOrder[i+1:]...)
+					transientOrder = append(transientOrder[:i], transientOrder[i+1:]...)
 					break
 				}
 			}
