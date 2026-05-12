@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,6 +33,24 @@ import (
 )
 
 var version = "0.9.92"
+
+var agentStartTime = time.Now()
+
+// collectRuntimeStats snapshots the agent's own resource usage for heartbeat
+// reporting so leaks can be detected remotely.
+func collectRuntimeStats(c *api.Client) *api.RuntimeStats {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	depth, dropped := c.EventQueueStats()
+	return &api.RuntimeStats{
+		GoroutineCount: runtime.NumGoroutine(),
+		HeapAllocBytes: m.HeapAlloc,
+		HeapSysBytes:   m.HeapSys,
+		UptimeSeconds:  int64(time.Since(agentStartTime).Seconds()),
+		EventQueueLen:  depth,
+		EventDropped:   dropped,
+	}
+}
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScheduler  *malware.Scheduler
@@ -127,6 +147,7 @@ func runAgent() {
 
 	apiClient := api.New(cfg.ServerURL, cfg.AgentToken)
 	apiClient.SetVersion(version)
+	apiClient.StartEventConsumer()
 
 	// Callback for the updater to report update outcomes to the server
 	reportUpdateEvent := func(eventType, severity string, details map[string]string) {
@@ -223,13 +244,13 @@ func runAgent() {
 	// Set event callback for monitor mode (report detections without banning)
 	w.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
 		log.Printf("[watcher] detected %s from %s (monitor mode)", eventType, ip)
-		apiClient.ReportEvents([]api.EventRequest{{
+		apiClient.QueueEvent(api.EventRequest{
 			Type:       eventType,
 			Severity:   severity,
 			SourceIP:   ip,
 			Details:    details,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		}})
+		})
 	})
 
 	// Set geoblocking check on watcher
@@ -295,13 +316,13 @@ func runAgent() {
 				}
 			},
 			func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			},
 		)
 		webW.SetCheckIP(func(ip string) string {
@@ -388,13 +409,13 @@ func runAgent() {
 		})
 		if mailW != nil {
 			mailW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			})
 			mailW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -427,13 +448,13 @@ func runAgent() {
 		})
 		if dbW != nil {
 			dbW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			})
 			dbW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -466,13 +487,13 @@ func runAgent() {
 		})
 		if ftpW != nil {
 			ftpW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			})
 			ftpW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -736,6 +757,7 @@ func runAgent() {
 				ModsecActive:     modsecEngine != nil && modsecEngine.IsAvailable(),
 				RequestsAnalyzed: reqAnalyzed,
 				ListeningServices: listeningServices,
+				Runtime:           collectRuntimeStats(apiClient),
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -1437,20 +1459,84 @@ func runZombieMonitor(client *api.Client) {
 
 const threatFeedCache = "/etc/defensia/threat_feed.json"
 
+// threatFeedState tracks the last applied threat-feed snapshot so each sync
+// only applies the delta instead of re-banning every IP (which previously
+// caused iptables thrashing when the feed exceeded firewall capacity).
+var (
+	threatFeedMu    sync.Mutex
+	threatFeedIPs   = make(map[string]bool)
+	threatFeedCIDRs = make(map[string]bool)
+)
+
 func applyThreatFeed(entries []api.ThreatEntry) {
+	newIPs := make(map[string]bool, len(entries))
+	newCIDRs := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if e.IP != nil && *e.IP != "" {
-			if err := firewall.BanIP(*e.IP); err != nil {
-				log.Printf("[threat-feed] ban %s (%s): %v", *e.IP, e.Source, err)
-			}
+			newIPs[*e.IP] = true
 		} else if e.CIDR != nil && *e.CIDR != "" {
-			cidr := *e.CIDR
-			if err := firewall.ApplyRule(firewall.RuleSpec{Type: "block", IPRange: &cidr}); err != nil {
-				log.Printf("[threat-feed] block cidr %s (%s): %v", cidr, e.Source, err)
-			}
+			newCIDRs[*e.CIDR] = true
 		}
 	}
-	log.Printf("[threat-feed] applied %d entries", len(entries))
+
+	threatFeedMu.Lock()
+	defer threatFeedMu.Unlock()
+
+	added, removed, cidrAdded, cidrRemoved := 0, 0, 0, 0
+
+	for ip := range newIPs {
+		if threatFeedIPs[ip] {
+			continue
+		}
+		if err := firewall.BanThreatFeedIP(ip); err != nil {
+			log.Printf("[threat-feed] ban %s: %v", ip, err)
+			continue
+		}
+		added++
+	}
+	for ip := range threatFeedIPs {
+		if newIPs[ip] {
+			continue
+		}
+		if err := firewall.UnbanIP(ip); err != nil {
+			log.Printf("[threat-feed] unban %s: %v", ip, err)
+			continue
+		}
+		removed++
+	}
+
+	for cidr := range newCIDRs {
+		if threatFeedCIDRs[cidr] {
+			continue
+		}
+		c := cidr
+		if err := firewall.ApplyRule(firewall.RuleSpec{Type: "block", IPRange: &c}); err != nil {
+			log.Printf("[threat-feed] block cidr %s: %v", cidr, err)
+			continue
+		}
+		cidrAdded++
+	}
+	for cidr := range threatFeedCIDRs {
+		if newCIDRs[cidr] {
+			continue
+		}
+		c := cidr
+		if err := firewall.RemoveRule(firewall.RuleSpec{Type: "block", IPRange: &c}); err != nil {
+			log.Printf("[threat-feed] unblock cidr %s: %v", cidr, err)
+			continue
+		}
+		cidrRemoved++
+	}
+
+	threatFeedIPs = newIPs
+	threatFeedCIDRs = newCIDRs
+
+	if added+removed+cidrAdded+cidrRemoved == 0 {
+		log.Printf("[threat-feed] no changes (%d entries)", len(entries))
+	} else {
+		log.Printf("[threat-feed] delta applied: +%d IPs, -%d IPs, +%d CIDRs, -%d CIDRs (total: %d IPs, %d CIDRs)",
+			added, removed, cidrAdded, cidrRemoved, len(newIPs), len(newCIDRs))
+	}
 }
 
 func saveThreatFeedCache(entries []api.ThreatEntry) {

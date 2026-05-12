@@ -1539,14 +1539,31 @@ func (w *WebWatcher) cleanupLoop() {
 			}
 			if len(recent) == 0 {
 				delete(w.attempts, key)
+				delete(w.banned, key)
 			} else {
 				w.attempts[key] = recent
 			}
 		}
-		// Cap total entries to prevent unbounded memory growth
+
+		// Defensive caps to bound memory on long-running agents.
 		if len(w.attempts) > 50000 {
 			w.attempts = make(map[string][]time.Time)
+			log.Printf("[webwatcher] attempts map exceeded 50000 entries — reset")
 		}
+		if len(w.banned) > 50000 {
+			w.banned = make(map[string]bool)
+			log.Printf("[webwatcher] banned map exceeded 50000 entries — reset")
+		}
+		if len(w.scoredActions) > 50000 {
+			w.scoredActions = make(map[string]string)
+			log.Printf("[webwatcher] scoredActions map exceeded 50000 entries — reset")
+		}
+		// recentScores is pruned in decayLoop, but cap defensively too.
+		if len(w.recentScores) > 100000 {
+			w.recentScores = make(map[string]time.Time)
+			log.Printf("[webwatcher] recentScores map exceeded 100000 entries — reset")
+		}
+
 		w.mu.Unlock()
 	}
 }

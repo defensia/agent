@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,7 +16,19 @@ type Client struct {
 	token      string
 	userAgent  string
 	httpClient *http.Client
+
+	// Async event queue: producers (watchers) push via QueueEvent(); a single
+	// consumer goroutine batches and flushes to /events. Decouples detection
+	// throughput from API latency and bounds goroutine count under flood.
+	eventCh      chan EventRequest
+	eventDropped uint64
 }
+
+const (
+	eventQueueSize  = 2000
+	eventBatchSize  = 50
+	eventFlushEvery = 5 * time.Second
+)
 
 func New(baseURL, token string) *Client {
 	return &Client{
@@ -24,6 +38,60 @@ func New(baseURL, token string) *Client {
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
+		eventCh: make(chan EventRequest, eventQueueSize),
+	}
+}
+
+// QueueEvent enqueues an event for async batched delivery. Non-blocking: if the
+// queue is full, the event is dropped and a counter is incremented. Use this
+// from hot paths (watchers, scorer) instead of calling ReportEvents directly.
+func (c *Client) QueueEvent(e EventRequest) {
+	select {
+	case c.eventCh <- e:
+	default:
+		atomic.AddUint64(&c.eventDropped, 1)
+	}
+}
+
+// EventQueueStats returns current queue depth and total dropped count.
+func (c *Client) EventQueueStats() (depth int, dropped uint64) {
+	return len(c.eventCh), atomic.LoadUint64(&c.eventDropped)
+}
+
+// StartEventConsumer launches the background goroutine that drains the event
+// queue and ships events in batches. Call once at agent startup.
+func (c *Client) StartEventConsumer() {
+	go c.eventConsumerLoop()
+}
+
+func (c *Client) eventConsumerLoop() {
+	batch := make([]EventRequest, 0, eventBatchSize)
+	ticker := time.NewTicker(eventFlushEvery)
+	defer ticker.Stop()
+
+	flush := func(reason string) {
+		if len(batch) == 0 {
+			return
+		}
+		if err := c.ReportEvents(batch); err != nil {
+			log.Printf("[api] event flush failed (%s, %d events): %v", reason, len(batch), err)
+		}
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case e := <-c.eventCh:
+			batch = append(batch, e)
+			if len(batch) >= eventBatchSize {
+				flush("full")
+			}
+		case <-ticker.C:
+			flush("tick")
+			if dropped := atomic.SwapUint64(&c.eventDropped, 0); dropped > 0 {
+				log.Printf("[api] event queue: %d events dropped in last %s (queue cap=%d)", dropped, eventFlushEvery, eventQueueSize)
+			}
+		}
 	}
 }
 
@@ -92,6 +160,19 @@ type HeartbeatRequest struct {
 	ModsecActive       bool              `json:"modsec_active,omitempty"`
 	RequestsAnalyzed   uint64            `json:"requests_analyzed,omitempty"`
 	ListeningServices  []ListeningService `json:"listening_services,omitempty"`
+	Runtime            *RuntimeStats     `json:"runtime,omitempty"`
+}
+
+// RuntimeStats reports the agent's own resource usage so we can detect leaks
+// remotely instead of waiting for the host to OOM.
+type RuntimeStats struct {
+	GoroutineCount int    `json:"goroutine_count"`
+	HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
+	HeapSysBytes   uint64 `json:"heap_sys_bytes"`
+	RSSBytes       uint64 `json:"rss_bytes,omitempty"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	EventQueueLen  int    `json:"event_queue_len,omitempty"`
+	EventDropped   uint64 `json:"event_dropped,omitempty"`
 }
 
 // ListeningService represents a TCP port in LISTEN state with its process.

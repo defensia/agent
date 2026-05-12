@@ -268,8 +268,39 @@ func (w *DBWatcher) Run() {
 		log.Printf("[dbwatcher] watching %s (%s) (threshold: %d in %s)", lp.Path, lp.DBType, w.threshold, w.window)
 		go w.tailFile(lp.Path)
 	}
+	go w.cleanupLoop()
 	// Block forever
 	select {}
+}
+
+func (w *DBWatcher) cleanupLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		w.mu.Lock()
+		now := time.Now()
+		for ip, times := range w.attempts {
+			var recent []time.Time
+			for _, t := range times {
+				if now.Sub(t) <= w.window {
+					recent = append(recent, t)
+				}
+			}
+			if len(recent) == 0 {
+				delete(w.attempts, ip)
+				delete(w.banned, ip)
+			} else {
+				w.attempts[ip] = recent
+			}
+		}
+		const maxEntries = 50000
+		if len(w.attempts) > maxEntries {
+			w.attempts = make(map[string][]time.Time)
+			w.banned = make(map[string]bool)
+			log.Printf("[dbwatcher] attempts map exceeded %d entries — reset", maxEntries)
+		}
+		w.mu.Unlock()
+	}
 }
 
 func (w *DBWatcher) tailFile(path string) {

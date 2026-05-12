@@ -227,11 +227,50 @@ func (w *Watcher) isWhitelisted(ip string) bool {
 func (w *Watcher) Run() {
 	log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
 
+	go w.cleanupLoop()
+
 	for {
 		if err := w.tail(); err != nil {
 			log.Printf("[watcher] error: %v — retrying in 5s", err)
 			time.Sleep(5 * time.Second)
 		}
+	}
+}
+
+// cleanupLoop periodically prunes stale entries from attempts and banned maps
+// to prevent unbounded memory growth on long-running agents. Without this,
+// each unique attacker IP leaves a permanent residue in memory.
+func (w *Watcher) cleanupLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		w.pruneStale()
+	}
+}
+
+func (w *Watcher) pruneStale() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	for ip, times := range w.attempts {
+		var recent []time.Time
+		for _, t := range times {
+			if now.Sub(t) <= w.window {
+				recent = append(recent, t)
+			}
+		}
+		if len(recent) == 0 {
+			delete(w.attempts, ip)
+			delete(w.banned, ip)
+		} else {
+			w.attempts[ip] = recent
+		}
+	}
+	const maxEntries = 50000
+	if len(w.attempts) > maxEntries {
+		w.attempts = make(map[string][]time.Time)
+		w.banned = make(map[string]bool)
+		log.Printf("[watcher] attempts map exceeded %d entries — reset", maxEntries)
 	}
 }
 

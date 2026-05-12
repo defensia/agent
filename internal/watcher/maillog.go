@@ -194,11 +194,43 @@ func (w *MailWatcher) isWhitelisted(ip string) bool {
 func (w *MailWatcher) Run() {
 	log.Printf("[mailwatcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
 
+	go w.cleanupLoop()
+
 	for {
 		if err := w.tail(); err != nil {
 			log.Printf("[mailwatcher] error: %v — retrying in 5s", err)
 			time.Sleep(5 * time.Second)
 		}
+	}
+}
+
+func (w *MailWatcher) cleanupLoop() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		w.mu.Lock()
+		now := time.Now()
+		for ip, times := range w.attempts {
+			var recent []time.Time
+			for _, t := range times {
+				if now.Sub(t) <= w.window {
+					recent = append(recent, t)
+				}
+			}
+			if len(recent) == 0 {
+				delete(w.attempts, ip)
+				delete(w.banned, ip)
+			} else {
+				w.attempts[ip] = recent
+			}
+		}
+		const maxEntries = 50000
+		if len(w.attempts) > maxEntries {
+			w.attempts = make(map[string][]time.Time)
+			w.banned = make(map[string]bool)
+			log.Printf("[mailwatcher] attempts map exceeded %d entries — reset", maxEntries)
+		}
+		w.mu.Unlock()
 	}
 }
 
