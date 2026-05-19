@@ -1469,12 +1469,39 @@ func (w *WebWatcher) startTailGoroutine(path string) {
 }
 
 // hotReloadLoop periodically re-detects log paths and starts tailing new ones.
+// Uses exponential backoff when detection fails (e.g. nginx -T errors) to
+// avoid wasting CPU/I/O retrying a broken config every 5 minutes.
 func (w *WebWatcher) hotReloadLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
+	const baseInterval = 5 * time.Minute
+	const maxInterval = 30 * time.Minute
+	consecutiveFailures := 0
 
-	for range ticker.C {
+	for {
+		interval := baseInterval
+		if consecutiveFailures > 0 {
+			interval = baseInterval * time.Duration(1<<min(consecutiveFailures, 3))
+			if interval > maxInterval {
+				interval = maxInterval
+			}
+		}
+		time.Sleep(interval)
+
 		newInfos, newDomainMap := DetectWebLogInfo()
+
+		if len(newInfos) == 0 {
+			consecutiveFailures++
+			if consecutiveFailures <= 3 {
+				log.Printf("[webwatcher] hot-reload: no logs detected (attempt %d, next in %v)", consecutiveFailures, interval*2)
+			} else if consecutiveFailures%10 == 0 {
+				log.Printf("[webwatcher] hot-reload: still no logs after %d attempts", consecutiveFailures)
+			}
+			continue
+		}
+
+		if consecutiveFailures > 0 {
+			log.Printf("[webwatcher] hot-reload: recovered after %d failures", consecutiveFailures)
+			consecutiveFailures = 0
+		}
 
 		newPathSet := make(map[string]bool)
 		for _, info := range newInfos {

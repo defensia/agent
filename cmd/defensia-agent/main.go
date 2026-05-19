@@ -726,12 +726,24 @@ func runAgent() {
 	// Metrics collector
 	metricsCollector := monitor.NewMetricsCollector()
 
-	// Heartbeat ticker (includes zombie count + web server info + system metrics)
+	// Heartbeat ticker with exponential backoff on errors.
+	// Normal interval: 60s. On consecutive errors: 60s, 120s, 240s, capped at 5min.
+	// This prevents self-DoS when the agent is monitoring its own server.
 	go func() {
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
+		const baseInterval = 60 * time.Second
+		const maxInterval = 5 * time.Minute
+		consecutiveErrors := 0
 
-		for range ticker.C {
+		for {
+			interval := baseInterval
+			if consecutiveErrors > 0 {
+				interval = baseInterval * time.Duration(1<<min(consecutiveErrors, 3))
+				if interval > maxInterval {
+					interval = maxInterval
+				}
+			}
+			time.Sleep(interval)
+
 			zReport := monitor.ScanZombies()
 			sysMetrics := metricsCollector.Collect()
 
@@ -741,7 +753,6 @@ func runAgent() {
 			}
 
 			fwStatus := firewall.FirewallStatus()
-			// Detect listening services (every heartbeat, cheap /proc read)
 			var listeningServices []api.ListeningService
 			for _, svc := range monitor.DetectListeningServices() {
 				listeningServices = append(listeningServices, api.ListeningService{
@@ -788,8 +799,18 @@ func runAgent() {
 
 			resp, err := apiClient.Heartbeat(hbReq)
 			if err != nil {
-				log.Printf("[heartbeat] error: %v", err)
+				consecutiveErrors++
+				if consecutiveErrors <= 3 {
+					log.Printf("[heartbeat] error (attempt %d, next in %v): %v", consecutiveErrors, interval*2, err)
+				} else if consecutiveErrors%10 == 0 {
+					log.Printf("[heartbeat] still failing after %d attempts: %v", consecutiveErrors, err)
+				}
 				continue
+			}
+
+			if consecutiveErrors > 0 {
+				log.Printf("[heartbeat] recovered after %d errors", consecutiveErrors)
+				consecutiveErrors = 0
 			}
 
 			// Check for agent update
@@ -802,14 +823,33 @@ func runAgent() {
 	// Zombie process monitor (check every 60s, report events when threshold exceeded)
 	go runZombieMonitor(apiClient)
 
-	// Fallback sync ticker (every 5min, in case WS misses something)
+	// Fallback sync ticker with exponential backoff on errors.
+	// Normal: 5min. On errors: 5min, 10min, 20min, capped at 30min.
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
+		const baseInterval = 5 * time.Minute
+		const maxInterval = 30 * time.Minute
+		consecutiveErrors := 0
 
-		for range ticker.C {
+		for {
+			interval := baseInterval
+			if consecutiveErrors > 0 {
+				interval = baseInterval * time.Duration(1<<min(consecutiveErrors, 3))
+				if interval > maxInterval {
+					interval = maxInterval
+				}
+			}
+			time.Sleep(interval)
+
 			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
-				log.Printf("[sync] error: %v", err)
+				consecutiveErrors++
+				if consecutiveErrors <= 3 {
+					log.Printf("[sync] error (attempt %d, next in %v): %v", consecutiveErrors, interval*2, err)
+				} else if consecutiveErrors%5 == 0 {
+					log.Printf("[sync] still failing after %d attempts: %v", consecutiveErrors, err)
+				}
+			} else if consecutiveErrors > 0 {
+				log.Printf("[sync] recovered after %d errors", consecutiveErrors)
+				consecutiveErrors = 0
 			}
 		}
 	}()

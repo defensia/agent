@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // RuleSpec describes a firewall rule to apply.
@@ -52,6 +53,12 @@ var (
 
 	// K8s ingress-level firewall (nil if not in K8s)
 	k8sHook K8sBanHook
+
+	// Log throttling: track skipped bans to avoid flooding logs.
+	// Instead of logging each skipped IP, we count and log a summary.
+	skippedTransient  int
+	skippedThreatFeed int
+	lastSkipLog       time.Time
 )
 
 // Status reports the current firewall backend state.
@@ -448,12 +455,34 @@ func banIPSet(ip, origin string) error {
 	return nil
 }
 
+// logSkippedSummary logs a throttled summary of skipped bans (max once per 60s).
+// Caller must hold mu.
+func logSkippedSummary() {
+	now := time.Now()
+	if skippedTransient == 0 && skippedThreatFeed == 0 {
+		return
+	}
+	if now.Sub(lastSkipLog) < 60*time.Second {
+		return
+	}
+	if skippedTransient > 0 {
+		log.Printf("[firewall] %d transient bans skipped (capacity full). Install ipset for 65,536 capacity.", skippedTransient)
+		skippedTransient = 0
+	}
+	if skippedThreatFeed > 0 {
+		log.Printf("[firewall] %d threat-feed bans skipped (capacity full). Install ipset for 65,536 capacity.", skippedThreatFeed)
+		skippedThreatFeed = 0
+	}
+	lastSkipLog = now
+}
+
 // banTransientIPTables adds a transient ban with FIFO rotation among transient bans only.
 // Never evicts threat-feed bans. If threat-feed has filled all slots, the ban is skipped.
 func banTransientIPTables(ip string) error {
 	transientCap := maxBans - len(threatFeedSet)
 	if transientCap <= 0 {
-		log.Printf("[firewall] transient ban for %s skipped: threat-feed fills capacity (%d/%d). Install ipset for 65,536 capacity.", ip, len(threatFeedSet), maxBans)
+		skippedTransient++
+		logSkippedSummary()
 		return nil
 	}
 
@@ -495,7 +524,8 @@ func banThreatFeedIPTables(ip string) error {
 		threatFeedCap = 0
 	}
 	if len(threatFeedSet) >= threatFeedCap {
-		log.Printf("[firewall] threat-feed ban for %s skipped: %d/%d slots used. Install ipset for 65,536 capacity.", ip, len(threatFeedSet), threatFeedCap)
+		skippedThreatFeed++
+		logSkippedSummary()
 		return nil
 	}
 
@@ -581,6 +611,13 @@ func ApplyBans(ips []string) {
 			log.Printf("[firewall] error applying ban for %s: %v", ip, err)
 		}
 	}
+	// Flush any accumulated skip counts at the end of the batch
+	mu.Lock()
+	if skippedTransient > 0 || skippedThreatFeed > 0 {
+		lastSkipLog = time.Time{} // force log
+		logSkippedSummary()
+	}
+	mu.Unlock()
 }
 
 // CleanupStaleBans removes bans for IPs that are no longer
