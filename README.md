@@ -488,6 +488,24 @@ Recent highlights:
 
 ---
 
+## Security & trust
+
+We know we're asking for privileged access to your server. Here's why engineers trust this agent on production:
+
+| | Detail |
+|---|---|
+| **Open source** | Every line of code is MIT licensed. Audit it before installing. |
+| **Minimal footprint** | Reads auth logs and web access logs. No access to app code, databases, env vars, SSH keys, or user data. |
+| **Dedicated firewall chain** | Uses its own `DEFENSIA` iptables chain — your existing rules are never modified. |
+| **Data transparency** | Only attack metadata is sent to your dashboard (attacker IP, type, timestamp). Raw logs never leave your server. No telemetry, no third-party sharing. |
+| **Signed binaries** | Every release is built by GitHub Actions CI with [Cosign](https://github.com/sigstore/cosign) signatures and [build provenance attestation](https://github.com/defensia/agent/attestations). |
+| **Monitor mode** | Start in detect-only mode — see everything, block nothing. Enable protection when ready. |
+| **Clean uninstall** | `curl -fsSL https://defensia.cloud/install.sh \| sudo bash -s -- --uninstall` — removes binary, config, and firewall chain. No residual changes. |
+
+Full details in [SECURITY.md](SECURITY.md) and [defensia.cloud/docs/trust](https://defensia.cloud/docs/trust).
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please [open an issue](https://github.com/defensia/agent/issues) before submitting large changes.
