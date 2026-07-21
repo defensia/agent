@@ -53,11 +53,12 @@ func collectRuntimeStats(c *api.Client) *api.RuntimeStats {
 }
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
-var malwareScheduler  *malware.Scheduler
-var malwareAllowList  *malware.AllowList
-var malwareScanner    *malware.Scanner
-var malwareRTWatcher  *malware.RealtimeWatcher
-var yaraScanner       *malware.YaraScanner
+var malwareScheduler    *malware.Scheduler
+var malwareAllowList    *malware.AllowList
+var malwareScanner      *malware.Scanner
+var malwareRTWatcher    *malware.RealtimeWatcher
+var yaraScanner         *malware.YaraScanner
+var malwareCustomPaths  []string
 var modsecEngine      *modsecurity.Engine
 
 func main() {
@@ -1117,11 +1118,12 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	if sync.Config.MalwareScanConfig != nil {
 		cfg := sync.Config.MalwareScanConfig
 		malwareScheduler.UpdateConfig(cfg.Enabled, cfg.Frequency, cfg.Time, cfg.Intensity)
+		malwareCustomPaths = cfg.CustomScanPaths
 
 		// Start/stop realtime watcher based on malware scan being enabled
 		if cfg.Enabled && malwareRTWatcher != nil {
 			go func() {
-				webRoots := malware.DetectWebRoots()
+				webRoots := malware.DetectWebRoots(malwareCustomPaths)
 				if len(webRoots) > 0 {
 					malwareRTWatcher.SetDirectories(webRoots)
 					malwareRTWatcher.Start()
@@ -1637,7 +1639,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		intensity = malware.IntensityHigh
 	}
 
-	webRoots := malware.DetectWebRoots()
+	webRoots := malware.DetectWebRoots(malwareCustomPaths)
 	if len(webRoots) == 0 {
 		log.Printf("[malware] no web roots found — skipping scan")
 		_ = client.ReportEvents([]api.EventRequest{{

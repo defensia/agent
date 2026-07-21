@@ -294,10 +294,11 @@ type SyncConfig struct {
 
 // MalwareScanConfig controls scheduled malware scanning.
 type MalwareScanConfig struct {
-	Enabled   bool   `json:"enabled"`
-	Frequency string `json:"frequency"` // "daily", "weekly", "disabled"
-	Time      string `json:"time"`      // "03:00" (HH:MM in server local time)
-	Intensity string `json:"intensity"` // "low", "medium", "high"
+	Enabled         bool     `json:"enabled"`
+	Frequency       string   `json:"frequency"`         // "daily", "weekly", "disabled"
+	Time            string   `json:"time"`               // "03:00" (HH:MM in server local time)
+	Intensity       string   `json:"intensity"`           // "low", "medium", "high"
+	CustomScanPaths []string `json:"custom_scan_paths"`   // additional paths to scan (e.g. "/home/*/public_html")
 }
 
 type WAFConfig struct {
