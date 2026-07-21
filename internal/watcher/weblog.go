@@ -189,13 +189,18 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 7. Docker containers running web servers (always checked — a host may run
+	// 7. cPanel domlogs (per-domain access logs)
+	for _, info := range detectCpanelDomlogs() {
+		add(info)
+	}
+
+	// 8. Docker containers running web servers (always checked — a host may run
 	//    both a native web server and additional services inside Docker).
 	for _, info := range detectDockerLogInfo() {
 		add(info)
 	}
 
-	// 8. Well-known static paths (always checked — add() deduplicates)
+	// 9. Well-known static paths (always checked — add() deduplicates)
 	knownPaths := []string{
 		"/var/log/nginx/access.log",
 		"/var/log/apache2/access.log",
@@ -984,6 +989,52 @@ func parseTraefikAccessLogPath(content string, isToml bool) string {
 		}
 	}
 	return ""
+}
+
+// ── cPanel domlog detection ─────────────────────────────────────────
+
+// detectCpanelDomlogs finds per-domain access logs in cPanel's domlogs directory.
+// cPanel stores individual access logs at /usr/local/apache/domlogs/<domain>
+// (symlinked from /var/log/apache2/domlogs/ on some setups).
+func detectCpanelDomlogs() []LogPathInfo {
+	domlogDirs := []string{
+		"/usr/local/apache/domlogs",
+		"/var/log/apache2/domlogs",
+	}
+
+	var result []LogPathInfo
+	for _, dir := range domlogDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			// Skip SSL logs, FTP logs, bytes logs, and hidden files
+			if strings.HasSuffix(name, "-ssl_log") ||
+				strings.HasSuffix(name, "-bytes_log") ||
+				strings.HasSuffix(name, "-ftp_log") ||
+				strings.HasPrefix(name, ".") ||
+				name == "ftpxferlog" {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			info, err := os.Stat(path)
+			if err != nil || info.IsDir() || info.Size() == 0 {
+				continue
+			}
+			// The filename IS the domain name in cPanel domlogs
+			result = append(result, LogPathInfo{
+				Path:    path,
+				Domains: []string{name},
+			})
+		}
+		if len(result) > 0 {
+			log.Printf("[webwatcher] detected %d cPanel domlogs in %s", len(result), dir)
+			return result // found domlogs, no need to check other dirs
+		}
+	}
+	return nil
 }
 
 // ── Docker container log detection ──────────────────────────────────
