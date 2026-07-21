@@ -887,6 +887,11 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	if ftpW != nil {
 		ftpW.SetMonitorMode(sync.Config.MonitorMode)
 	}
+	// Apply custom log paths for WAF monitoring
+	if sync.Config.MonitorConfig != nil && len(sync.Config.MonitorConfig.CustomLogPaths) > 0 {
+		watcher.SetCustomLogPaths(sync.Config.MonitorConfig.CustomLogPaths)
+	}
+
 	if webW != nil {
 		webW.SetMonitorMode(sync.Config.MonitorMode)
 

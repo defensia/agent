@@ -132,8 +132,16 @@ type WebWatcher struct {
 
 // ── Log path detection ──────────────────────────────────────────────
 
+// customLogPaths holds additional log paths configured from the panel.
+var customLogPaths []string
+
+// SetCustomLogPaths stores user-defined log paths from the panel sync.
+func SetCustomLogPaths(paths []string) {
+	customLogPaths = paths
+}
+
 // DetectWebLogInfo returns all web server access log paths with associated domains.
-// Detection order: env var → nginx config → apache config → well-known paths.
+// Detection order: custom paths → env var → nginx config → apache config → well-known paths.
 func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 	seen := make(map[string]bool)
 	var infos []LogPathInfo
@@ -146,6 +154,19 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 			if len(info.Domains) > 0 {
 				domainMap[info.Path] = info.Domains
 			}
+		}
+	}
+
+	// 0. Custom user-defined log paths from the panel (glob patterns supported)
+	for _, pattern := range customLogPaths {
+		if matches, err := filepath.Glob(pattern); err == nil && len(matches) > 0 {
+			for _, m := range matches {
+				if info, err := os.Stat(m); err == nil && !info.IsDir() {
+					add(LogPathInfo{Path: m})
+				}
+			}
+		} else if _, err := os.Stat(pattern); err == nil {
+			add(LogPathInfo{Path: pattern})
 		}
 	}
 

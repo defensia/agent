@@ -289,7 +289,13 @@ type SyncConfig struct {
 	MonitorMode       bool              `json:"monitor_mode"`
 	WAFConfig         *WAFConfig        `json:"waf_config"`
 	BlockedCountries  []string          `json:"blocked_countries"`
+	MonitorConfig     *MonitorConfig    `json:"monitor_config,omitempty"`
 	MalwareScanConfig *MalwareScanConfig `json:"malware_scan_config,omitempty"`
+}
+
+// MonitorConfig holds monitoring settings synced from the panel.
+type MonitorConfig struct {
+	CustomLogPaths []string `json:"custom_log_paths"` // additional access log paths to monitor
 }
 
 // MalwareScanConfig controls scheduled malware scanning.
