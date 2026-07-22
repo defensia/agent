@@ -601,7 +601,7 @@ ${ssl_ca_env}
 NoNewPrivileges=no
 PrivateTmp=yes
 ProtectSystem=false
-ProtectHome=yes
+ProtectHome=no
 
 [Install]
 WantedBy=multi-user.target
