@@ -307,34 +307,42 @@ download_binary() {
     info "Downloading ${BINARY_NAME} (${arch}) from ${url}..."
 
     if ! curl -fsSL --progress-bar -o "$tmp" "$url"; then
-        rm -f "$tmp"
-        local os_info
-        os_info="$(collect_system_info)"
-        echo ""
-        echo -e "${RED}${BOLD}  ✗ Download failed${NC}"
-        echo -e "  ──────────────────"
-        echo ""
-        echo -e "  Could not download the agent binary from:"
-        echo -e "  ${url}"
-        echo ""
-        echo -e "  This may be caused by:"
-        echo -e "  • No internet connectivity"
-        echo -e "  • Outdated CA certificates (try: apt-get install -y ca-certificates)"
-        echo -e "  • Firewall blocking github.com"
-        echo ""
-        echo -e "  ${BOLD}If the problem persists, open a support ticket at:${NC}"
-        echo -e "  ${CYAN}https://defensia.cloud/tickets/create${NC}"
-        echo ""
-        echo -e "  Please include this info:"
-        echo -e "  ┌──────────────────────────────────────"
-        echo -e "  │ OS:   ${os_info}"
-        echo -e "  │ Arch: $(uname -m)"
-        echo -e "  │ Kernel: $(uname -r)"
-        echo -e "  │ Error: Download failed from ${url}"
-        echo -e "  └──────────────────────────────────────"
-        echo ""
-        report_status "download_failed" "Download failed from ${url}"
-        exit 1
+        # Fallback: try downloading from defensia.cloud mirror
+        local fallback_url="https://defensia.cloud/downloads/${BINARY_NAME}-linux-${arch}"
+        warn "GitHub download failed — trying defensia.cloud mirror..."
+        if ! curl -fsSL --progress-bar -o "$tmp" "$fallback_url"; then
+            rm -f "$tmp"
+            local os_info
+            os_info="$(collect_system_info)"
+            echo ""
+            echo -e "${RED}${BOLD}  ✗ Download failed${NC}"
+            echo -e "  ──────────────────"
+            echo ""
+            echo -e "  Could not download the agent binary from:"
+            echo -e "  ${url}"
+            echo -e "  ${fallback_url}"
+            echo ""
+            echo -e "  This may be caused by:"
+            echo -e "  • No internet connectivity"
+            echo -e "  • Outdated CA certificates (try: apt-get install -y ca-certificates)"
+            echo -e "  • Firewall blocking github.com and defensia.cloud"
+            echo ""
+            echo -e "  ${BOLD}If the problem persists, open a support ticket at:${NC}"
+            echo -e "  ${CYAN}https://defensia.cloud/tickets/create${NC}"
+            echo ""
+            echo -e "  Please include this info:"
+            echo -e "  ┌──────────────────────────────────────"
+            echo -e "  │ OS:   ${os_info}"
+            echo -e "  │ Arch: $(uname -m)"
+            echo -e "  │ Kernel: $(uname -r)"
+            echo -e "  │ Error: Download failed from both GitHub and mirror"
+            echo -e "  └──────────────────────────────────────"
+            echo ""
+            report_status "download_failed" "Download failed from ${url} and mirror"
+            exit 1
+        fi
+        # Use mirror for checksum too
+        RELEASE_BASE="https://defensia.cloud/downloads"
     fi
 
     # Verify checksum if available
