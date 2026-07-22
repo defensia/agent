@@ -20,6 +20,7 @@ var updateMu sync.Mutex
 const targetPath = "/usr/local/bin/defensia-agent"
 const backupPath = "/usr/local/bin/defensia-agent.bak"
 const crashMarkerPath = "/tmp/defensia-agent-crash-count"
+const updateAttemptMarker = "/etc/defensia/.last-update-attempt"
 const maxCrashesBeforeRollback = 3
 
 // EventReporter is a callback to send events to the server without
@@ -107,6 +108,15 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 	if !isNewer(currentVersion, latestVersion) {
 		return
+	}
+
+	// Guard against update loops on non-persistent filesystems (Docker, read-only rootfs).
+	// If we already successfully updated to this version but our binary still reports
+	// the old version, the filesystem can't persist changes — don't keep trying.
+	if data, err := os.ReadFile(updateAttemptMarker); err == nil {
+		if strings.TrimSpace(string(data)) == latestVersion {
+			return
+		}
 	}
 
 	if !updateMu.TryLock() {
@@ -249,6 +259,10 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	}
 
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
+
+	// Remember this attempt so we don't loop if the filesystem is non-persistent.
+	// Written to /etc/defensia/ which survives service restarts.
+	os.WriteFile(updateAttemptMarker, []byte(latestVersion), 0644)
 
 	// 9. Report success BEFORE restart (restart kills the current process)
 	// Enrich with checksum for audit trail
