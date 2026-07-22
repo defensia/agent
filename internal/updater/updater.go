@@ -133,6 +133,11 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	binaryURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), binaryName)
 	checksumURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), checksumName)
 
+	// Fallback mirror when GitHub is unreachable
+	fallbackBase := "https://defensia.cloud/downloads"
+	fallbackBinaryURL := fmt.Sprintf("%s/%s", fallbackBase, binaryName)
+	fallbackChecksumURL := fmt.Sprintf("%s/%s", fallbackBase, checksumName)
+
 	versionDetails := map[string]string{
 		"current_version": currentVersion,
 		"target_version":  latestVersion,
@@ -143,14 +148,21 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	// Report update_started so we know an attempt was made even if process dies mid-update
 	reportEvent("update_started", "info", versionDetails)
 
-	// 1. Download checksum
+	// 1. Download checksum (with fallback to defensia.cloud mirror)
 	expectedHash, err := downloadText(checksumURL)
 	if err != nil {
-		log.Printf("[updater] failed to download checksum: %v", err)
-		reportFailure(reportEvent, "high", mergeDetails(versionDetails, map[string]string{
-			"reason": "download_failed", "error": fmt.Sprintf("checksum download: %v", err),
-		}))
-		return
+		log.Printf("[updater] GitHub checksum download failed, trying mirror: %v", err)
+		expectedHash, err = downloadText(fallbackChecksumURL)
+		if err != nil {
+			log.Printf("[updater] mirror checksum download also failed: %v", err)
+			reportFailure(reportEvent, "high", mergeDetails(versionDetails, map[string]string{
+				"reason": "download_failed", "error": fmt.Sprintf("checksum download failed from both GitHub and mirror: %v", err),
+			}))
+			return
+		}
+		// Switch to mirror for binary too
+		binaryURL = fallbackBinaryURL
+		log.Printf("[updater] using defensia.cloud mirror for download")
 	}
 	expectedHash = strings.TrimSpace(strings.Fields(expectedHash)[0])
 
