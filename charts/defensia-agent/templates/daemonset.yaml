@@ -84,4 +84,6 @@ spec:
           hostPath:
             path: /run/containerd/containerd.sock
         - name: agent-config
-          emptyDir: {}
+          hostPath:
+            path: /etc/defensia
+            type: DirectoryOrCreate
