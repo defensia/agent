@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -214,7 +215,11 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	}
 
 	// 5. PRE-FLIGHT CHECK: run the new binary with "check" to verify it works
-	out, err := exec.Command(tmpPath, "check").CombinedOutput()
+	// Use a 30s timeout — on resource-constrained servers (VPN, low RAM),
+	// Go binary startup can take 10-15s due to heavy imports (YARA, malware, etc.)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, tmpPath, "check").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "OK") {
 		errMsg := ""
 		if err != nil {

@@ -43,7 +43,7 @@ verify_binary() {
     local bin="$1"
     [[ -f "$bin" ]] || return 1
     [[ -x "$bin" ]] || return 1
-    timeout 10 "$bin" check >/dev/null 2>&1
+    timeout 30 "$bin" check >/dev/null 2>&1
 }
 
 restore_from_backup() {
