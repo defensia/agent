@@ -166,8 +166,10 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	}
 	expectedHash = strings.TrimSpace(strings.Fields(expectedHash)[0])
 
-	// 2. Download binary to temp file
-	tmpFile, err := os.CreateTemp("", "defensia-agent-update-*")
+	// 2. Download binary to temp file.
+	// Use /etc/defensia/ instead of /tmp — some systems mount /tmp with noexec
+	// which prevents the pre-flight check from running the downloaded binary.
+	tmpFile, err := os.CreateTemp("/etc/defensia", "defensia-agent-update-*")
 	if err != nil {
 		log.Printf("[updater] failed to create temp file: %v", err)
 		return
