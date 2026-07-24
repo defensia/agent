@@ -298,10 +298,13 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 }
 
 // reportFailure is a convenience wrapper that attaches recent service logs
-// to the event details before reporting an update failure.
+// and system resource info to the event details before reporting an update failure.
 func reportFailure(reportEvent EventReporter, severity string, details map[string]string) {
 	if logs := recentLogs(50); logs != "" {
 		details["recent_logs"] = logs
+	}
+	if res := systemResources(); res != "" {
+		details["system_resources"] = res
 	}
 	reportEvent("update_failed", severity, details)
 }
@@ -492,4 +495,87 @@ func copyFile(src, dst string) error {
 	// Sync to disk before we rename — ensures the full binary is persisted
 	// even if the system crashes or the process is killed shortly after.
 	return out.Sync()
+}
+
+// systemResources collects a snapshot of the machine's RAM, disk, load average,
+// and recent OOM kills. Included in update_failed events to help diagnose
+// failures caused by resource constraints (e.g. OOM killing the preflight binary).
+func systemResources() string {
+	var parts []string
+
+	// Memory from /proc/meminfo
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		var totalKB, availKB, freeKB, buffersKB, cachedKB uint64
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			var val uint64
+			fmt.Sscanf(fields[1], "%d", &val)
+			switch fields[0] {
+			case "MemTotal:":
+				totalKB = val
+			case "MemAvailable:":
+				availKB = val
+			case "MemFree:":
+				freeKB = val
+			case "Buffers:":
+				buffersKB = val
+			case "Cached:":
+				cachedKB = val
+			}
+		}
+		if totalKB > 0 {
+			if availKB == 0 {
+				availKB = freeKB + buffersKB + cachedKB
+			}
+			usedPct := 100 - (availKB * 100 / totalKB)
+			parts = append(parts, fmt.Sprintf("RAM: %dMB total, %dMB available (%d%% used)",
+				totalKB/1024, availKB/1024, usedPct))
+		}
+	}
+
+	// Disk usage for / and /etc/defensia
+	for _, path := range []string{"/", "/etc/defensia"} {
+		out, err := exec.Command("df", "-h", path).CombinedOutput()
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			if len(lines) >= 2 {
+				fields := strings.Fields(lines[len(lines)-1])
+				if len(fields) >= 5 {
+					parts = append(parts, fmt.Sprintf("Disk %s: %s total, %s used (%s), %s free",
+						path, fields[1], fields[2], fields[4], fields[3]))
+				}
+			}
+		}
+	}
+
+	// Load average
+	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 3 {
+			parts = append(parts, fmt.Sprintf("Load: %s %s %s", fields[0], fields[1], fields[2]))
+		}
+	}
+
+	// Recent OOM kills from dmesg (last 5)
+	if out, err := exec.Command("dmesg", "--time-format", "iso", "-l", "err,crit").CombinedOutput(); err == nil {
+		var oomLines []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, "Out of memory") || strings.Contains(line, "oom-kill") || strings.Contains(line, "Killed process") {
+				oomLines = append(oomLines, strings.TrimSpace(line))
+			}
+		}
+		if len(oomLines) > 5 {
+			oomLines = oomLines[len(oomLines)-5:]
+		}
+		if len(oomLines) > 0 {
+			parts = append(parts, "OOM kills: "+strings.Join(oomLines, " | "))
+		} else {
+			parts = append(parts, "OOM kills: none found")
+		}
+	}
+
+	return strings.Join(parts, "\n")
 }
