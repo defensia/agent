@@ -1698,6 +1698,17 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	if malwareAllowList != nil {
 		scanner.AllowList = malwareAllowList
 	}
+
+	_ = client.ReportEvents([]api.EventRequest{{
+		Type:     "malware_scan_progress",
+		Severity: "info",
+		Details: map[string]string{
+			"stage": "scanning_files",
+			"roots": fmt.Sprintf("%d", len(webRoots)),
+		},
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
 	result, err := scanner.ScanWebRoots(webRoots, intensity)
 	if err != nil {
 		log.Printf("[malware] scan error: %v", err)
@@ -1706,6 +1717,12 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 
 	// YARA scan (if yara CLI available on the server)
 	if yaraScanner != nil && yaraScanner.IsAvailable() {
+		_ = client.ReportEvents([]api.EventRequest{{
+			Type:     "malware_scan_progress",
+			Severity: "info",
+			Details:  map[string]string{"stage": "yara_scanning"},
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
 		for _, root := range webRoots {
 			yaraFindings := yaraScanner.ScanDirectory(root.Path, root.Domain)
 			for _, f := range yaraFindings {
@@ -1718,6 +1735,12 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	// They no longer appear in the malware tab.
 
 	// WordPress database scanning
+	_ = client.ReportEvents([]api.EventRequest{{
+		Type:     "malware_scan_progress",
+		Severity: "info",
+		Details:  map[string]string{"stage": "checking_database"},
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
 	for _, root := range webRoots {
 		dbFindings := malware.CheckWordPressDatabase(root)
 		for _, f := range dbFindings {
@@ -1726,12 +1749,24 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	}
 
 	// Malicious process detection (crypto miners, reverse shells)
+	_ = client.ReportEvents([]api.EventRequest{{
+		Type:     "malware_scan_progress",
+		Severity: "info",
+		Details:  map[string]string{"stage": "checking_processes"},
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
 	procFindings := malware.CheckMaliciousProcesses()
 	for _, f := range procFindings {
 		result.Findings = append(result.Findings, f)
 	}
 
 	// System integrity + rootkit checks
+	_ = client.ReportEvents([]api.EventRequest{{
+		Type:     "malware_scan_progress",
+		Severity: "info",
+		Details:  map[string]string{"stage": "checking_integrity"},
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+	}})
 	sysResult := malware.CheckSystemIntegrity()
 	for _, f := range sysResult.ModifiedBinaries {
 		result.Findings = append(result.Findings, f)
