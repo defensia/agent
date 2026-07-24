@@ -1154,6 +1154,12 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",
 		len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries), len(sync.BotFingerprints))
 
+	// Run malware scan if requested via dashboard (sync-based fallback for when WebSocket is unreachable)
+	if sync.MalwareScanRequested {
+		log.Printf("[malware] scan requested via sync — starting...")
+		go runMalwareScan(client, "medium")
+	}
+
 	// Check for agent update from sync response
 	if sync.AgentUpdate != nil && sync.AgentUpdate.LatestVersion != "" {
 		go updater.CheckAndUpdate(version, sync.AgentUpdate.LatestVersion, sync.AgentUpdate.DownloadBaseURL, reportUpdateEvent)
@@ -1645,6 +1651,25 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	}
 
 	webRoots := malware.DetectWebRoots(malwareCustomPaths)
+
+	// Report discovered web roots so the dashboard can show scan progress
+	if len(webRoots) > 0 {
+		rootPaths := make([]string, len(webRoots))
+		for i, r := range webRoots {
+			rootPaths[i] = r.Path
+		}
+		_ = client.ReportEvents([]api.EventRequest{{
+			Type:     "malware_scan_progress",
+			Severity: "info",
+			Details: map[string]string{
+				"stage":      "detecting_roots",
+				"roots":      fmt.Sprintf("%d", len(webRoots)),
+				"root_paths": strings.Join(rootPaths, ", "),
+			},
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}
+
 	if len(webRoots) == 0 {
 		log.Printf("[malware] no web roots found — skipping scan")
 		_ = client.ReportEvents([]api.EventRequest{{

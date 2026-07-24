@@ -256,7 +256,8 @@ type SyncResponse struct {
 	MalwareAllowlist   []MalwareIgnoreEntry  `json:"malware_allowlist"`
 	MalwareSignatures  []MalwareSyncSignature `json:"malware_signatures"`
 	YaraRules              *YaraRulesSync         `json:"yara_rules,omitempty"`
-	YaraInstallRequested   bool                   `json:"yara_install_requested"`
+	YaraInstallRequested    bool                   `json:"yara_install_requested"`
+	MalwareScanRequested   bool                   `json:"malware_scan_requested"`
 }
 
 // YaraRulesSync is the YARA rules content synced from the backend.
