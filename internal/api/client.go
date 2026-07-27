@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -510,8 +511,10 @@ type MalwareFrameworkIssue struct {
 }
 
 // SubmitMalwareScanResults sends malware scan results to the server.
+// Uses a longer timeout (2 min) because large scans (45+ web roots) produce
+// payloads that take longer to marshal, upload, and process.
 func (c *Client) SubmitMalwareScanResults(req MalwareScanResultRequest) error {
-	return c.post("/api/v1/agent/malware-scan-results", c.token, req, nil)
+	return c.postLong("/api/v1/agent/malware-scan-results", c.token, req, nil)
 }
 
 // HashLookupRequest is a batch of SHA256 hashes to check against known malware.
@@ -562,6 +565,48 @@ func (c *Client) post(path, token string, body, out any) error {
 	}
 
 	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(b))
+	}
+
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+
+	return nil
+}
+
+// postLong is like post but uses a 2-minute timeout for large payloads.
+func (c *Client) postLong(path, token string, body, out any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	// Use a fresh client without the 15s default timeout
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		return err
 	}
