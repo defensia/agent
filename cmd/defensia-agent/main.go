@@ -1632,7 +1632,15 @@ func loadThreatFeedCache() {
 }
 
 // runMalwareScan detects web roots, runs malware signature scanning and framework checks.
+var malwareScanMu sync.Mutex
+
 func runMalwareScan(client *api.Client, intensityStr string) {
+	if !malwareScanMu.TryLock() {
+		log.Printf("[malware] scan already in progress — skipping")
+		return
+	}
+	defer malwareScanMu.Unlock()
+
 	log.Printf("[malware] starting scan (intensity=%s)", intensityStr)
 
 	_ = client.ReportEvents([]api.EventRequest{{
