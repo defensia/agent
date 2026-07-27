@@ -1634,6 +1634,8 @@ func loadThreatFeedCache() {
 // runMalwareScan detects web roots, runs malware signature scanning and framework checks.
 var malwareScanMu sync.Mutex
 
+const malwareScanTimeout = 30 * time.Minute
+
 func runMalwareScan(client *api.Client, intensityStr string) {
 	if !malwareScanMu.TryLock() {
 		log.Printf("[malware] scan already in progress — skipping")
@@ -1641,7 +1643,8 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	}
 	defer malwareScanMu.Unlock()
 
-	log.Printf("[malware] starting scan (intensity=%s)", intensityStr)
+	log.Printf("[malware] starting scan (intensity=%s, timeout=%s)", intensityStr, malwareScanTimeout)
+	scanStart := time.Now()
 
 	_ = client.ReportEvents([]api.EventRequest{{
 		Type:       "malware_scan_started",
@@ -1716,6 +1719,25 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		},
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 	}})
+
+	// Timeout watchdog — cancel scan if it takes too long
+	scanDone := make(chan struct{})
+	go func() {
+		select {
+		case <-scanDone:
+			return
+		case <-time.After(malwareScanTimeout):
+			log.Printf("[malware] scan timed out after %s — cancelling", malwareScanTimeout)
+			scanner.Stop()
+			_ = client.ReportEvents([]api.EventRequest{{
+				Type:     "malware_scan_progress",
+				Severity: "warning",
+				Details:  map[string]string{"stage": "timeout", "elapsed": fmt.Sprintf("%.0f", time.Since(scanStart).Seconds())},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}
+	}()
+	defer close(scanDone)
 
 	scanner.OnProgress = func(p malware.ScanProgress) {
 		pct := 0
