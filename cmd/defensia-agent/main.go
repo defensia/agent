@@ -1717,6 +1717,26 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 	}})
 
+	scanner.OnProgress = func(p malware.ScanProgress) {
+		pct := 0
+		if p.RootsTotal > 0 {
+			pct = p.RootsCompleted * 100 / p.RootsTotal
+		}
+		_ = client.ReportEvents([]api.EventRequest{{
+			Type:     "malware_scan_progress",
+			Severity: "info",
+			Details: map[string]string{
+				"stage":           "scanning_files",
+				"roots_completed": fmt.Sprintf("%d", p.RootsCompleted),
+				"roots":           fmt.Sprintf("%d", p.RootsTotal),
+				"current_root":    p.CurrentRoot,
+				"files_scanned":   fmt.Sprintf("%d", p.FilesScanned),
+				"percent":         fmt.Sprintf("%d", pct),
+			},
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}
+
 	result, err := scanner.ScanWebRoots(webRoots, intensity)
 	if err != nil {
 		log.Printf("[malware] scan error: %v", err)
