@@ -1843,7 +1843,9 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		fwFindings = append(fwFindings, malware.CheckFramework(root)...)
 	}
 	secScore := malware.CalculateScore(result.Findings, fwFindings)
-	log.Printf("[malware] security score: %d/100 (grade %s)", secScore.Score, secScore.Grade)
+	log.Printf("[malware] security score: %d/100 (grade %s) — %d malware findings, %d framework findings, %d files scanned",
+		secScore.Score, secScore.Grade, len(apiFindings), len(frameworkFindings), result.FilesScanned)
+	log.Printf("[malware] submitting results to server...")
 
 	if err := client.SubmitMalwareScanResults(api.MalwareScanResultRequest{
 		WebRoots:          apiWebRoots,

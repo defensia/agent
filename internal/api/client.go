@@ -582,14 +582,16 @@ func (c *Client) post(path, token string, body, out any) error {
 	return nil
 }
 
-// postLong is like post but uses a 2-minute timeout for large payloads.
+// postLong is like post but uses a 5-minute timeout for large payloads.
 func (c *Client) postLong(path, token string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	log.Printf("[api] postLong %s: payload size %d bytes (%.1f MB)", path, len(data), float64(len(data))/1024/1024)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
