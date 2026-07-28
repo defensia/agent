@@ -111,11 +111,15 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		return
 	}
 
-	// Guard against update loops on non-persistent filesystems (Docker, read-only rootfs).
-	// If we already successfully updated to this version but our binary still reports
-	// the old version, the filesystem can't persist changes — don't keep trying.
+	// If the marker matches the CURRENT version, the previous update succeeded — clear it.
 	if data, err := os.ReadFile(updateAttemptMarker); err == nil {
-		if strings.TrimSpace(string(data)) == latestVersion {
+		markerVersion := strings.TrimSpace(string(data))
+		if markerVersion == currentVersion {
+			os.Remove(updateAttemptMarker)
+			log.Printf("[updater] cleared update marker (successfully running %s)", currentVersion)
+		} else if markerVersion == latestVersion {
+			// Guard against update loops on non-persistent filesystems (Docker, read-only rootfs).
+			// We already attempted this version but still report the old one — filesystem can't persist.
 			return
 		}
 	}
