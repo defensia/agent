@@ -1839,6 +1839,47 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 	return e, e.ip != "" && e.uri != ""
 }
 
+// parseTraefikJSONLog parses a Traefik JSON access log line.
+// Traefik JSON fields: ClientHost, method, path, code, User-Agent, Referer
+func parseTraefikJSONLog(line string) (accessLogEntry, bool) {
+	var e accessLogEntry
+	var raw struct {
+		ClientHost string      `json:"ClientHost"`
+		Method     string      `json:"method"`
+		Path       string      `json:"path"`
+		Code       json.Number `json:"code"`
+		UserAgent  string      `json:"User-Agent"`
+		Referer    string      `json:"Referer"`
+		// Alternative field names (Traefik v3)
+		RequestMethod string `json:"RequestMethod"`
+		RequestPath   string `json:"RequestPath"`
+		OriginStatus  int    `json:"OriginStatus"`
+	}
+
+	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+		return e, false
+	}
+
+	e.ip = raw.ClientHost
+	e.method = raw.Method
+	if e.method == "" {
+		e.method = raw.RequestMethod
+	}
+	e.uri = raw.Path
+	if e.uri == "" {
+		e.uri = raw.RequestPath
+	}
+	if code, err := raw.Code.Int64(); err == nil {
+		e.status = int(code)
+	} else if raw.OriginStatus > 0 {
+		e.status = raw.OriginStatus
+	}
+	e.userAgent = raw.UserAgent
+	e.referer = raw.Referer
+
+	return e, e.ip != "" && e.uri != ""
+}
+
 // ── Detection rules ─────────────────────────────────────────────────
 
 // Instant-ban patterns: a single match = immediate ban (zero false positives).
@@ -1955,7 +1996,20 @@ func (w *WebWatcher) enrichDetails(logPath, rawLine string, details map[string]s
 }
 
 func (w *WebWatcher) processLine(logPath, line string) {
+	// Try nginx combined format first, fall back to Traefik JSON
 	entry, ok := parseAccessLog(line)
+	if !ok {
+		// Strip containerd/CRI-O prefix before JSON detection
+		jsonLine := line
+		if len(jsonLine) > 36 && jsonLine[4] == '-' && jsonLine[10] == 'T' {
+			if idx := strings.Index(jsonLine, " stdout F "); idx > 0 && idx < 40 {
+				jsonLine = jsonLine[idx+10:]
+			}
+		}
+		if len(jsonLine) > 0 && jsonLine[0] == '{' {
+			entry, ok = parseTraefikJSONLog(jsonLine)
+		}
+	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
