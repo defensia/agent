@@ -12,7 +12,7 @@ clusterName: ""
 image:
   repository: ghcr.io/defensia/agent
   tag: ""  # Defaults to appVersion
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # Resource limits for the agent container
 resources:

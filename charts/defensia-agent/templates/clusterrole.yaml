@@ -33,3 +33,7 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["list"]
+  # Self-update: patch own DaemonSet to trigger rolling update with new image
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "patch"]

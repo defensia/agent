@@ -111,6 +111,14 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		return
 	}
 
+	// In Kubernetes, use rolling update instead of binary replacement.
+	// The binary can't be persisted inside a container, so we patch the
+	// DaemonSet annotation to trigger a pod restart with the latest image.
+	if IsKubernetes() {
+		K8sRollingUpdate(currentVersion, latestVersion, reportEvent)
+		return
+	}
+
 	// Clear the update marker if the previous update succeeded (current == marker).
 	// If marker matches target but we're still on old version, the previous attempt
 	// failed — clear the marker and retry (the download source may have been fixed).
