@@ -1700,7 +1700,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		scanner.AllowList = malwareAllowList
 	}
 
-	scanStart := time.Now()
+	scanStart = time.Now()
 	var scanID int64
 	var totalFiles, totalSkipped int64
 	var allFindings []malware.Finding
