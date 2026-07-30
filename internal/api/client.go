@@ -510,11 +510,44 @@ type MalwareFrameworkIssue struct {
 	Framework   string `json:"framework"`
 }
 
-// SubmitMalwareScanResults sends malware scan results to the server.
-// Uses a longer timeout (2 min) because large scans (45+ web roots) produce
-// payloads that take longer to marshal, upload, and process.
+// SubmitMalwareScanResults sends malware scan results to the server (legacy — full payload).
 func (c *Client) SubmitMalwareScanResults(req MalwareScanResultRequest) error {
 	return c.postLong("/api/v1/agent/malware-scan-results", c.token, req, nil)
+}
+
+// MalwareScanChunkRequest sends results for a single web root (incremental).
+type MalwareScanChunkRequest struct {
+	WebRoot           MalwareScanWebRoot     `json:"web_root"`
+	Findings          []MalwareScanFinding   `json:"findings"`
+	FrameworkFindings []MalwareFrameworkIssue `json:"framework_findings"`
+	FilesScanned      int64                  `json:"files_scanned"`
+	FilesSkipped      int64                  `json:"files_skipped"`
+}
+
+type MalwareScanChunkResponse struct {
+	ScanID        int64 `json:"scan_id"`
+	RootsReceived int   `json:"roots_received"`
+}
+
+// SubmitMalwareScanChunk sends results for one root directory.
+func (c *Client) SubmitMalwareScanChunk(req MalwareScanChunkRequest) (*MalwareScanChunkResponse, error) {
+	var resp MalwareScanChunkResponse
+	if err := c.post("/api/v1/agent/malware-scan-results/chunk", c.token, req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// MalwareScanCompleteRequest finalizes an incremental scan.
+type MalwareScanCompleteRequest struct {
+	ScanID          int64                `json:"scan_id"`
+	DurationSeconds float64             `json:"duration_seconds"`
+	SecurityScore   *MalwareSecurityScore `json:"security_score,omitempty"`
+}
+
+// CompleteMalwareScan marks an incremental scan as completed.
+func (c *Client) CompleteMalwareScan(req MalwareScanCompleteRequest) error {
+	return c.post("/api/v1/agent/malware-scan-results/complete", c.token, req, nil)
 }
 
 // HashLookupRequest is a batch of SHA256 hashes to check against known malware.

@@ -1692,16 +1692,6 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		return
 	}
 
-	apiWebRoots := make([]api.MalwareScanWebRoot, len(webRoots))
-	for i, root := range webRoots {
-		apiWebRoots[i] = api.MalwareScanWebRoot{
-			Path:             root.Path,
-			Domain:           root.Domain,
-			FrameworkName:    root.Framework.Name,
-			FrameworkVersion: root.Framework.Version,
-		}
-	}
-
 	scanner := malwareScanner
 	if scanner == nil {
 		scanner = malware.New()
@@ -1710,198 +1700,125 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		scanner.AllowList = malwareAllowList
 	}
 
-	_ = client.ReportEvents([]api.EventRequest{{
-		Type:     "malware_scan_progress",
-		Severity: "info",
-		Details: map[string]string{
-			"stage": "scanning_files",
-			"roots": fmt.Sprintf("%d", len(webRoots)),
-		},
-		OccurredAt: time.Now().UTC().Format(time.RFC3339),
-	}})
+	scanStart := time.Now()
+	var scanID int64
+	var totalFiles, totalSkipped int64
+	var allFindings []malware.Finding
+	var allFwFindings []malware.FrameworkFinding
 
-	// Timeout watchdog — cancel scan if it takes too long
-	scanDone := make(chan struct{})
-	go func() {
-		select {
-		case <-scanDone:
-			return
-		case <-time.After(malwareScanTimeout):
-			log.Printf("[malware] scan timed out after %s — cancelling", malwareScanTimeout)
-			scanner.Stop()
-			_ = client.ReportEvents([]api.EventRequest{{
-				Type:     "malware_scan_progress",
-				Severity: "warning",
-				Details:  map[string]string{"stage": "timeout", "elapsed": fmt.Sprintf("%.0f", time.Since(scanStart).Seconds())},
-				OccurredAt: time.Now().UTC().Format(time.RFC3339),
-			}})
-		}
-	}()
-	defer close(scanDone)
+	// Scan each root individually and submit results incrementally
+	for i, root := range webRoots {
+		log.Printf("[malware] scanning root %d/%d: %s", i+1, len(webRoots), root.Path)
 
-	scanner.OnProgress = func(p malware.ScanProgress) {
-		pct := 0
-		if p.RootsTotal > 0 {
-			pct = p.RootsCompleted * 100 / p.RootsTotal
+		rootResult, err := scanner.ScanWebRoots([]malware.WebRoot{root}, intensity)
+		if err != nil {
+			log.Printf("[malware] error scanning %s: %v", root.Path, err)
+			continue
 		}
+
+		if yaraScanner != nil && yaraScanner.IsAvailable() {
+			for _, f := range yaraScanner.ScanDirectory(root.Path, root.Domain) {
+				rootResult.Findings = append(rootResult.Findings, f)
+			}
+		}
+
+		for _, f := range malware.CheckWordPressDatabase(root) {
+			rootResult.Findings = append(rootResult.Findings, f)
+		}
+
+		rootFwFindings := malware.CheckFramework(root)
+		allFwFindings = append(allFwFindings, rootFwFindings...)
+
+		var chunkFindings []api.MalwareScanFinding
+		for _, f := range rootResult.Findings {
+			if f.SignatureID == "ROOTKIT_EXEC_IN_TMP" {
+				continue
+			}
+			chunkFindings = append(chunkFindings, api.MalwareScanFinding{
+				FilePath: f.FilePath, SignatureID: f.SignatureID, Name: f.Name,
+				Severity: f.Severity, Type: f.Type, MatchLine: f.MatchLine,
+				MatchText: f.MatchText, Domain: f.Domain, Framework: f.Framework,
+			})
+		}
+		allFindings = append(allFindings, rootResult.Findings...)
+
+		var chunkFwFindings []api.MalwareFrameworkIssue
+		for _, ff := range rootFwFindings {
+			chunkFwFindings = append(chunkFwFindings, api.MalwareFrameworkIssue{
+				CheckID: ff.CheckID, Title: ff.Title, Severity: ff.Severity,
+				Description: ff.Description, FilePath: ff.FilePath, Domain: ff.Domain, Framework: ff.Framework,
+			})
+		}
+
+		resp, err := client.SubmitMalwareScanChunk(api.MalwareScanChunkRequest{
+			WebRoot: api.MalwareScanWebRoot{
+				Path: root.Path, Domain: root.Domain,
+				FrameworkName: root.Framework.Name, FrameworkVersion: root.Framework.Version,
+			},
+			Findings:          chunkFindings,
+			FrameworkFindings: chunkFwFindings,
+			FilesScanned:      rootResult.FilesScanned,
+			FilesSkipped:      rootResult.FilesSkipped,
+		})
+		if err != nil {
+			log.Printf("[malware] failed to submit chunk for %s: %v", root.Path, err)
+		} else {
+			scanID = resp.ScanID
+			log.Printf("[malware] chunk %d/%d submitted (scan_id=%d, roots=%d)", i+1, len(webRoots), scanID, resp.RootsReceived)
+		}
+
+		totalFiles += rootResult.FilesScanned
+		totalSkipped += rootResult.FilesSkipped
+
+		pct := (i + 1) * 100 / len(webRoots)
 		_ = client.ReportEvents([]api.EventRequest{{
-			Type:     "malware_scan_progress",
-			Severity: "info",
+			Type: "malware_scan_progress", Severity: "info",
 			Details: map[string]string{
-				"stage":           "scanning_files",
-				"roots_completed": fmt.Sprintf("%d", p.RootsCompleted),
-				"roots":           fmt.Sprintf("%d", p.RootsTotal),
-				"current_root":    p.CurrentRoot,
-				"files_scanned":   fmt.Sprintf("%d", p.FilesScanned),
-				"percent":         fmt.Sprintf("%d", pct),
+				"stage": "scanning_files", "percent": fmt.Sprintf("%d", pct),
+				"current_root": root.Path, "files_scanned": fmt.Sprintf("%d", totalFiles),
 			},
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		}})
 	}
 
-	result, err := scanner.ScanWebRoots(webRoots, intensity)
-	if err != nil {
-		log.Printf("[malware] scan error: %v", err)
-		return
-	}
-
-	// YARA scan (if yara CLI available on the server)
-	if yaraScanner != nil && yaraScanner.IsAvailable() {
-		_ = client.ReportEvents([]api.EventRequest{{
-			Type:     "malware_scan_progress",
-			Severity: "info",
-			Details:  map[string]string{"stage": "yara_scanning"},
-			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		}})
-		for _, root := range webRoots {
-			yaraFindings := yaraScanner.ScanDirectory(root.Path, root.Domain)
-			for _, f := range yaraFindings {
-				result.Findings = append(result.Findings, f)
-			}
-		}
-	}
-
-	// NOTE: Credential checks (CRED_*) moved to hardening scanner (scanner.Run()).
-	// They no longer appear in the malware tab.
-
-	// WordPress database scanning
-	_ = client.ReportEvents([]api.EventRequest{{
-		Type:     "malware_scan_progress",
-		Severity: "info",
-		Details:  map[string]string{"stage": "checking_database"},
-		OccurredAt: time.Now().UTC().Format(time.RFC3339),
-	}})
-	for _, root := range webRoots {
-		dbFindings := malware.CheckWordPressDatabase(root)
-		for _, f := range dbFindings {
-			result.Findings = append(result.Findings, f)
-		}
-	}
-
-	// Malicious process detection (crypto miners, reverse shells)
-	_ = client.ReportEvents([]api.EventRequest{{
-		Type:     "malware_scan_progress",
-		Severity: "info",
-		Details:  map[string]string{"stage": "checking_processes"},
-		OccurredAt: time.Now().UTC().Format(time.RFC3339),
-	}})
-	procFindings := malware.CheckMaliciousProcesses()
-	for _, f := range procFindings {
-		result.Findings = append(result.Findings, f)
-	}
-
-	// System integrity + rootkit checks
-	_ = client.ReportEvents([]api.EventRequest{{
-		Type:     "malware_scan_progress",
-		Severity: "info",
-		Details:  map[string]string{"stage": "checking_integrity"},
-		OccurredAt: time.Now().UTC().Format(time.RFC3339),
-	}})
+	// System-wide checks
+	allFindings = append(allFindings, malware.CheckMaliciousProcesses()...)
 	sysResult := malware.CheckSystemIntegrity()
-	for _, f := range sysResult.ModifiedBinaries {
-		result.Findings = append(result.Findings, f)
-	}
-	for _, f := range sysResult.RootkitIndicators {
-		result.Findings = append(result.Findings, f)
-	}
+	allFindings = append(allFindings, sysResult.ModifiedBinaries...)
+	allFindings = append(allFindings, sysResult.RootkitIndicators...)
 
-	var frameworkFindings []api.MalwareFrameworkIssue
-	for _, root := range webRoots {
-		for _, ff := range malware.CheckFramework(root) {
-			frameworkFindings = append(frameworkFindings, api.MalwareFrameworkIssue{
-				CheckID:     ff.CheckID,
-				Title:       ff.Title,
-				Severity:    ff.Severity,
-				Description: ff.Description,
-				FilePath:    ff.FilePath,
-				Domain:      ff.Domain,
-				Framework:   ff.Framework,
-			})
+	secScore := malware.CalculateScore(allFindings, allFwFindings)
+	log.Printf("[malware] security score: %d/100 (grade %s)", secScore.Score, secScore.Grade)
+
+	duration := time.Since(scanStart)
+	if scanID > 0 {
+		if err := client.CompleteMalwareScan(api.MalwareScanCompleteRequest{
+			ScanID: scanID, DurationSeconds: duration.Seconds(),
+			SecurityScore: &api.MalwareSecurityScore{
+				Score: secScore.Score, Grade: secScore.Grade,
+				MalwareDeductions: secScore.MalwareDeductions, FrameworkDeductions: secScore.FrameworkDeductions,
+				CredentialDeductions: secScore.CredentialDeductions, IntegrityDeductions: secScore.IntegrityDeductions,
+			},
+		}); err != nil {
+			log.Printf("[malware] failed to complete scan: %v", err)
 		}
 	}
 
-	// Filter out ROOTKIT_EXEC_IN_TMP (not real malware, handled by hardening).
-	var apiFindings []api.MalwareScanFinding
-	for _, f := range result.Findings {
-		if f.SignatureID == "ROOTKIT_EXEC_IN_TMP" {
-			continue
-		}
-		apiFindings = append(apiFindings, api.MalwareScanFinding{
-			FilePath:    f.FilePath,
-			SignatureID: f.SignatureID,
-			Name:        f.Name,
-			Severity:    f.Severity,
-			Type:        f.Type,
-			MatchLine:   f.MatchLine,
-			MatchText:   f.MatchText,
-			Domain:      f.Domain,
-			Framework:   f.Framework,
-		})
+	malwareCount := 0
+	for _, f := range allFindings {
+		if f.SignatureID != "ROOTKIT_EXEC_IN_TMP" { malwareCount++ }
 	}
-
-	// Calculate security posture score
-	var fwFindings []malware.FrameworkFinding
-	for _, root := range webRoots {
-		fwFindings = append(fwFindings, malware.CheckFramework(root)...)
-	}
-	secScore := malware.CalculateScore(result.Findings, fwFindings)
-	log.Printf("[malware] security score: %d/100 (grade %s) — %d malware findings, %d framework findings, %d files scanned",
-		secScore.Score, secScore.Grade, len(apiFindings), len(frameworkFindings), result.FilesScanned)
-	log.Printf("[malware] submitting results to server...")
-
-	if err := client.SubmitMalwareScanResults(api.MalwareScanResultRequest{
-		WebRoots:          apiWebRoots,
-		Findings:          apiFindings,
-		FrameworkFindings: frameworkFindings,
-		FilesScanned:      result.FilesScanned,
-		FilesSkipped:      result.FilesSkipped,
-		DurationSeconds:   result.Duration.Seconds(),
-		SecurityScore: &api.MalwareSecurityScore{
-			Score:                secScore.Score,
-			Grade:                secScore.Grade,
-			MalwareDeductions:    secScore.MalwareDeductions,
-			FrameworkDeductions:  secScore.FrameworkDeductions,
-			CredentialDeductions: secScore.CredentialDeductions,
-			IntegrityDeductions:  secScore.IntegrityDeductions,
-		},
-	}); err != nil {
-		log.Printf("[malware] failed to submit results: %v", err)
-		return
-	}
-
-	log.Printf("[malware] scan complete — %d files scanned, %d malware findings, %d credential/hardening, %d framework issues in %s",
-		result.FilesScanned, len(apiFindings), len(result.Findings)-len(apiFindings), len(frameworkFindings), result.Duration.Round(time.Second))
+	log.Printf("[malware] scan complete — %d files scanned, %d malware findings, %d framework issues in %s",
+		totalFiles, malwareCount, len(allFwFindings), duration.Round(time.Second))
 
 	_ = client.ReportEvents([]api.EventRequest{{
-		Type:     "malware_scan_completed",
-		Severity: "info",
+		Type: "malware_scan_completed", Severity: "info",
 		Details: map[string]string{
-			"files_scanned":      fmt.Sprintf("%d", result.FilesScanned),
-			"malware_findings":   fmt.Sprintf("%d", len(apiFindings)),
-			"framework_findings": fmt.Sprintf("%d", len(frameworkFindings)),
-			"web_roots":          fmt.Sprintf("%d", len(webRoots)),
-			"duration_seconds":   fmt.Sprintf("%.1f", result.Duration.Seconds()),
+			"files_scanned": fmt.Sprintf("%d", totalFiles), "malware_findings": fmt.Sprintf("%d", malwareCount),
+			"framework_findings": fmt.Sprintf("%d", len(allFwFindings)), "web_roots": fmt.Sprintf("%d", len(webRoots)),
+			"duration_seconds": fmt.Sprintf("%.1f", duration.Seconds()),
 		},
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 	}})
 }
+
