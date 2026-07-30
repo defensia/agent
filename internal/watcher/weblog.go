@@ -221,7 +221,12 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 9. Well-known static paths (always checked — add() deduplicates)
+	// 9. Detect uvicorn/gunicorn processes and find their log files
+	for _, info := range detectPythonASGILogInfo() {
+		add(info)
+	}
+
+	// 10. Well-known static paths (always checked — add() deduplicates)
 	knownPaths := []string{
 		"/var/log/nginx/access.log",
 		"/var/log/apache2/access.log",
@@ -236,10 +241,24 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		"/var/log/lighttpd/access.log",
 		"/var/log/traefik/access.log",
 		"/var/log/gunicorn/access.log",
+		"/var/log/uvicorn/access.log",
+		"/var/log/uvicorn-access.log",
 	}
 	for _, p := range knownPaths {
 		if _, err := os.Stat(p); err == nil {
 			add(LogPathInfo{Path: p})
+		}
+	}
+
+	// 11. Glob: catch any access log under /var/log/*/ (covers uvicorn, gunicorn, any custom server)
+	for _, pattern := range []string{
+		"/var/log/*/access.log",
+		"/var/log/*/access_log",
+		"/var/log/*-access.log",
+	} {
+		matches, _ := filepath.Glob(pattern)
+		for _, m := range matches {
+			add(LogPathInfo{Path: m})
 		}
 	}
 
@@ -942,6 +961,42 @@ func parseLiteSpeedConfig(content string) []lsVhost {
 		result = append(result, entry)
 	}
 	return result
+}
+
+// ── Python ASGI/WSGI log detection ─────────────────────────────────
+
+// detectPythonASGILogInfo finds access logs for uvicorn, gunicorn, and similar
+// Python web servers by checking process command lines for --access-logfile or
+// --log-file arguments, and scanning common log locations.
+func detectPythonASGILogInfo() []LogPathInfo {
+	var results []LogPathInfo
+
+	// Check running processes for uvicorn/gunicorn with log file arguments
+	out, err := exec.Command("sh", "-c", "ps aux 2>/dev/null | grep -E 'uvicorn|gunicorn|daphne|hypercorn' | grep -v grep").CombinedOutput()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// Look for --access-logfile (gunicorn) or --log-file (uvicorn)
+			for _, flag := range []string{"--access-logfile", "--log-file", "--access-log"} {
+				if idx := strings.Index(line, flag); idx >= 0 {
+					rest := line[idx+len(flag):]
+					rest = strings.TrimLeft(rest, "= ")
+					fields := strings.Fields(rest)
+					if len(fields) > 0 && fields[0] != "-" && fields[0] != "" {
+						if _, err := os.Stat(fields[0]); err == nil {
+							results = append(results, LogPathInfo{Path: fields[0]})
+							log.Printf("[webwatcher] found Python ASGI log: %s", fields[0])
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return results
 }
 
 // ── Traefik log detection ───────────────────────────────────────────
@@ -1880,6 +1935,83 @@ func parseTraefikJSONLog(line string) (accessLogEntry, bool) {
 	return e, e.ip != "" && e.uri != ""
 }
 
+// parseUvicornLog parses uvicorn/gunicorn access log lines.
+// Uvicorn format: INFO     IP - "METHOD URI PROTO" STATUS
+// Also handles systemd journal prefix: "Jul 30 12:00:00 host uvicorn[123]: ..."
+func parseUvicornLog(line string) (accessLogEntry, bool) {
+	var e accessLogEntry
+
+	// Strip systemd journal prefix if present
+	if idx := strings.Index(line, "]: "); idx > 0 && idx < 80 {
+		line = line[idx+3:]
+	}
+
+	// Uvicorn format starts with level (INFO, WARNING, etc.)
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) < 10 {
+		return e, false
+	}
+
+	// Check if line starts with a log level keyword
+	upperStart := strings.ToUpper(trimmed[:8])
+	hasLevel := strings.HasPrefix(upperStart, "INFO") ||
+		strings.HasPrefix(upperStart, "WARNING") ||
+		strings.HasPrefix(upperStart, "ERROR") ||
+		strings.HasPrefix(upperStart, "DEBUG")
+
+	if !hasLevel {
+		return e, false
+	}
+
+	// Skip past the level prefix and whitespace
+	rest := trimmed
+	spIdx := strings.IndexByte(rest, ' ')
+	if spIdx < 0 {
+		return e, false
+	}
+	rest = strings.TrimSpace(rest[spIdx:])
+
+	// Now rest should start with IP: "IP - "REQUEST" STATUS"
+	spIdx = strings.IndexByte(rest, ' ')
+	if spIdx < 0 {
+		return e, false
+	}
+	e.ip = rest[:spIdx]
+
+	if !strings.ContainsRune(e.ip, '.') && !strings.ContainsRune(e.ip, ':') {
+		return e, false
+	}
+
+	// Find request line between quotes
+	q1 := strings.IndexByte(rest, '"')
+	if q1 < 0 {
+		return e, false
+	}
+	q2 := strings.IndexByte(rest[q1+1:], '"')
+	if q2 < 0 {
+		return e, false
+	}
+	reqLine := rest[q1+1 : q1+1+q2]
+
+	parts := strings.SplitN(reqLine, " ", 3)
+	if len(parts) < 2 {
+		return e, false
+	}
+	e.method = parts[0]
+	e.uri = parts[1]
+
+	// Status code after closing quote
+	afterReq := rest[q1+1+q2+2:]
+	for _, f := range strings.Fields(afterReq) {
+		if len(f) == 3 && f[0] >= '1' && f[0] <= '5' {
+			e.status, _ = strconv.Atoi(f)
+			break
+		}
+	}
+
+	return e, e.ip != "" && e.uri != ""
+}
+
 // ── Detection rules ─────────────────────────────────────────────────
 
 // Instant-ban patterns: a single match = immediate ban (zero false positives).
@@ -1998,6 +2130,9 @@ func (w *WebWatcher) enrichDetails(logPath, rawLine string, details map[string]s
 func (w *WebWatcher) processLine(logPath, line string) {
 	// Try nginx combined format first, fall back to Traefik JSON
 	entry, ok := parseAccessLog(line)
+	if !ok {
+		entry, ok = parseUvicornLog(line)
+	}
 	if !ok {
 		// Strip containerd/CRI-O prefix before JSON detection
 		jsonLine := line
