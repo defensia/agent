@@ -23,6 +23,10 @@ func IsKubernetes() bool {
 // It adds/updates an annotation that forces K8s to recreate all pods with the
 // latest image (imagePullPolicy: Always ensures the new version is pulled).
 func K8sRollingUpdate(currentVersion, latestVersion string, reportEvent EventReporter) {
+	if os.Getenv("DISABLE_K8S_AUTO_UPDATE") == "true" {
+		return
+	}
+
 	namespace := os.Getenv("POD_NAMESPACE")
 	daemonsetName := os.Getenv("DAEMONSET_NAME")
 

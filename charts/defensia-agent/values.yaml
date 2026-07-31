@@ -38,6 +38,20 @@ extraEnv: []
 #  - name: GEOIP_DB_PATH
 #    value: /etc/defensia/GeoLite2-Country.mmdb
 
+# Auto-update: agent patches its own DaemonSet to trigger rolling updates.
+# Disable if using GitOps (ArgoCD, Flux) to manage updates externally.
+autoUpdate:
+  enabled: true
+
+# Ingress-level firewall (nginx-ingress only).
+# Patches the ingress controller's ConfigMap with deny rules.
+# Disable if not using nginx-ingress (e.g. Traefik, Istio).
+# IP blocking still works at the iptables/host level regardless.
+ingressFirewall:
+  enabled: false
+  namespace: "ingress-nginx"
+  configMapName: "ingress-nginx-controller"
+
 # Service account
 serviceAccount:
   create: true

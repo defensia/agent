@@ -61,6 +61,10 @@ spec:
             - name: CLUSTER_NAME
               value: {{ .Values.clusterName | quote }}
             {{- end }}
+            {{- if not .Values.autoUpdate.enabled }}
+            - name: DISABLE_K8S_AUTO_UPDATE
+              value: "true"
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

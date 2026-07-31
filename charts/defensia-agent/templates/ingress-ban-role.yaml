@@ -1,25 +1,26 @@
 {{/*
 Role for patching the ingress controller's ConfigMap with deny rules.
-Only grants access to the specific ConfigMap used by nginx-ingress.
+Only created when ingressFirewall is enabled (nginx-ingress setups).
 */}}
+{{- if .Values.ingressFirewall.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "defensia-agent.fullname" . }}-ban-writer
-  namespace: {{ .Values.ingressNamespace | default "ingress-nginx" }}
+  namespace: {{ .Values.ingressFirewall.namespace | default "ingress-nginx" }}
   labels:
     {{- include "defensia-agent.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "update"]
-    resourceNames: ["ingress-nginx-controller"]
+    resourceNames: [{{ .Values.ingressFirewall.configMapName | default "ingress-nginx-controller" | quote }}]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "defensia-agent.fullname" . }}-ban-writer
-  namespace: {{ .Values.ingressNamespace | default "ingress-nginx" }}
+  namespace: {{ .Values.ingressFirewall.namespace | default "ingress-nginx" }}
   labels:
     {{- include "defensia-agent.labels" . | nindent 4 }}
 roleRef:
@@ -30,3 +31,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "defensia-agent.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- end }}
