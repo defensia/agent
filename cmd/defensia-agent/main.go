@@ -1034,30 +1034,6 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 
-	// Process quarantine requests from dashboard
-	if len(sync.QuarantinePending) > 0 {
-		for _, filePath := range sync.QuarantinePending {
-			log.Printf("[quarantine] processing request: %s", filePath)
-			if _, err := malware.QuarantineFile(filePath); err != nil {
-				log.Printf("[quarantine] failed to quarantine %s: %v", filePath, err)
-				_ = client.ReportEvents([]api.EventRequest{{
-					Type:     "quarantine_failed",
-					Severity: "warning",
-					Details:  map[string]string{"file": filePath, "error": err.Error()},
-					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
-			} else {
-				log.Printf("[quarantine] moved %s to quarantine", filePath)
-				_ = client.ReportEvents([]api.EventRequest{{
-					Type:     "quarantine_completed",
-					Severity: "info",
-					Details:  map[string]string{"file": filePath},
-					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
-			}
-		}
-	}
-
 	// Apply malware scan schedule config + realtime watcher
 	if sync.Config.MalwareScanConfig != nil {
 		cfg := sync.Config.MalwareScanConfig
