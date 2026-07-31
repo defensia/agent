@@ -9,10 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -33,24 +31,6 @@ import (
 )
 
 var version = "0.9.92"
-
-var agentStartTime = time.Now()
-
-// collectRuntimeStats snapshots the agent's own resource usage for heartbeat
-// reporting so leaks can be detected remotely.
-func collectRuntimeStats(c *api.Client) *api.RuntimeStats {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	depth, dropped := c.EventQueueStats()
-	return &api.RuntimeStats{
-		GoroutineCount: runtime.NumGoroutine(),
-		HeapAllocBytes: m.HeapAlloc,
-		HeapSysBytes:   m.HeapSys,
-		UptimeSeconds:  int64(time.Since(agentStartTime).Seconds()),
-		EventQueueLen:  depth,
-		EventDropped:   dropped,
-	}
-}
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScheduler    *malware.Scheduler
@@ -118,18 +98,6 @@ func runRegister(serverURL, name, installToken string) {
 		Version:      version,
 	})
 	if err != nil {
-		msg := err.Error()
-		// Permanent auth errors: a bad/expired install_token will never succeed
-		// without operator action. Print a clear message, sleep so K8s/systemd
-		// restart backoff doesn't spam the API, then exit 64 (EX_USAGE).
-		if strings.Contains(msg, "401") || strings.Contains(msg, "token_not_found") || strings.Contains(msg, "token_invalid") {
-			log.Printf("Registration failed: install token rejected by server.")
-			log.Printf("Cause: %v", err)
-			log.Printf("Action: generate a new install token at %s/account/agents and reinstall.", serverURL)
-			log.Printf("Sleeping 5 minutes before exit to avoid restart-loop hammering the API.")
-			time.Sleep(5 * time.Minute)
-			os.Exit(64)
-		}
 		log.Fatalf("Registration failed: %v", err)
 	}
 
@@ -160,7 +128,6 @@ func runAgent() {
 
 	apiClient := api.New(cfg.ServerURL, cfg.AgentToken)
 	apiClient.SetVersion(version)
-	apiClient.StartEventConsumer()
 
 	// Callback for the updater to report update outcomes to the server
 	reportUpdateEvent := func(eventType, severity string, details map[string]string) {
@@ -257,13 +224,13 @@ func runAgent() {
 	// Set event callback for monitor mode (report detections without banning)
 	w.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
 		log.Printf("[watcher] detected %s from %s (monitor mode)", eventType, ip)
-		apiClient.QueueEvent(api.EventRequest{
+		apiClient.ReportEvents([]api.EventRequest{{
 			Type:       eventType,
 			Severity:   severity,
 			SourceIP:   ip,
 			Details:    details,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		})
+		}})
 	})
 
 	// Set geoblocking check on watcher
@@ -329,13 +296,13 @@ func runAgent() {
 				}
 			},
 			func(ip, eventType, severity string, details map[string]string) {
-				apiClient.QueueEvent(api.EventRequest{
+				apiClient.ReportEvents([]api.EventRequest{{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				})
+				}})
 			},
 		)
 		webW.SetCheckIP(func(ip string) string {
@@ -422,13 +389,13 @@ func runAgent() {
 		})
 		if mailW != nil {
 			mailW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.QueueEvent(api.EventRequest{
+				apiClient.ReportEvents([]api.EventRequest{{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				})
+				}})
 			})
 			mailW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -461,13 +428,13 @@ func runAgent() {
 		})
 		if dbW != nil {
 			dbW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.QueueEvent(api.EventRequest{
+				apiClient.ReportEvents([]api.EventRequest{{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				})
+				}})
 			})
 			dbW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -500,13 +467,13 @@ func runAgent() {
 		})
 		if ftpW != nil {
 			ftpW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.QueueEvent(api.EventRequest{
+				apiClient.ReportEvents([]api.EventRequest{{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				})
+				}})
 			})
 			ftpW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -727,24 +694,12 @@ func runAgent() {
 	// Metrics collector
 	metricsCollector := monitor.NewMetricsCollector()
 
-	// Heartbeat ticker with exponential backoff on errors.
-	// Normal interval: 60s. On consecutive errors: 60s, 120s, 240s, capped at 5min.
-	// This prevents self-DoS when the agent is monitoring its own server.
+	// Heartbeat ticker (includes zombie count + web server info + system metrics)
 	go func() {
-		const baseInterval = 60 * time.Second
-		const maxInterval = 5 * time.Minute
-		consecutiveErrors := 0
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
 
-		for {
-			interval := baseInterval
-			if consecutiveErrors > 0 {
-				interval = baseInterval * time.Duration(1<<min(consecutiveErrors, 3))
-				if interval > maxInterval {
-					interval = maxInterval
-				}
-			}
-			time.Sleep(interval)
-
+		for range ticker.C {
 			zReport := monitor.ScanZombies()
 			sysMetrics := metricsCollector.Collect()
 
@@ -754,15 +709,6 @@ func runAgent() {
 			}
 
 			fwStatus := firewall.FirewallStatus()
-			var listeningServices []api.ListeningService
-			for _, svc := range monitor.DetectListeningServices() {
-				listeningServices = append(listeningServices, api.ListeningService{
-					Port:    svc.Port,
-					Process: svc.Process,
-					Proto:   svc.Proto,
-				})
-			}
-
 			hbReq := api.HeartbeatRequest{
 				Status:            "online",
 				Version:           version,
@@ -777,11 +723,9 @@ func runAgent() {
 				BanCapacity:       fwStatus.Capacity,
 				ActiveBans:        fwStatus.ActiveBans,
 				KubernetesInfo:    collectK8sInfo(k8sClient),
-				YaraInstalled:    yaraScanner != nil && yaraScanner.IsAvailable(),
+				YaraInstalled:    func() bool { if yaraScanner != nil { yaraScanner.Recheck() }; return yaraScanner != nil && yaraScanner.IsAvailable() }(),
 				ModsecActive:     modsecEngine != nil && modsecEngine.IsAvailable(),
 				RequestsAnalyzed: reqAnalyzed,
-				ListeningServices: listeningServices,
-				Runtime:           collectRuntimeStats(apiClient),
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -800,18 +744,8 @@ func runAgent() {
 
 			resp, err := apiClient.Heartbeat(hbReq)
 			if err != nil {
-				consecutiveErrors++
-				if consecutiveErrors <= 3 {
-					log.Printf("[heartbeat] error (attempt %d, next in %v): %v", consecutiveErrors, interval*2, err)
-				} else if consecutiveErrors%10 == 0 {
-					log.Printf("[heartbeat] still failing after %d attempts: %v", consecutiveErrors, err)
-				}
+				log.Printf("[heartbeat] error: %v", err)
 				continue
-			}
-
-			if consecutiveErrors > 0 {
-				log.Printf("[heartbeat] recovered after %d errors", consecutiveErrors)
-				consecutiveErrors = 0
 			}
 
 			// Check for agent update
@@ -824,33 +758,14 @@ func runAgent() {
 	// Zombie process monitor (check every 60s, report events when threshold exceeded)
 	go runZombieMonitor(apiClient)
 
-	// Fallback sync ticker with exponential backoff on errors.
-	// Normal: 5min. On errors: 5min, 10min, 20min, capped at 30min.
+	// Fallback sync ticker (every 5min, in case WS misses something)
 	go func() {
-		const baseInterval = 5 * time.Minute
-		const maxInterval = 30 * time.Minute
-		consecutiveErrors := 0
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
 
-		for {
-			interval := baseInterval
-			if consecutiveErrors > 0 {
-				interval = baseInterval * time.Duration(1<<min(consecutiveErrors, 3))
-				if interval > maxInterval {
-					interval = maxInterval
-				}
-			}
-			time.Sleep(interval)
-
+		for range ticker.C {
 			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
-				consecutiveErrors++
-				if consecutiveErrors <= 3 {
-					log.Printf("[sync] error (attempt %d, next in %v): %v", consecutiveErrors, interval*2, err)
-				} else if consecutiveErrors%5 == 0 {
-					log.Printf("[sync] still failing after %d attempts: %v", consecutiveErrors, err)
-				}
-			} else if consecutiveErrors > 0 {
-				log.Printf("[sync] recovered after %d errors", consecutiveErrors)
-				consecutiveErrors = 0
+				log.Printf("[sync] error: %v", err)
 			}
 		}
 	}()
@@ -1116,6 +1031,30 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				Rules:   sync.YaraRules.Rules,
 				Version: sync.YaraRules.Version,
 			})
+		}
+	}
+
+	// Process quarantine requests from dashboard
+	if len(sync.QuarantinePending) > 0 {
+		for _, filePath := range sync.QuarantinePending {
+			log.Printf("[quarantine] processing request: %s", filePath)
+			if _, err := malware.QuarantineFile(filePath); err != nil {
+				log.Printf("[quarantine] failed to quarantine %s: %v", filePath, err)
+				_ = client.ReportEvents([]api.EventRequest{{
+					Type:     "quarantine_failed",
+					Severity: "warning",
+					Details:  map[string]string{"file": filePath, "error": err.Error()},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			} else {
+				log.Printf("[quarantine] moved %s to quarantine", filePath)
+				_ = client.ReportEvents([]api.EventRequest{{
+					Type:     "quarantine_completed",
+					Severity: "info",
+					Details:  map[string]string{"file": filePath},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			}
 		}
 	}
 
@@ -1420,48 +1359,6 @@ func detectWebServerInfo() (name, version string) {
 		}
 	}
 
-	// Try Caddy
-	if path, err := exec.LookPath("caddy"); err == nil && path != "" {
-		out, err := exec.Command("caddy", "version").CombinedOutput()
-		if err == nil {
-			fields := strings.Fields(strings.TrimSpace(string(out)))
-			if len(fields) > 0 {
-				version = strings.TrimPrefix(fields[0], "v")
-			}
-			return "caddy", version
-		}
-	}
-
-	// Try LiteSpeed / OpenLiteSpeed
-	if _, err := os.Stat("/usr/local/lsws/bin/lshttpd"); err == nil {
-		out, err := exec.Command("/usr/local/lsws/bin/lshttpd", "-v").CombinedOutput()
-		if err == nil {
-			s := strings.TrimSpace(string(out))
-			if idx := strings.Index(s, "LiteSpeed/"); idx >= 0 {
-				fields := strings.Fields(s[idx+10:])
-				if len(fields) > 0 {
-					version = fields[0]
-				}
-			}
-			return "litespeed", version
-		}
-	}
-
-	// Try Traefik
-	if path, err := exec.LookPath("traefik"); err == nil && path != "" {
-		out, err := exec.Command("traefik", "version").CombinedOutput()
-		if err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "Version:") {
-					version = strings.TrimSpace(strings.TrimPrefix(line, "Version:"))
-					break
-				}
-			}
-			return "traefik", version
-		}
-	}
-
 	return "", ""
 }
 
@@ -1524,84 +1421,20 @@ func runZombieMonitor(client *api.Client) {
 
 const threatFeedCache = "/etc/defensia/threat_feed.json"
 
-// threatFeedState tracks the last applied threat-feed snapshot so each sync
-// only applies the delta instead of re-banning every IP (which previously
-// caused iptables thrashing when the feed exceeded firewall capacity).
-var (
-	threatFeedMu    sync.Mutex
-	threatFeedIPs   = make(map[string]bool)
-	threatFeedCIDRs = make(map[string]bool)
-)
-
 func applyThreatFeed(entries []api.ThreatEntry) {
-	newIPs := make(map[string]bool, len(entries))
-	newCIDRs := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if e.IP != nil && *e.IP != "" {
-			newIPs[*e.IP] = true
+			if err := firewall.BanIP(*e.IP); err != nil {
+				log.Printf("[threat-feed] ban %s (%s): %v", *e.IP, e.Source, err)
+			}
 		} else if e.CIDR != nil && *e.CIDR != "" {
-			newCIDRs[*e.CIDR] = true
+			cidr := *e.CIDR
+			if err := firewall.ApplyRule(firewall.RuleSpec{Type: "block", IPRange: &cidr}); err != nil {
+				log.Printf("[threat-feed] block cidr %s (%s): %v", cidr, e.Source, err)
+			}
 		}
 	}
-
-	threatFeedMu.Lock()
-	defer threatFeedMu.Unlock()
-
-	added, removed, cidrAdded, cidrRemoved := 0, 0, 0, 0
-
-	for ip := range newIPs {
-		if threatFeedIPs[ip] {
-			continue
-		}
-		if err := firewall.BanThreatFeedIP(ip); err != nil {
-			log.Printf("[threat-feed] ban %s: %v", ip, err)
-			continue
-		}
-		added++
-	}
-	for ip := range threatFeedIPs {
-		if newIPs[ip] {
-			continue
-		}
-		if err := firewall.UnbanIP(ip); err != nil {
-			log.Printf("[threat-feed] unban %s: %v", ip, err)
-			continue
-		}
-		removed++
-	}
-
-	for cidr := range newCIDRs {
-		if threatFeedCIDRs[cidr] {
-			continue
-		}
-		c := cidr
-		if err := firewall.ApplyRule(firewall.RuleSpec{Type: "block", IPRange: &c}); err != nil {
-			log.Printf("[threat-feed] block cidr %s: %v", cidr, err)
-			continue
-		}
-		cidrAdded++
-	}
-	for cidr := range threatFeedCIDRs {
-		if newCIDRs[cidr] {
-			continue
-		}
-		c := cidr
-		if err := firewall.RemoveRule(firewall.RuleSpec{Type: "block", IPRange: &c}); err != nil {
-			log.Printf("[threat-feed] unblock cidr %s: %v", cidr, err)
-			continue
-		}
-		cidrRemoved++
-	}
-
-	threatFeedIPs = newIPs
-	threatFeedCIDRs = newCIDRs
-
-	if added+removed+cidrAdded+cidrRemoved == 0 {
-		log.Printf("[threat-feed] no changes (%d entries)", len(entries))
-	} else {
-		log.Printf("[threat-feed] delta applied: +%d IPs, -%d IPs, +%d CIDRs, -%d CIDRs (total: %d IPs, %d CIDRs)",
-			added, removed, cidrAdded, cidrRemoved, len(newIPs), len(newCIDRs))
-	}
+	log.Printf("[threat-feed] applied %d entries", len(entries))
 }
 
 func saveThreatFeedCache(entries []api.ThreatEntry) {
@@ -1632,19 +1465,8 @@ func loadThreatFeedCache() {
 }
 
 // runMalwareScan detects web roots, runs malware signature scanning and framework checks.
-var malwareScanMu sync.Mutex
-
-const malwareScanTimeout = 30 * time.Minute
-
 func runMalwareScan(client *api.Client, intensityStr string) {
-	if !malwareScanMu.TryLock() {
-		log.Printf("[malware] scan already in progress — skipping")
-		return
-	}
-	defer malwareScanMu.Unlock()
-
-	log.Printf("[malware] starting scan (intensity=%s, timeout=%s)", intensityStr, malwareScanTimeout)
-	scanStart := time.Now()
+	log.Printf("[malware] starting scan (intensity=%s)", intensityStr)
 
 	_ = client.ReportEvents([]api.EventRequest{{
 		Type:       "malware_scan_started",
@@ -1700,7 +1522,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		scanner.AllowList = malwareAllowList
 	}
 
-	scanStart = time.Now()
+	scanStart := time.Now()
 	var scanID int64
 	var totalFiles, totalSkipped int64
 	var allFindings []malware.Finding
@@ -1710,25 +1532,30 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	for i, root := range webRoots {
 		log.Printf("[malware] scanning root %d/%d: %s", i+1, len(webRoots), root.Path)
 
+		// Scan this single root
 		rootResult, err := scanner.ScanWebRoots([]malware.WebRoot{root}, intensity)
 		if err != nil {
 			log.Printf("[malware] error scanning %s: %v", root.Path, err)
 			continue
 		}
 
+		// YARA scan for this root
 		if yaraScanner != nil && yaraScanner.IsAvailable() {
 			for _, f := range yaraScanner.ScanDirectory(root.Path, root.Domain) {
 				rootResult.Findings = append(rootResult.Findings, f)
 			}
 		}
 
+		// WordPress DB check for this root
 		for _, f := range malware.CheckWordPressDatabase(root) {
 			rootResult.Findings = append(rootResult.Findings, f)
 		}
 
+		// Framework checks for this root
 		rootFwFindings := malware.CheckFramework(root)
 		allFwFindings = append(allFwFindings, rootFwFindings...)
 
+		// Filter findings
 		var chunkFindings []api.MalwareScanFinding
 		for _, f := range rootResult.Findings {
 			if f.SignatureID == "ROOTKIT_EXEC_IN_TMP" {
@@ -1750,6 +1577,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 			})
 		}
 
+		// Submit this root's results as a chunk
 		resp, err := client.SubmitMalwareScanChunk(api.MalwareScanChunkRequest{
 			WebRoot: api.MalwareScanWebRoot{
 				Path: root.Path, Domain: root.Domain,
@@ -1770,6 +1598,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		totalFiles += rootResult.FilesScanned
 		totalSkipped += rootResult.FilesSkipped
 
+		// Report progress
 		pct := (i + 1) * 100 / len(webRoots)
 		_ = client.ReportEvents([]api.EventRequest{{
 			Type: "malware_scan_progress", Severity: "info",
@@ -1781,19 +1610,23 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}})
 	}
 
-	// System-wide checks
-	allFindings = append(allFindings, malware.CheckMaliciousProcesses()...)
+	// System-wide checks (not per-root)
+	procFindings := malware.CheckMaliciousProcesses()
+	allFindings = append(allFindings, procFindings...)
 	sysResult := malware.CheckSystemIntegrity()
 	allFindings = append(allFindings, sysResult.ModifiedBinaries...)
 	allFindings = append(allFindings, sysResult.RootkitIndicators...)
 
+	// Calculate final score
 	secScore := malware.CalculateScore(allFindings, allFwFindings)
 	log.Printf("[malware] security score: %d/100 (grade %s)", secScore.Score, secScore.Grade)
 
+	// Complete the scan
 	duration := time.Since(scanStart)
 	if scanID > 0 {
 		if err := client.CompleteMalwareScan(api.MalwareScanCompleteRequest{
-			ScanID: scanID, DurationSeconds: duration.Seconds(),
+			ScanID:          scanID,
+			DurationSeconds: duration.Seconds(),
 			SecurityScore: &api.MalwareSecurityScore{
 				Score: secScore.Score, Grade: secScore.Grade,
 				MalwareDeductions: secScore.MalwareDeductions, FrameworkDeductions: secScore.FrameworkDeductions,
@@ -1806,7 +1639,9 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 
 	malwareCount := 0
 	for _, f := range allFindings {
-		if f.SignatureID != "ROOTKIT_EXEC_IN_TMP" { malwareCount++ }
+		if f.SignatureID != "ROOTKIT_EXEC_IN_TMP" {
+			malwareCount++
+		}
 	}
 	log.Printf("[malware] scan complete — %d files scanned, %d malware findings, %d framework issues in %s",
 		totalFiles, malwareCount, len(allFwFindings), duration.Round(time.Second))
@@ -1821,4 +1656,3 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 	}})
 }
-
