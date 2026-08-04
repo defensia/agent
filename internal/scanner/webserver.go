@@ -129,19 +129,8 @@ func checkNginx() []Finding {
 		Passed:         hasRateLimit,
 	})
 
-	// WS_SEC_HEADERS — security headers
-	hasXCTO := strings.Contains(allConf, "X-Content-Type-Options")
-	hasXFO := strings.Contains(allConf, "X-Frame-Options")
-	bothHeaders := hasXCTO && hasXFO
-	findings = append(findings, Finding{
-		Category:       "webserver_security",
-		Severity:       "medium",
-		CheckID:        "WS_SEC_HEADERS",
-		Title:          "Security headers",
-		Description:    boolDesc(bothHeaders, "X-Content-Type-Options and X-Frame-Options are set", "Missing security headers in Nginx config"),
-		Recommendation: "Add 'add_header X-Content-Type-Options nosniff;' and 'add_header X-Frame-Options SAMEORIGIN;'",
-		Passed:         bothHeaders,
-	})
+	// WS_SEC_HEADERS — individual security header checks
+	findings = append(findings, checkSecurityHeaders(allConf, "nginx")...)
 
 	// WS_SSL_PROTOCOLS — no old TLS
 	findings = append(findings, checkSSLProtocols(allConf, "ssl_protocols", "nginx")...)
@@ -221,10 +210,96 @@ func checkApache() []Finding {
 		Passed:         hasTraceOff,
 	})
 
+	// WS_SEC_HEADERS — individual security header checks
+	findings = append(findings, checkSecurityHeaders(allConf, "apache")...)
+
 	// WS_SSL_PROTOCOLS_APACHE — no old TLS
 	findings = append(findings, checkSSLProtocols(allConf, "SSLProtocol", "apache")...)
 
 	return findings
+}
+
+// ─── Security Header Checks ───
+
+// checkSecurityHeaders checks for individual HTTP security headers in config files.
+func checkSecurityHeaders(conf, server string) []Finding {
+	type headerCheck struct {
+		checkID        string
+		header         string
+		severity       string
+		title          string
+		recommendation string
+	}
+
+	// Nginx uses add_header, Apache uses Header set/append
+	checks := []headerCheck{
+		{
+			checkID:        "WS_HSTS",
+			header:         "Strict-Transport-Security",
+			severity:       "medium",
+			title:          "HTTP Strict Transport Security (HSTS)",
+			recommendation: headerRec(server, "Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
+		},
+		{
+			checkID:        "WS_XCTO",
+			header:         "X-Content-Type-Options",
+			severity:       "low",
+			title:          "X-Content-Type-Options header",
+			recommendation: headerRec(server, "X-Content-Type-Options", "nosniff"),
+		},
+		{
+			checkID:        "WS_XFO",
+			header:         "X-Frame-Options",
+			severity:       "medium",
+			title:          "X-Frame-Options header",
+			recommendation: headerRec(server, "X-Frame-Options", "SAMEORIGIN"),
+		},
+		{
+			checkID:        "WS_CSP",
+			header:         "Content-Security-Policy",
+			severity:       "medium",
+			title:          "Content Security Policy (CSP)",
+			recommendation: headerRec(server, "Content-Security-Policy", "default-src 'self'"),
+		},
+		{
+			checkID:        "WS_PERMISSIONS",
+			header:         "Permissions-Policy",
+			severity:       "low",
+			title:          "Permissions-Policy header",
+			recommendation: headerRec(server, "Permissions-Policy", "geolocation=(), camera=(), microphone=()"),
+		},
+		{
+			checkID:        "WS_REFERRER",
+			header:         "Referrer-Policy",
+			severity:       "low",
+			title:          "Referrer-Policy header",
+			recommendation: headerRec(server, "Referrer-Policy", "strict-origin-when-cross-origin"),
+		},
+	}
+
+	var findings []Finding
+	for _, c := range checks {
+		present := strings.Contains(conf, c.header)
+		findings = append(findings, Finding{
+			Category:       "webserver_security",
+			Severity:       c.severity,
+			CheckID:        c.checkID,
+			Title:          c.title,
+			Description:    boolDesc(present, c.header+" is configured", c.header+" header is missing"),
+			Recommendation: c.recommendation,
+			Passed:         present,
+		})
+	}
+
+	return findings
+}
+
+// headerRec returns the appropriate config directive for a header.
+func headerRec(server, header, value string) string {
+	if server == "nginx" {
+		return "add_header " + header + " \"" + value + "\" always;"
+	}
+	return "Header always set " + header + " \"" + value + "\""
 }
 
 // ─── Shared Helpers ───
