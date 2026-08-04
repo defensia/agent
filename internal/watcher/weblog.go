@@ -17,8 +17,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/defensia/agent/internal/monitor"
 )
 
 // EventFunc is called when a suspicious event is detected (may or may not result in a ban).
@@ -126,8 +124,12 @@ type WebWatcher struct {
 	// FCrDNS cache for bot verification
 	fcrdns *fcrdnsCache
 
-	// ModSecurity dedup
+	// ModSecurity dedup: skip WAF log-based events for IPs already reported by ModSecurity
 	modsecDedup interface{ ShouldSkip(ip string) bool }
+
+	// Reverse port scan cache (opt-in)
+	portScanResults *portScanCache
+	portScanEnabled bool
 
 	// WAF rules (virtual patches) from panel sync
 	dynamicWafRules []compiledWafRule
@@ -201,38 +203,18 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 4. Parse Caddy config for log output paths
-	for _, info := range detectCaddyLogInfo() {
-		add(info)
-	}
-
-	// 5. Parse LiteSpeed config for accesslog paths
-	for _, info := range detectLiteSpeedLogInfo() {
-		add(info)
-	}
-
-	// 6. Parse Traefik config for accessLog.filePath
-	for _, info := range detectTraefikLogInfo() {
-		add(info)
-	}
-
-	// 7. cPanel domlogs (per-domain access logs)
+	// 4. cPanel domlogs (per-domain access logs)
 	for _, info := range detectCpanelDomlogs() {
 		add(info)
 	}
 
-	// 8. Docker containers running web servers (always checked — a host may run
+	// 5. Docker containers running web servers (always checked — a host may run
 	//    both a native web server and additional services inside Docker).
 	for _, info := range detectDockerLogInfo() {
 		add(info)
 	}
 
-	// 9. Detect uvicorn/gunicorn processes and find their log files
-	for _, info := range detectPythonASGILogInfo() {
-		add(info)
-	}
-
-	// 10. Well-known static paths (always checked — add() deduplicates)
+	// 6. Well-known static paths (always checked — add() deduplicates)
 	knownPaths := []string{
 		"/var/log/nginx/access.log",
 		"/var/log/apache2/access.log",
@@ -244,39 +226,10 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		"/var/log/caddy/access.log",
 		"/var/log/nginx-access.log",
 		"/var/log/access.log",
-		"/var/log/lighttpd/access.log",
-		"/var/log/traefik/access.log",
-		"/var/log/gunicorn/access.log",
-		"/var/log/uvicorn/access.log",
-		"/var/log/uvicorn-access.log",
 	}
 	for _, p := range knownPaths {
 		if _, err := os.Stat(p); err == nil {
 			add(LogPathInfo{Path: p})
-		}
-	}
-
-	// 11. Glob: catch any access log under /var/log/*/ (covers uvicorn, gunicorn, any custom server)
-	for _, pattern := range []string{
-		"/var/log/*/access.log",
-		"/var/log/*/access_log",
-		"/var/log/*-access.log",
-	} {
-		matches, _ := filepath.Glob(pattern)
-		for _, m := range matches {
-			add(LogPathInfo{Path: m})
-		}
-	}
-
-	// 9. Tomcat access logs (glob — date-rotated filenames)
-	for _, pattern := range []string{
-		"/var/log/tomcat*/localhost_access_log.*.txt",
-		"/opt/tomcat/logs/localhost_access_log.*.txt",
-	} {
-		matches, _ := filepath.Glob(pattern)
-		if len(matches) > 0 {
-			sort.Strings(matches)
-			add(LogPathInfo{Path: matches[len(matches)-1]})
 		}
 	}
 
@@ -533,83 +486,7 @@ func resolveApacheEnvVars(path string) string {
 	return path
 }
 
-// collectApacheConfigFiles starts from root config files and follows Include /
-// IncludeOptional directives recursively, returning a deduplicated flat list of
-// all reachable config files. Relative paths are resolved relative to the
-// directory of the including file (works for all major distro layouts).
-// A depth limit of 10 prevents infinite loops from misconfigured servers.
-func collectApacheConfigFiles(roots []string) []string {
-	visited := make(map[string]bool)
-	var result []string
-
-	var walk func(files []string, depth int)
-	walk = func(files []string, depth int) {
-		if depth > 10 {
-			return
-		}
-		for _, f := range files {
-			if visited[f] {
-				continue
-			}
-			visited[f] = true
-
-			fi, err := os.Stat(f)
-			if err != nil || fi.IsDir() {
-				continue
-			}
-			result = append(result, f)
-
-			data, err := os.ReadFile(f)
-			if err != nil {
-				continue
-			}
-
-			dir := filepath.Dir(f)
-			var children []string
-			for _, line := range strings.Split(string(data), "\n") {
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "#") {
-					continue
-				}
-				lower := strings.ToLower(trimmed)
-				var rest string
-				switch {
-				case strings.HasPrefix(lower, "includeoptional "):
-					rest = strings.TrimSpace(trimmed[len("includeoptional "):])
-				case strings.HasPrefix(lower, "include "):
-					rest = strings.TrimSpace(trimmed[len("include "):])
-				default:
-					continue
-				}
-				rest = strings.Trim(rest, "\"'")
-				if rest == "" {
-					continue
-				}
-				if !filepath.IsAbs(rest) {
-					rest = filepath.Join(dir, rest)
-				}
-				matches, globErr := filepath.Glob(rest)
-				if globErr != nil || len(matches) == 0 {
-					// bare directory: include all *.conf inside
-					if fi2, statErr := os.Stat(rest); statErr == nil && fi2.IsDir() {
-						dirMatches, _ := filepath.Glob(filepath.Join(rest, "*.conf"))
-						children = append(children, dirMatches...)
-					}
-					continue
-				}
-				children = append(children, matches...)
-			}
-			walk(children, depth+1)
-		}
-	}
-
-	walk(roots, 0)
-	return result
-}
-
 // detectApacheLogInfo parses apache config to find ALL CustomLog paths with their ServerNames.
-// It follows Include/IncludeOptional directives recursively so non-standard vhost
-// layouts (e.g. servers with 1000+ domains in separate include files) are fully discovered.
 func detectApacheLogInfo() []LogPathInfo {
 	apacheInstalled := false
 	for _, cmd := range []string{"apache2ctl", "apachectl", "httpd"} {
@@ -622,24 +499,17 @@ func detectApacheLogInfo() []LogPathInfo {
 		return nil
 	}
 
-	roots := []string{
+	configFiles := []string{
 		"/etc/apache2/apache2.conf",
 		"/etc/httpd/conf/httpd.conf",
 		"/usr/local/apache/conf/httpd.conf",
 	}
-	for _, pattern := range []string{
-		"/etc/apache2/sites-enabled/*.conf",
-		"/etc/apache2/sites-available/*.conf",
-		"/etc/apache2/conf-enabled/*.conf",
-		"/etc/httpd/conf.d/*.conf",
-		"/etc/httpd/sites-enabled/*.conf",
-		"/etc/httpd/sites-available/*.conf",
-	} {
-		matches, _ := filepath.Glob(pattern)
-		roots = append(roots, matches...)
-	}
-
-	configFiles := collectApacheConfigFiles(roots)
+	vhostFiles, _ := filepath.Glob("/etc/apache2/sites-enabled/*.conf")
+	configFiles = append(configFiles, vhostFiles...)
+	vhostFiles2, _ := filepath.Glob("/etc/httpd/conf.d/*.conf")
+	configFiles = append(configFiles, vhostFiles2...)
+	confFiles, _ := filepath.Glob("/etc/apache2/conf-enabled/*.conf")
+	configFiles = append(configFiles, confFiles...)
 
 	pathDomains := make(map[string]map[string]bool)
 
@@ -744,335 +614,6 @@ func parseApacheVhosts(content string) []apacheVhost {
 	return results
 }
 
-// ── Caddy log detection ─────────────────────────────────────────────
-
-// detectCaddyLogInfo parses Caddyfile to find log output paths with their site addresses.
-func detectCaddyLogInfo() []LogPathInfo {
-	if _, err := exec.LookPath("caddy"); err != nil {
-		return nil
-	}
-
-	configPaths := []string{
-		"/etc/caddy/Caddyfile",
-		"/etc/caddy/caddyfile",
-		"/opt/caddy/Caddyfile",
-	}
-
-	pathDomains := make(map[string]map[string]bool)
-
-	for _, cf := range configPaths {
-		data, err := os.ReadFile(cf)
-		if err != nil {
-			continue
-		}
-		for _, entry := range parseCaddyfile(string(data)) {
-			for _, lp := range entry.logPaths {
-				if _, err := os.Stat(lp); err != nil {
-					continue
-				}
-				if pathDomains[lp] == nil {
-					pathDomains[lp] = make(map[string]bool)
-				}
-				for _, d := range entry.domains {
-					pathDomains[lp][d] = true
-				}
-			}
-		}
-	}
-
-	var result []LogPathInfo
-	for path, domainSet := range pathDomains {
-		var domains []string
-		for d := range domainSet {
-			domains = append(domains, d)
-		}
-		sort.Strings(domains)
-		result = append(result, LogPathInfo{Path: path, Domains: domains})
-	}
-	return result
-}
-
-type caddySiteBlock struct {
-	domains  []string
-	logPaths []string
-}
-
-// parseCaddyfile extracts site addresses and log output file paths from a Caddyfile.
-// Format:
-//
-//	example.com {
-//	    log {
-//	        output file /var/log/caddy/example.access.log
-//	    }
-//	}
-func parseCaddyfile(content string) []caddySiteBlock {
-	var results []caddySiteBlock
-	var current *caddySiteBlock
-	depth := 0
-	inLogBlock := false
-	logDepth := 0
-
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		opens := strings.Count(trimmed, "{")
-		closes := strings.Count(trimmed, "}")
-
-		// Site block start: "example.com {" or "example.com, www.example.com {"
-		if depth == 0 && opens > 0 && current == nil {
-			addr := strings.TrimRight(trimmed, " {")
-			var domains []string
-			for _, part := range strings.Split(addr, ",") {
-				part = strings.TrimSpace(part)
-				part = strings.TrimPrefix(part, "https://")
-				part = strings.TrimPrefix(part, "http://")
-				if idx := strings.Index(part, ":"); idx > 0 {
-					part = part[:idx]
-				}
-				if part != "" && part != "*" && !strings.HasPrefix(part, ":") {
-					domains = append(domains, part)
-				}
-			}
-			current = &caddySiteBlock{domains: domains}
-		}
-
-		// "log {" block inside a site block
-		if current != nil && depth >= 1 && strings.HasPrefix(trimmed, "log") && opens > 0 {
-			inLogBlock = true
-			logDepth = depth + opens
-		}
-
-		// "output file /path" inside log block
-		if inLogBlock && strings.Contains(trimmed, "output") && strings.Contains(trimmed, "file") {
-			fields := strings.Fields(trimmed)
-			for i, f := range fields {
-				if f == "file" && i+1 < len(fields) {
-					path := strings.Trim(fields[i+1], "\"'")
-					if path != "" {
-						current.logPaths = append(current.logPaths, path)
-					}
-					break
-				}
-			}
-		}
-
-		depth += opens - closes
-
-		if inLogBlock && depth < logDepth {
-			inLogBlock = false
-		}
-
-		if depth == 0 && current != nil {
-			if len(current.logPaths) > 0 {
-				results = append(results, *current)
-			}
-			current = nil
-		}
-	}
-	return results
-}
-
-// ── LiteSpeed log detection ─────────────────────────────────────────
-
-// detectLiteSpeedLogInfo parses LiteSpeed/OpenLiteSpeed configs for access log paths.
-func detectLiteSpeedLogInfo() []LogPathInfo {
-	if _, err := os.Stat("/usr/local/lsws/bin/lshttpd"); err != nil {
-		return nil
-	}
-
-	configFiles := []string{"/usr/local/lsws/conf/httpd_config.conf"}
-	vhostFiles, _ := filepath.Glob("/usr/local/lsws/conf/vhosts/*/vhconf.conf")
-	configFiles = append(configFiles, vhostFiles...)
-
-	pathDomains := make(map[string]map[string]bool)
-
-	for _, cf := range configFiles {
-		data, err := os.ReadFile(cf)
-		if err != nil {
-			continue
-		}
-		for _, vhost := range parseLiteSpeedConfig(string(data)) {
-			for _, lp := range vhost.logPaths {
-				lp = strings.ReplaceAll(lp, "$SERVER_ROOT", "/usr/local/lsws")
-				lp = strings.ReplaceAll(lp, "$VH_ROOT", filepath.Dir(filepath.Dir(cf)))
-				if _, err := os.Stat(lp); err != nil {
-					continue
-				}
-				if pathDomains[lp] == nil {
-					pathDomains[lp] = make(map[string]bool)
-				}
-				for _, d := range vhost.domains {
-					pathDomains[lp][d] = true
-				}
-			}
-		}
-	}
-
-	var result []LogPathInfo
-	for path, domainSet := range pathDomains {
-		var domains []string
-		for d := range domainSet {
-			domains = append(domains, d)
-		}
-		sort.Strings(domains)
-		result = append(result, LogPathInfo{Path: path, Domains: domains})
-	}
-	return result
-}
-
-type lsVhost struct {
-	domains  []string
-	logPaths []string
-}
-
-// parseLiteSpeedConfig extracts accesslog paths and vhDomain from LiteSpeed config.
-func parseLiteSpeedConfig(content string) []lsVhost {
-	var result []lsVhost
-	entry := lsVhost{}
-
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		lower := strings.ToLower(trimmed)
-		if strings.HasPrefix(lower, "accesslog ") {
-			fields := strings.Fields(trimmed)
-			if len(fields) >= 2 {
-				path := strings.Trim(fields[1], "\"'")
-				if path != "" && path != "{" {
-					entry.logPaths = append(entry.logPaths, path)
-				}
-			}
-		}
-
-		if strings.HasPrefix(lower, "vhdomain ") {
-			parts := strings.Fields(trimmed)
-			if len(parts) >= 2 {
-				for _, d := range strings.Split(parts[1], ",") {
-					d = strings.TrimSpace(d)
-					if d != "" {
-						entry.domains = append(entry.domains, d)
-					}
-				}
-			}
-		}
-	}
-
-	if len(entry.logPaths) > 0 {
-		result = append(result, entry)
-	}
-	return result
-}
-
-// ── Python ASGI/WSGI log detection ─────────────────────────────────
-
-// detectPythonASGILogInfo finds access logs for uvicorn, gunicorn, and similar
-// Python web servers by checking process command lines for --access-logfile or
-// --log-file arguments, and scanning common log locations.
-func detectPythonASGILogInfo() []LogPathInfo {
-	var results []LogPathInfo
-
-	// Check running processes for uvicorn/gunicorn with log file arguments
-	out, err := exec.Command("sh", "-c", "ps aux 2>/dev/null | grep -E 'uvicorn|gunicorn|daphne|hypercorn' | grep -v grep").CombinedOutput()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			// Look for --access-logfile (gunicorn) or --log-file (uvicorn)
-			for _, flag := range []string{"--access-logfile", "--log-file", "--access-log"} {
-				if idx := strings.Index(line, flag); idx >= 0 {
-					rest := line[idx+len(flag):]
-					rest = strings.TrimLeft(rest, "= ")
-					fields := strings.Fields(rest)
-					if len(fields) > 0 && fields[0] != "-" && fields[0] != "" {
-						if _, err := os.Stat(fields[0]); err == nil {
-							results = append(results, LogPathInfo{Path: fields[0]})
-							log.Printf("[webwatcher] found Python ASGI log: %s", fields[0])
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return results
-}
-
-// ── Traefik log detection ───────────────────────────────────────────
-
-// detectTraefikLogInfo finds Traefik's access log path from its config files.
-func detectTraefikLogInfo() []LogPathInfo {
-	if _, err := exec.LookPath("traefik"); err != nil {
-		return nil
-	}
-
-	configFiles := []string{
-		"/etc/traefik/traefik.yml",
-		"/etc/traefik/traefik.yaml",
-		"/etc/traefik/traefik.toml",
-	}
-
-	for _, cf := range configFiles {
-		data, err := os.ReadFile(cf)
-		if err != nil {
-			continue
-		}
-		isToml := strings.HasSuffix(cf, ".toml")
-		path := parseTraefikAccessLogPath(string(data), isToml)
-		if path != "" {
-			if _, err := os.Stat(path); err == nil {
-				return []LogPathInfo{{Path: path}}
-			}
-		}
-	}
-	return nil
-}
-
-// parseTraefikAccessLogPath extracts the access log file path from Traefik config.
-func parseTraefikAccessLogPath(content string, isToml bool) string {
-	inAccessLog := false
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-
-		if isToml {
-			if trimmed == "[accessLog]" {
-				inAccessLog = true
-				continue
-			}
-			if strings.HasPrefix(trimmed, "[") && inAccessLog {
-				break
-			}
-			if inAccessLog && strings.HasPrefix(trimmed, "filePath") {
-				if idx := strings.Index(trimmed, "="); idx >= 0 {
-					path := strings.TrimSpace(trimmed[idx+1:])
-					return strings.Trim(path, "\"'")
-				}
-			}
-		} else {
-			// YAML
-			if strings.HasPrefix(trimmed, "accessLog:") {
-				inAccessLog = true
-				continue
-			}
-			if inAccessLog && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") && trimmed != "" {
-				break
-			}
-			if inAccessLog && strings.HasPrefix(trimmed, "filePath:") {
-				path := strings.TrimSpace(strings.TrimPrefix(trimmed, "filePath:"))
-				return strings.Trim(path, "\"'")
-			}
-		}
-	}
-	return ""
-}
-
 // ── cPanel domlog detection ─────────────────────────────────────────
 
 // detectCpanelDomlogs finds per-domain access logs in cPanel's domlogs directory.
@@ -1139,132 +680,11 @@ func detectCpanelDomlogs() []LogPathInfo {
 //	defensia.waf=true         — (informational) reported in heartbeat, WAF config comes from panel
 //	defensia.domain=example   — associate domain(s) with this container's logs, comma-separated
 func detectDockerLogInfo() []LogPathInfo {
-	// Try CLI first, then fall back to Docker socket API
-	dockerBin := monitor.FindDockerBinary()
-	if dockerBin != "" {
-		return detectDockerLogInfoCLI(dockerBin)
-	}
-	// No CLI — try socket API directly
-	if monitor.HasDockerSocket() {
-		return detectDockerLogInfoAPI()
-	}
-	return nil
-}
-
-// detectDockerLogInfoAPI discovers web container logs via the Docker socket API.
-// Used when the docker CLI is not available (e.g. Snap installs, rootless Docker).
-func detectDockerLogInfoAPI() []LogPathInfo {
-	containers, err := monitor.ListDockerContainers()
-	if err != nil {
-		log.Printf("[webwatcher] docker API: %v", err)
+	if _, err := exec.LookPath("docker"); err != nil {
 		return nil
 	}
 
-	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik", "litespeed"}
-	seen := make(map[string]bool)
-	var result []LogPathInfo
-
-	for _, c := range containers {
-		image := strings.ToLower(c.Image)
-		name := ""
-		if len(c.Names) > 0 {
-			name = strings.TrimPrefix(c.Names[0], "/")
-		}
-		labels := c.Labels
-		if labels == nil {
-			labels = map[string]string{}
-		}
-
-		// Label-based override
-		if v, ok := labels["defensia.monitor"]; ok {
-			if v == "false" || v == "0" || v == "no" {
-				continue
-			}
-		}
-
-		// Determine if web container
-		isWeb := false
-		if v, ok := labels["defensia.monitor"]; ok && (v == "true" || v == "1" || v == "yes") {
-			isWeb = true
-			log.Printf("[webwatcher] docker-api: container %s selected via defensia.monitor label", name)
-		}
-		if !isWeb {
-			for _, kw := range webKeywords {
-				if strings.Contains(image, kw) {
-					isWeb = true
-					break
-				}
-			}
-		}
-		// Also check if container exposes web ports
-		if !isWeb {
-			for _, p := range c.Ports {
-				if p.PrivatePort == 80 || p.PrivatePort == 443 || p.PrivatePort == 8080 {
-					isWeb = true
-					break
-				}
-			}
-		}
-		if !isWeb {
-			continue
-		}
-
-		// Domain labels
-		var labelDomains []string
-		if d, ok := labels["defensia.domain"]; ok && d != "" {
-			for _, dom := range strings.Split(d, ",") {
-				dom = strings.TrimSpace(dom)
-				if dom != "" {
-					labelDomains = append(labelDomains, dom)
-				}
-			}
-		}
-
-		// Explicit log-path label
-		if lp, ok := labels["defensia.log-path"]; ok && lp != "" {
-			for _, p := range strings.Split(lp, ",") {
-				p = strings.TrimSpace(p)
-				if p != "" && !seen[p] {
-					seen[p] = true
-					result = append(result, LogPathInfo{Path: p, Domains: labelDomains})
-					log.Printf("[webwatcher] docker-api: watching %s from container %s (label)", p, name)
-				}
-			}
-			continue
-		}
-
-		// Inspect bind mounts via API
-		mounts := monitor.InspectDockerMounts(c.ID)
-
-		// Scan host-side bind-mount directories for access logs
-		for _, hostDir := range mounts {
-			entries, err := os.ReadDir(hostDir)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if e.IsDir() {
-					continue
-				}
-				lower := strings.ToLower(e.Name())
-				if strings.Contains(lower, "access") && strings.HasSuffix(lower, ".log") {
-					hostPath := filepath.Join(hostDir, e.Name())
-					if !seen[hostPath] {
-						seen[hostPath] = true
-						result = append(result, LogPathInfo{Path: hostPath, Domains: labelDomains})
-						log.Printf("[webwatcher] docker-api: watching %s (mount scan, container %s)", hostPath, name)
-					}
-				}
-			}
-		}
-	}
-
-	return result
-}
-
-// detectDockerLogInfoCLI discovers web container logs via the docker CLI.
-func detectDockerLogInfoCLI(dockerBin string) []LogPathInfo {
-	out, err := exec.Command(dockerBin, "ps",
+	out, err := exec.Command("docker", "ps",
 		"--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Labels}}",
 		"--filter", "status=running",
 	).Output()
@@ -1272,7 +692,7 @@ func detectDockerLogInfoCLI(dockerBin string) []LogPathInfo {
 		return nil
 	}
 
-	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik", "litespeed"}
+	webKeywords := []string{"nginx", "apache", "httpd", "caddy", "openresty", "traefik"}
 	seen := make(map[string]bool)
 	var result []LogPathInfo
 
@@ -1341,7 +761,7 @@ func detectDockerLogInfoCLI(dockerBin string) []LogPathInfo {
 		mounts := dockerBindMounts(id)
 
 		// Primary: run nginx -T inside the container to get precise paths + domain names.
-		if nginxOut, err := exec.Command(dockerBin, "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
+		if nginxOut, err := exec.Command("docker", "exec", name, "nginx", "-T").CombinedOutput(); err == nil {
 			for _, info := range nginxBlocksToLogPathInfos(parseNginxBlocks(string(nginxOut)), mounts) {
 				if !seen[info.Path] {
 					seen[info.Path] = true
@@ -1398,11 +818,7 @@ func parseDockerLabels(raw string) map[string]string {
 
 // dockerBindMounts returns a containerPath→hostPath map for a container's bind mounts.
 func dockerBindMounts(containerID string) map[string]string {
-	dockerBin := monitor.FindDockerBinary()
-	if dockerBin == "" {
-		return nil
-	}
-	out, err := exec.Command(dockerBin, "inspect",
+	out, err := exec.Command("docker", "inspect",
 		"--format", "{{range .Mounts}}{{if eq .Type \"bind\"}}{{.Destination}}|{{.Source}}\n{{end}}{{end}}",
 		containerID,
 	).Output()
@@ -1458,7 +874,8 @@ func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc,
 		scoredActions: make(map[string]string),
 		recentScores:  make(map[string]time.Time),
 		parseStats:    make(map[string]*parseFileStats),
-		fcrdns:        newFcrdnsCache(24 * time.Hour),
+		fcrdns:          newFcrdnsCache(24 * time.Hour),
+		portScanResults: newPortScanCache(24 * time.Hour),
 		activePaths:   make(map[string]context.CancelFunc),
 	}
 }
@@ -1479,10 +896,23 @@ func (w *WebWatcher) SetOnScoredBan(fn ScoredBanFunc) {
 	w.onScoredBan = fn
 }
 
+// SetModsecDedup sets the ModSecurity dedup tracker. When set, the WAF log watcher
+// skips events for IPs that ModSecurity already reported (avoids duplicate events).
 func (w *WebWatcher) SetModsecDedup(d interface{ ShouldSkip(ip string) bool }) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.modsecDedup = d
+}
+
+// SetPortScanEnabled enables reverse port scanning of client IPs.
+// When enabled, bot_unknown events include open port data as a bot signal.
+func (w *WebWatcher) SetPortScanEnabled(enabled bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.portScanEnabled = enabled
+	if enabled {
+		log.Printf("[webwatcher] reverse port scanning enabled")
+	}
 }
 
 // SetCheckIP sets a callback for immediate ban (e.g. geoblocking).
@@ -1609,39 +1039,12 @@ func (w *WebWatcher) startTailGoroutine(path string) {
 }
 
 // hotReloadLoop periodically re-detects log paths and starts tailing new ones.
-// Uses exponential backoff when detection fails (e.g. nginx -T errors) to
-// avoid wasting CPU/I/O retrying a broken config every 5 minutes.
 func (w *WebWatcher) hotReloadLoop() {
-	const baseInterval = 5 * time.Minute
-	const maxInterval = 30 * time.Minute
-	consecutiveFailures := 0
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 
-	for {
-		interval := baseInterval
-		if consecutiveFailures > 0 {
-			interval = baseInterval * time.Duration(1<<min(consecutiveFailures, 3))
-			if interval > maxInterval {
-				interval = maxInterval
-			}
-		}
-		time.Sleep(interval)
-
+	for range ticker.C {
 		newInfos, newDomainMap := DetectWebLogInfo()
-
-		if len(newInfos) == 0 {
-			consecutiveFailures++
-			if consecutiveFailures <= 3 {
-				log.Printf("[webwatcher] hot-reload: no logs detected (attempt %d, next in %v)", consecutiveFailures, interval*2)
-			} else if consecutiveFailures%10 == 0 {
-				log.Printf("[webwatcher] hot-reload: still no logs after %d attempts", consecutiveFailures)
-			}
-			continue
-		}
-
-		if consecutiveFailures > 0 {
-			log.Printf("[webwatcher] hot-reload: recovered after %d failures", consecutiveFailures)
-			consecutiveFailures = 0
-		}
 
 		newPathSet := make(map[string]bool)
 		for _, info := range newInfos {
@@ -1706,31 +1109,14 @@ func (w *WebWatcher) cleanupLoop() {
 			}
 			if len(recent) == 0 {
 				delete(w.attempts, key)
-				delete(w.banned, key)
 			} else {
 				w.attempts[key] = recent
 			}
 		}
-
-		// Defensive caps to bound memory on long-running agents.
+		// Cap total entries to prevent unbounded memory growth
 		if len(w.attempts) > 50000 {
 			w.attempts = make(map[string][]time.Time)
-			log.Printf("[webwatcher] attempts map exceeded 50000 entries — reset")
 		}
-		if len(w.banned) > 50000 {
-			w.banned = make(map[string]bool)
-			log.Printf("[webwatcher] banned map exceeded 50000 entries — reset")
-		}
-		if len(w.scoredActions) > 50000 {
-			w.scoredActions = make(map[string]string)
-			log.Printf("[webwatcher] scoredActions map exceeded 50000 entries — reset")
-		}
-		// recentScores is pruned in decayLoop, but cap defensively too.
-		if len(w.recentScores) > 100000 {
-			w.recentScores = make(map[string]time.Time)
-			log.Printf("[webwatcher] recentScores map exceeded 100000 entries — reset")
-		}
-
 		w.mu.Unlock()
 	}
 }
@@ -1826,19 +1212,8 @@ type accessLogEntry struct {
 
 // parseAccessLog parses a combined log format line without regex.
 // Format: IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
-// Also handles containerd/CRI-O log prefix: "2026-01-01T00:00:00.000Z stdout F <actual log line>"
 func parseAccessLog(line string) (accessLogEntry, bool) {
 	var e accessLogEntry
-
-	// Strip containerd/CRI-O log prefix (K8s container logs)
-	// Format: "2006-01-02T15:04:05.999999999Z stdout F <line>"
-	if len(line) > 36 && line[4] == '-' && line[10] == 'T' {
-		if idx := strings.Index(line, " stdout F "); idx > 0 && idx < 40 {
-			line = line[idx+10:]
-		} else if idx := strings.Index(line, " stderr F "); idx > 0 && idx < 40 {
-			line = line[idx+10:]
-		}
-	}
 
 	// Extract IP (first field)
 	spaceIdx := strings.IndexByte(line, ' ')
@@ -1901,124 +1276,6 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 					e.referer = sub3[refQ1+1:]
 				}
 			}
-		}
-	}
-
-	return e, e.ip != "" && e.uri != ""
-}
-
-// parseTraefikJSONLog parses a Traefik JSON access log line.
-// Traefik JSON fields: ClientHost, method, path, code, User-Agent, Referer
-func parseTraefikJSONLog(line string) (accessLogEntry, bool) {
-	var e accessLogEntry
-	var raw struct {
-		ClientHost string      `json:"ClientHost"`
-		Method     string      `json:"method"`
-		Path       string      `json:"path"`
-		Code       json.Number `json:"code"`
-		UserAgent  string      `json:"User-Agent"`
-		Referer    string      `json:"Referer"`
-		// Alternative field names (Traefik v3)
-		RequestMethod string `json:"RequestMethod"`
-		RequestPath   string `json:"RequestPath"`
-		OriginStatus  int    `json:"OriginStatus"`
-	}
-
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		return e, false
-	}
-
-	e.ip = raw.ClientHost
-	e.method = raw.Method
-	if e.method == "" {
-		e.method = raw.RequestMethod
-	}
-	e.uri = raw.Path
-	if e.uri == "" {
-		e.uri = raw.RequestPath
-	}
-	if code, err := raw.Code.Int64(); err == nil {
-		e.status = int(code)
-	} else if raw.OriginStatus > 0 {
-		e.status = raw.OriginStatus
-	}
-	e.userAgent = raw.UserAgent
-	e.referer = raw.Referer
-
-	return e, e.ip != "" && e.uri != ""
-}
-
-// parseUvicornLog parses uvicorn/gunicorn access log lines.
-// Uvicorn format: INFO     IP - "METHOD URI PROTO" STATUS
-// Also handles systemd journal prefix: "Jul 30 12:00:00 host uvicorn[123]: ..."
-func parseUvicornLog(line string) (accessLogEntry, bool) {
-	var e accessLogEntry
-
-	// Strip systemd journal prefix if present
-	if idx := strings.Index(line, "]: "); idx > 0 && idx < 80 {
-		line = line[idx+3:]
-	}
-
-	// Uvicorn format starts with level (INFO, WARNING, etc.)
-	trimmed := strings.TrimSpace(line)
-	if len(trimmed) < 10 {
-		return e, false
-	}
-
-	// Check if line starts with a log level keyword
-	upperStart := strings.ToUpper(trimmed[:8])
-	hasLevel := strings.HasPrefix(upperStart, "INFO") ||
-		strings.HasPrefix(upperStart, "WARNING") ||
-		strings.HasPrefix(upperStart, "ERROR") ||
-		strings.HasPrefix(upperStart, "DEBUG")
-
-	if !hasLevel {
-		return e, false
-	}
-
-	// Skip past the level prefix and whitespace
-	rest := trimmed
-	spIdx := strings.IndexByte(rest, ' ')
-	if spIdx < 0 {
-		return e, false
-	}
-	rest = strings.TrimSpace(rest[spIdx:])
-
-	// Now rest should start with IP: "IP - "REQUEST" STATUS"
-	spIdx = strings.IndexByte(rest, ' ')
-	if spIdx < 0 {
-		return e, false
-	}
-	e.ip = rest[:spIdx]
-
-	if !strings.ContainsRune(e.ip, '.') && !strings.ContainsRune(e.ip, ':') {
-		return e, false
-	}
-
-	// Find request line between quotes
-	q1 := strings.IndexByte(rest, '"')
-	if q1 < 0 {
-		return e, false
-	}
-	q2 := strings.IndexByte(rest[q1+1:], '"')
-	if q2 < 0 {
-		return e, false
-	}
-	reqLine := rest[q1+1 : q1+1+q2]
-
-	parts := strings.SplitN(reqLine, " ", 3)
-	if len(parts) < 2 {
-		return e, false
-	}
-	e.method = parts[0]
-	e.uri = parts[1]
-
-	// Status code after closing quote
-	afterReq := rest[q1+1+q2+2:]
-	for _, f := range strings.Fields(afterReq) {
-		if len(f) == 3 && f[0] >= '1' && f[0] <= '5' {
-			e.status, _ = strconv.Atoi(f)
-			break
 		}
 	}
 
@@ -2141,23 +1398,7 @@ func (w *WebWatcher) enrichDetails(logPath, rawLine string, details map[string]s
 }
 
 func (w *WebWatcher) processLine(logPath, line string) {
-	// Try nginx combined format first, fall back to Traefik JSON
 	entry, ok := parseAccessLog(line)
-	if !ok {
-		entry, ok = parseUvicornLog(line)
-	}
-	if !ok {
-		// Strip containerd/CRI-O prefix before JSON detection
-		jsonLine := line
-		if len(jsonLine) > 36 && jsonLine[4] == '-' && jsonLine[10] == 'T' {
-			if idx := strings.Index(jsonLine, " stdout F "); idx > 0 && idx < 40 {
-				jsonLine = jsonLine[idx+10:]
-			}
-		}
-		if len(jsonLine) > 0 && jsonLine[0] == '{' {
-			entry, ok = parseTraefikJSONLog(jsonLine)
-		}
-	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -2310,9 +1551,23 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				go w.onEvent(ip, "bot_detected", "warning", details)
 			} else if bot.Action == "log" || (bot.Action == "block" && w.monitorMode) {
 				go w.onEvent(ip, "bot_detected", "info", details)
+			} else if bot.Action == "monitor" {
+				// monitor — detected and logged but excluded from stats
+				go w.onEvent(ip, "bot_monitor", "info", details)
 			} else {
-				// allow — log as crawl (lower noise)
-				go w.onEvent(ip, "bot_crawl", "info", details)
+				// allow — verify FCrDNS for known bots before trusting
+				go func(ipAddr, slug string, d map[string]string) {
+					verified, hostname := w.checkBotFcrdns(ipAddr, slug)
+					if verified {
+						w.onEvent(ipAddr, "bot_crawl", "info", d)
+					} else {
+						// Bot is spoofing — reclassify
+						d["fcrdns_verified"] = "false"
+						d["fcrdns_hostname"] = hostname
+						d["bot_action"] = "spoofed"
+						w.onEvent(ipAddr, "bot_spoofed", "warning", d)
+					}
+				}(ip, bot.Slug, details)
 			}
 			return
 		}
@@ -2324,10 +1579,25 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		uaPatterns := []string{"bot", "crawler", "spider", "scraper", "fetch", "python-requests", "python-urllib", "go-http-client", "java/", "curl/", "wget/", "libwww", "httpx", "axios/", "ruby", "perl/", "php/"}
 		for _, pat := range uaPatterns {
 			if strings.Contains(uaLower, pat) {
-				go w.onEvent(ip, "bot_unknown", "info", w.enrichDetails(logPath, line, map[string]string{
+				details := map[string]string{
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
-				}))
+				}
+				// Reverse port scan: if enabled, check if client has open server ports
+				if w.portScanEnabled {
+					go func(ipAddr string, d map[string]string, lp, ln string) {
+						openPorts := w.reversePortScan(ipAddr)
+						if len(openPorts) >= 2 {
+							d["open_ports"] = formatPorts(openPorts)
+							d["is_infra"] = "true"
+							w.onEvent(ipAddr, "bot_unknown", "warning", w.enrichDetails(lp, ln, d))
+						} else {
+							w.onEvent(ipAddr, "bot_unknown", "info", w.enrichDetails(lp, ln, d))
+						}
+					}(ip, details, logPath, line)
+				} else {
+					go w.onEvent(ip, "bot_unknown", "info", w.enrichDetails(logPath, line, details))
+				}
 				break
 			}
 		}
@@ -2583,6 +1853,8 @@ func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[s
 		return
 	}
 
+	// ModSecurity dedup: if ModSecurity already reported this IP, skip log-based detection
+	// to avoid duplicate events. ModSecurity's detection is more precise (full CRS rules).
 	if w.modsecDedup != nil && w.modsecDedup.ShouldSkip(ip) {
 		return
 	}
