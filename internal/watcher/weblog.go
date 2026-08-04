@@ -144,6 +144,59 @@ type WebWatcher struct {
 var customLogPaths []string
 
 // SetCustomLogPaths stores user-defined log paths from the panel sync.
+// staticExtensions are file extensions that should never trigger WAF rules.
+// Requests for these resources are normal browser behavior, not attacks.
+var staticExtensions = []string{
+	".js", ".css", ".woff", ".woff2", ".ttf", ".eot", ".otf",
+	".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico", ".webp", ".avif",
+	".mp4", ".webm", ".mp3", ".ogg",
+	".pdf", ".zip", ".gz", ".tar",
+	".map", ".min.js", ".min.css",
+}
+
+// staticPathPrefixes are URL path prefixes that are always static content.
+var staticPathPrefixes = []string{
+	"/wp-content/uploads/",
+	"/wp-content/cache/",
+	"/wp-content/themes/",
+	"/wp-content/plugins/",
+	"/wp-includes/js/",
+	"/wp-includes/css/",
+	"/wp-includes/fonts/",
+	"/static/",
+	"/assets/",
+	"/media/",
+}
+
+// isStaticResource returns true if the URI is for a static file (CSS, JS, image, font).
+// These should be excluded from WAF scoring to prevent false positives.
+func isStaticResource(uriLower string) bool {
+	// Strip query string for extension check
+	path := uriLower
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+
+	// Check file extension
+	for _, ext := range staticExtensions {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+
+	// Check path prefix (WordPress static dirs)
+	for _, prefix := range staticPathPrefixes {
+		if strings.HasPrefix(uriLower, prefix) {
+			// But allow wp-admin paths (could be attack targets)
+			if !strings.Contains(uriLower, "wp-admin") && !strings.Contains(uriLower, "admin-ajax") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func SetCustomLogPaths(paths []string) {
 	customLogPaths = paths
 }
@@ -1458,6 +1511,14 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			go w.onBan(ip, reason, 1)
 			return
 		}
+	}
+
+	// ── Skip WAF scoring for static resources ──
+	// Static files (CSS, JS, images, fonts) should never trigger WAF rules.
+	// CRS regex patterns match cache-busters, srcset URLs, and numeric filenames.
+	if isStaticResource(uriLower) {
+		// Still allow bot detection (above) but skip all WAF scoring below
+		return
 	}
 
 	// ── Score-based detection: path traversal, SQL injection, etc. ──
