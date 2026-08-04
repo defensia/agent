@@ -123,6 +123,12 @@ type WebWatcher struct {
 	// Bot fingerprints from panel sync
 	botFingerprints []compiledBot
 
+	// FCrDNS cache for bot verification
+	fcrdns *fcrdnsCache
+
+	// ModSecurity dedup
+	modsecDedup interface{ ShouldSkip(ip string) bool }
+
 	// WAF rules (virtual patches) from panel sync
 	dynamicWafRules []compiledWafRule
 
@@ -1452,6 +1458,7 @@ func NewWebWatcher(paths []string, domainMap map[string][]string, onBan BanFunc,
 		scoredActions: make(map[string]string),
 		recentScores:  make(map[string]time.Time),
 		parseStats:    make(map[string]*parseFileStats),
+		fcrdns:        newFcrdnsCache(24 * time.Hour),
 		activePaths:   make(map[string]context.CancelFunc),
 	}
 }
@@ -1470,6 +1477,12 @@ func (w *WebWatcher) SetOnScoredBan(fn ScoredBanFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.onScoredBan = fn
+}
+
+func (w *WebWatcher) SetModsecDedup(d interface{ ShouldSkip(ip string) bool }) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.modsecDedup = d
 }
 
 // SetCheckIP sets a callback for immediate ban (e.g. geoblocking).
@@ -2567,6 +2580,10 @@ func (w *WebWatcher) getScorePoints(eventType string) int {
 func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[string]string) {
 	points := w.getScorePoints(eventType)
 	if points == 0 {
+		return
+	}
+
+	if w.modsecDedup != nil && w.modsecDedup.ShouldSkip(ip) {
 		return
 	}
 

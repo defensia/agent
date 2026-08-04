@@ -40,6 +40,7 @@ var malwareRTWatcher    *malware.RealtimeWatcher
 var yaraScanner         *malware.YaraScanner
 var malwareCustomPaths  []string
 var modsecEngine      *modsecurity.Engine
+var modsecDedup       *modsecurity.Dedup
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -176,6 +177,48 @@ func runAgent() {
 				OccurredAt: time.Now().UTC().Format(time.RFC3339),
 			}})
 		}
+	}
+
+
+	// Shared dedup for ModSecurity + WAF log deduplication
+	modsecDedup = modsecurity.NewDedup(30 * time.Second)
+
+	// Shared dedup: ModSecurity audit log events suppress duplicate WAF log-based events
+	modsecDedup := modsecurity.NewDedup(30 * time.Second)
+
+	// Start ModSecurity audit log watcher (auto-detects audit log path)
+	if auditWatcher := modsecurity.NewAuditLogWatcher(func(entry modsecurity.AuditEntry) {
+		attackCat := entry.AttackCategory()
+		eventType := modsecurity.MapAttackToEventType(attackCat)
+		severity := modsecurity.MapSeverityToDefensia(entry.HighestSeverity())
+		var ruleIDs, ruleMsgs []string
+		for _, r := range entry.Rules {
+			if r.ID != "" { ruleIDs = append(ruleIDs, r.ID) }
+			if r.Msg != "" { ruleMsgs = append(ruleMsgs, r.Msg) }
+		}
+		details := map[string]string{
+			"source": "modsecurity", "attack_type": attackCat,
+			"rule_ids": strings.Join(ruleIDs, ","), "uri": entry.URI,
+			"action": entry.Action, "engine_mode": entry.EngineMode,
+		}
+		if entry.Host != "" { details["domain"] = entry.Host }
+		if entry.Method != "" { details["method"] = entry.Method }
+		if entry.StatusCode != "" { details["status_code"] = entry.StatusCode }
+		if len(ruleMsgs) > 0 {
+			msg := strings.Join(ruleMsgs, "; ")
+			if len(msg) > 500 { msg = msg[:500] }
+			details["rule_messages"] = msg
+		}
+		if entry.UserAgent != "" { details["user_agent"] = entry.UserAgent }
+		log.Printf("[modsec-audit] %s from %s: %s (rules: %s)", eventType, entry.SourceIP, attackCat, strings.Join(ruleIDs, ","))
+		modsecDedup.Record(entry.SourceIP)
+		_ = apiClient.ReportEvents([]api.EventRequest{{
+			Type: eventType, Severity: severity, SourceIP: entry.SourceIP,
+			Details: details, OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}); auditWatcher != nil {
+		go auditWatcher.Run()
+		log.Printf("[modsec-audit] watcher started on %s", auditWatcher.Path())
 	}
 
 	// Initialize GeoIP lookup
@@ -335,6 +378,7 @@ func runAgent() {
 				webW.CleanExpiredScores()
 			}
 		}()
+		webW.SetModsecDedup(modsecDedup)
 		webW.LoadBotFingerprintsCache()
 		webW.LoadWafRulesCache()
 		loadThreatFeedCache()
