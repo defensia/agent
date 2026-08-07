@@ -1569,11 +1569,13 @@ var (
 // enrichDetails adds domain, log_file, and raw log line to event details.
 // lineDomain is the domain extracted from vhost_combined log format (may be empty).
 func (w *WebWatcher) enrichDetails(logPath, rawLine, lineDomain string, details map[string]string) map[string]string {
-	// Priority: domain from log line (vhost_combined) > domain from config (domainMap)
+	// Priority: domain from log line (vhost_combined) > existing in details > domain from config (domainMap)
 	if lineDomain != "" {
 		details["domain"] = lineDomain
-	} else if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
-		details["domain"] = strings.Join(domains, ",")
+	} else if details["domain"] == "" {
+		if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
+			details["domain"] = strings.Join(domains, ",")
+		}
 	}
 	details["log_file"] = filepath.Base(logPath)
 	if len(rawLine) > 2000 {
@@ -1663,6 +1665,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		for _, pat := range rule.patterns {
 			if strings.Contains(uriLower, pat) || strings.Contains(uriRaw, pat) {
 				w.addScore(ip, rule.eventType, logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"method":     entry.method,
 					"user_agent": entry.userAgent,
@@ -1696,6 +1699,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 		if matched {
 			w.addScore(ip, rule.Category, logPath, line, map[string]string{
+				"domain":     entry.domain,
 				"uri":        entry.uri,
 				"method":     entry.method,
 				"user_agent": entry.userAgent,
@@ -1712,6 +1716,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		for _, agent := range scannerAgents {
 			if strings.Contains(uaLower, agent) {
 				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"scanner":    agent,
@@ -1800,6 +1805,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Score-based: Shellshock (CVE-2014-6271) ──
 	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
 		w.addScore(ip, "shellshock", logPath, line, map[string]string{
+				"domain":     entry.domain,
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
 			"referer":    entry.referer,
@@ -1812,6 +1818,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
 			if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
 				w.addScore(ip, "header_injection", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"referer":    entry.referer,
@@ -1849,6 +1856,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "wp_bruteforce", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -1862,6 +1870,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "xmlrpc_abuse", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -1875,6 +1884,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -1888,6 +1898,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "404_flood", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -2073,7 +2084,7 @@ func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[s
 	details["bot_score"] = strconv.Itoa(score)
 	details["bot_action"] = action
 	details["bot_category"] = category
-	details = w.enrichDetails(logPath, line, entry.domain, details)
+	details = w.enrichDetails(logPath, line, "", details)
 
 	// Always report the event when score reaches observe level (30+)
 	if score >= thresholdObserve {
