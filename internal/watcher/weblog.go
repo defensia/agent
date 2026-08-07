@@ -1340,6 +1340,19 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 		return e, false
 	}
 
+	// Check for domain between timestamp "]" and request quote (FarmaOffice/custom format)
+	// Format: IP - - [timestamp] DOMAIN "METHOD URI PROTO" STATUS ...
+	if e.domain == "" {
+		closeBracket := strings.IndexByte(line, ']')
+		q1Check := strings.IndexByte(line, '"')
+		if closeBracket > 0 && q1Check > closeBracket+2 {
+			between := strings.TrimSpace(line[closeBracket+1 : q1Check])
+			if between != "" && strings.ContainsRune(between, '.') && !isIPAddress(between) {
+				e.domain = between
+			}
+		}
+	}
+
 	// Find request line between first pair of quotes: "METHOD URI PROTO"
 	q1 := strings.IndexByte(line, '"')
 	if q1 < 0 {
