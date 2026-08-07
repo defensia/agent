@@ -113,6 +113,10 @@ var knownBotDomains = map[string][]string{
 //
 // Returns (verified, hostname). verified=true means the bot is legitimate.
 func verifyFcrdns(ip string, expectedSuffixes []string) (bool, string) {
+	// Strip IPv4-mapped IPv6 prefix (::ffff:1.2.3.4 → 1.2.3.4)
+	// PTR lookups fail on mapped addresses but work on the plain IPv4.
+	ip = strings.TrimPrefix(ip, "::ffff:")
+
 	// Step 1: PTR lookup
 	names, err := net.LookupAddr(ip)
 	if err != nil || len(names) == 0 {
