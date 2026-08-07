@@ -267,7 +267,41 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		add(info)
 	}
 
-	// 6. Well-known static paths (always checked — add() deduplicates)
+	// 6. Per-domain logs: LiveConfig, Plesk, DirectAdmin, ISPConfig, and generic patterns.
+	// Each glob pattern tries to extract the domain from the filename or path.
+	perDomainGlobs := []string{
+		// LiveConfig
+		"/var/log/apache2/access-*.log",
+		"/var/log/apache2/access_*.log",
+		"/var/log/httpd/access-*.log",
+		"/var/log/httpd/access_*.log",
+		// Plesk
+		"/var/www/vhosts/*/logs/access_log",
+		"/var/www/vhosts/*/logs/access.log",
+		"/var/www/vhosts/system/*/logs/access_log",
+		// ISPConfig
+		"/var/log/ispconfig/httpd/*/access.log",
+		// DirectAdmin
+		"/var/log/httpd/domains/*.log",
+		// Generic per-domain
+		"/var/log/nginx/*/access.log",
+		"/var/www/*/logs/access.log",
+		"/home/*/logs/access.log",
+	}
+	for _, pattern := range perDomainGlobs {
+		matches, _ := filepath.Glob(pattern)
+		for _, m := range matches {
+			// Extract domain from path or filename
+			domain := extractDomainFromLogPath(m)
+			if domain != "" {
+				add(LogPathInfo{Path: m, Domains: []string{domain}})
+			} else {
+				add(LogPathInfo{Path: m})
+			}
+		}
+	}
+
+	// 7. Well-known static paths (always checked — add() deduplicates)
 	knownPaths := []string{
 		"/var/log/nginx/access.log",
 		"/var/log/apache2/access.log",
@@ -1261,21 +1295,47 @@ type accessLogEntry struct {
 	status    int
 	referer   string
 	userAgent string
+	domain    string // extracted from vhost_combined format (domain:port IP ...)
 }
 
 // parseAccessLog parses a combined log format line without regex.
-// Format: IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
+// Supports two formats:
+//   Standard:       IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
+//   vhost_combined: DOMAIN:PORT IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
 func parseAccessLog(line string) (accessLogEntry, bool) {
 	var e accessLogEntry
 
-	// Extract IP (first field)
+	// Extract first field
 	spaceIdx := strings.IndexByte(line, ' ')
 	if spaceIdx < 0 {
 		return e, false
 	}
-	e.ip = line[:spaceIdx]
+	firstField := line[:spaceIdx]
 
-	// Validate IP has at least a dot (quick sanity check)
+	// Check if first field is a domain (vhost_combined format)
+	// A domain contains a dot but is NOT an IP address (IPs are digits+dots only, or contain ':' for IPv6)
+	if strings.ContainsRune(firstField, '.') && !isIPAddress(firstField) {
+		// vhost_combined: strip optional :port from domain
+		e.domain = firstField
+		if colonIdx := strings.LastIndexByte(e.domain, ':'); colonIdx > 0 {
+			// Only strip if after colon is a number (port), not part of IPv6
+			port := e.domain[colonIdx+1:]
+			if len(port) <= 5 && len(port) > 0 && port[0] >= '0' && port[0] <= '9' {
+				e.domain = e.domain[:colonIdx]
+			}
+		}
+		// Advance past the domain field to find the IP
+		line = line[spaceIdx+1:]
+		spaceIdx = strings.IndexByte(line, ' ')
+		if spaceIdx < 0 {
+			return e, false
+		}
+		firstField = line[:spaceIdx]
+	}
+
+	e.ip = firstField
+
+	// Validate IP has at least a dot or colon (quick sanity check)
 	if !strings.ContainsRune(e.ip, '.') && !strings.ContainsRune(e.ip, ':') {
 		return e, false
 	}
@@ -1333,6 +1393,75 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 	}
 
 	return e, e.ip != "" && e.uri != ""
+}
+
+// extractDomainFromLogPath tries to extract a domain name from a per-domain log file path.
+// Examples:
+//
+//	/var/log/apache2/access-example.com.log → example.com
+//	/var/www/vhosts/example.com/logs/access.log → example.com
+//	/var/log/httpd/domains/example.com.log → example.com
+func extractDomainFromLogPath(path string) string {
+	base := filepath.Base(path)
+	dir := filepath.Dir(path)
+
+	// Pattern: access-DOMAIN.log or access_DOMAIN.log
+	for _, prefix := range []string{"access-", "access_"} {
+		if strings.HasPrefix(base, prefix) {
+			domain := strings.TrimPrefix(base, prefix)
+			domain = strings.TrimSuffix(domain, ".log")
+			domain = strings.TrimSuffix(domain, "_log")
+			if strings.ContainsRune(domain, '.') && !isIPAddress(domain) {
+				return domain
+			}
+		}
+	}
+
+	// Pattern: /var/www/vhosts/DOMAIN/logs/ or /var/log/*/DOMAIN/
+	parts := strings.Split(dir, string(filepath.Separator))
+	for i, p := range parts {
+		if (p == "vhosts" || p == "httpd" || p == "nginx" || p == "ispconfig") && i+1 < len(parts) {
+			candidate := parts[i+1]
+			if candidate != "system" && strings.ContainsRune(candidate, '.') && !isIPAddress(candidate) {
+				return candidate
+			}
+			// Plesk: vhosts/system/DOMAIN/
+			if candidate == "system" && i+2 < len(parts) {
+				candidate = parts[i+2]
+				if strings.ContainsRune(candidate, '.') && !isIPAddress(candidate) {
+					return candidate
+				}
+			}
+		}
+	}
+
+	// Pattern: /home/USER/logs/ — can't extract domain, skip
+	// Pattern: DOMAIN.log in /domains/ dir
+	if strings.TrimSuffix(base, ".log") != base {
+		candidate := strings.TrimSuffix(base, ".log")
+		if strings.ContainsRune(candidate, '.') && !isIPAddress(candidate) && filepath.Base(dir) == "domains" {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+// isIPAddress returns true if s looks like an IPv4 or IPv6 address (not a domain).
+func isIPAddress(s string) bool {
+	// Strip ::ffff: prefix for mapped IPv4
+	s = strings.TrimPrefix(s, "::ffff:")
+	// IPv6: contains colon and no dot-separated labels
+	if strings.ContainsRune(s, ':') {
+		return true
+	}
+	// IPv4: all characters are digits or dots
+	for _, c := range s {
+		if c != '.' && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return strings.ContainsRune(s, '.')
 }
 
 // ── Detection rules ─────────────────────────────────────────────────
@@ -1438,8 +1567,12 @@ var (
 // ── Line processing ─────────────────────────────────────────────────
 
 // enrichDetails adds domain, log_file, and raw log line to event details.
-func (w *WebWatcher) enrichDetails(logPath, rawLine string, details map[string]string) map[string]string {
-	if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
+// lineDomain is the domain extracted from vhost_combined log format (may be empty).
+func (w *WebWatcher) enrichDetails(logPath, rawLine, lineDomain string, details map[string]string) map[string]string {
+	// Priority: domain from log line (vhost_combined) > domain from config (domainMap)
+	if lineDomain != "" {
+		details["domain"] = lineDomain
+	} else if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
 		details["domain"] = strings.Join(domains, ",")
 	}
 	details["log_file"] = filepath.Base(logPath)
@@ -1598,7 +1731,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			matched = strings.Contains(uaLower, strings.ToLower(bot.Pattern))
 		}
 		if matched {
-			details := w.enrichDetails(logPath, line, map[string]string{
+			details := w.enrichDetails(logPath, line, entry.domain, map[string]string{
 				"uri":          entry.uri,
 				"user_agent":   entry.userAgent,
 				"bot_slug":     bot.Slug,
@@ -1651,13 +1784,13 @@ func (w *WebWatcher) processLine(logPath, line string) {
 						if len(openPorts) >= 2 {
 							d["open_ports"] = formatPorts(openPorts)
 							d["is_infra"] = "true"
-							w.onEvent(ipAddr, "bot_unknown", "warning", w.enrichDetails(lp, ln, d))
+							w.onEvent(ipAddr, "bot_unknown", "warning", w.enrichDetails(lp, ln, entry.domain, d))
 						} else {
-							w.onEvent(ipAddr, "bot_unknown", "info", w.enrichDetails(lp, ln, d))
+							w.onEvent(ipAddr, "bot_unknown", "info", w.enrichDetails(lp, ln, entry.domain, d))
 						}
 					}(ip, details, logPath, line)
 				} else {
-					go w.onEvent(ip, "bot_unknown", "info", w.enrichDetails(logPath, line, details))
+					go w.onEvent(ip, "bot_unknown", "info", w.enrichDetails(logPath, line, entry.domain, details))
 				}
 				break
 			}
@@ -1940,7 +2073,7 @@ func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[s
 	details["bot_score"] = strconv.Itoa(score)
 	details["bot_action"] = action
 	details["bot_category"] = category
-	details = w.enrichDetails(logPath, line, details)
+	details = w.enrichDetails(logPath, line, entry.domain, details)
 
 	// Always report the event when score reaches observe level (30+)
 	if score >= thresholdObserve {
