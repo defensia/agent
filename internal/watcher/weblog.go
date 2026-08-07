@@ -1853,7 +1853,11 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Threshold → score: WP Login brute force ──
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
 		if w.isTypeEnabled("wp_bruteforce") {
-			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
+			ruleKey := ruleWPLogin.key
+			if entry.domain != "" {
+				ruleKey = ruleWPLogin.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "wp_bruteforce", logPath, line, map[string]string{
 				"domain":     entry.domain,
@@ -1867,7 +1871,11 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Threshold → score: XMLRPC abuse ──
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
 		if w.isTypeEnabled("xmlrpc_abuse") {
-			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
+			ruleKey := ruleXMLRPC.key
+			if entry.domain != "" {
+				ruleKey = ruleXMLRPC.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "xmlrpc_abuse", logPath, line, map[string]string{
 				"domain":     entry.domain,
@@ -1881,7 +1889,11 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Threshold → score: plugin scanner ──
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
 		if w.isTypeEnabled("scanner_detected") {
-			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
+			ruleKey := rulePluginScan.key
+			if entry.domain != "" {
+				ruleKey = rulePluginScan.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
 				"domain":     entry.domain,
@@ -1894,17 +1906,55 @@ func (w *WebWatcher) processLine(logPath, line string) {
 
 	// ── Threshold → score: 404 flood ──
 	if entry.status == 404 {
+		// Skip static assets — 404s for favicon, images, CSS, JS, fonts are never attacks.
+		// This prevents false positives on shared hosting where users browse multiple sites.
+		if isStaticAsset404(uriLower) {
+			return
+		}
 		if w.isTypeEnabled("404_flood") {
-			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
+			// Use per-domain threshold when domain is available (shared hosting).
+			// This prevents a user browsing 10 sites from being flagged as a 404 flooder.
+			ruleKey := rule404Flood.key
+			if entry.domain != "" {
+				ruleKey = rule404Flood.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "404_flood", logPath, line, map[string]string{
-				"domain":     entry.domain,
-					"uri": entry.uri,
+					"domain": entry.domain,
+					"uri":    entry.uri,
 				})
 			}
 		}
 		return
 	}
+}
+
+// isStaticAsset404 returns true if the URI is a request for a static asset.
+// 404s for these are normal (missing favicon, broken image links) and should
+// not count toward 404_flood scoring, especially on shared hosting.
+func isStaticAsset404(uriLower string) bool {
+	// Common static asset extensions
+	staticExts := []string{
+		".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif",
+		".css", ".js", ".map",
+		".woff", ".woff2", ".ttf", ".eot", ".otf",
+		".mp4", ".webm", ".mp3", ".ogg",
+		".pdf", ".txt",
+	}
+	for _, ext := range staticExts {
+		if strings.HasSuffix(uriLower, ext) {
+			return true
+		}
+	}
+	// Common static paths
+	if strings.HasPrefix(uriLower, "/favicon") {
+		return true
+	}
+	if strings.HasPrefix(uriLower, "/apple-touch-icon") {
+		return true
+	}
+	return false
 }
 
 // checkThresholdOnly increments the counter for a rule+IP and returns true if
