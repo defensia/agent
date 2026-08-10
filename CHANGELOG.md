@@ -2,11 +2,18 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.22
+- **ipset for ALL bans** — BanIP/UnbanIP use `defensia-bans` hash:ip set (65K capacity)
+- Eliminates iptables "Memory allocation problem" — from 1,200+ rules to 3
+- Batch `ipset restore` for ApplyBans (sub-second for 1,000+ IPs)
+- CleanupStaleBans works with ipset members
+
 ## v1.4.21
 - **Proactive country geoblocking** — ipset hash:net with full CIDR ranges from MaxMind mmdb
 - Blocks ALL traffic from a country at kernel level (not reactive per-IP anymore)
 - One ipset set per country, batch-loaded via `ipset restore` (sub-second)
 - CIDR extraction cached after first call per country
+- IPv4 only filter (ipset hash:net doesn't support IPv6)
 - Graceful fallback to reactive blocking if ipset not installed
 - Added `firewall.Init()`, `FirewallStatus()`, ipset detection
 
