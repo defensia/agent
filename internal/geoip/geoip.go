@@ -1,8 +1,10 @@
 package geoip
 
 import (
+	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/oschwald/maxminddb-golang"
@@ -12,9 +14,10 @@ const defaultDBPath = "/etc/defensia/GeoLite2-Country.mmdb"
 
 // Lookup provides country code lookups from MaxMind GeoLite2-Country database.
 type Lookup struct {
-	mu      sync.RWMutex
-	db      *maxminddb.Reader
-	blocked map[string]bool // lowercase country codes that are blocked
+	mu        sync.RWMutex
+	db        *maxminddb.Reader
+	blocked   map[string]bool   // lowercase country codes that are blocked
+	cidrCache map[string][]string // cached CIDRs per country code (extracted once)
 }
 
 type countryRecord struct {
@@ -29,7 +32,10 @@ func New(dbPath string) *Lookup {
 		dbPath = defaultDBPath
 	}
 
-	l := &Lookup{blocked: make(map[string]bool)}
+	l := &Lookup{
+		blocked:   make(map[string]bool),
+		cidrCache: make(map[string][]string),
+	}
 
 	db, err := maxminddb.Open(dbPath)
 	if err != nil {
@@ -93,4 +99,49 @@ func (l *Lookup) IsBlocked(ipStr string) (string, bool) {
 	defer l.mu.RUnlock()
 
 	return cc, l.blocked[cc]
+}
+
+// ExtractCIDRs returns all CIDRs for the given country code from the mmdb.
+// Results are cached — the full mmdb iteration only happens once per country.
+func (l *Lookup) ExtractCIDRs(countryCode string) ([]string, error) {
+	if l.db == nil {
+		return nil, fmt.Errorf("geoip database not loaded")
+	}
+
+	countryCode = strings.ToUpper(strings.TrimSpace(countryCode))
+	if countryCode == "" {
+		return nil, fmt.Errorf("empty country code")
+	}
+
+	l.mu.RLock()
+	if cached, ok := l.cidrCache[countryCode]; ok {
+		l.mu.RUnlock()
+		log.Printf("[geoip] returning %d cached CIDRs for %s", len(cached), countryCode)
+		return cached, nil
+	}
+	l.mu.RUnlock()
+
+	var cidrs []string
+	networks := l.db.Networks(maxminddb.SkipAliasedNetworks)
+	for networks.Next() {
+		var record countryRecord
+		subnet, err := networks.Network(&record)
+		if err != nil {
+			continue
+		}
+		if record.Country.ISOCode == countryCode {
+			cidrs = append(cidrs, subnet.String())
+		}
+	}
+	if err := networks.Err(); err != nil {
+		return cidrs, fmt.Errorf("network iteration error: %w", err)
+	}
+
+	// Cache the result
+	l.mu.Lock()
+	l.cidrCache[countryCode] = cidrs
+	l.mu.Unlock()
+
+	log.Printf("[geoip] extracted %d CIDRs for country %s (cached)", len(cidrs), countryCode)
+	return cidrs, nil
 }

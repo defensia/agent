@@ -40,7 +40,6 @@ var malwareRTWatcher    *malware.RealtimeWatcher
 var yaraScanner         *malware.YaraScanner
 var malwareCustomPaths  []string
 var modsecEngine      *modsecurity.Engine
-var modsecDedup       *modsecurity.Dedup
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -179,10 +178,6 @@ func runAgent() {
 		}
 	}
 
-
-	// Shared dedup for ModSecurity + WAF log deduplication
-	modsecDedup = modsecurity.NewDedup(30 * time.Second)
-
 	// Shared dedup: ModSecurity audit log events suppress duplicate WAF log-based events
 	modsecDedup := modsecurity.NewDedup(30 * time.Second)
 
@@ -191,30 +186,57 @@ func runAgent() {
 		attackCat := entry.AttackCategory()
 		eventType := modsecurity.MapAttackToEventType(attackCat)
 		severity := modsecurity.MapSeverityToDefensia(entry.HighestSeverity())
+
+		// Collect rule IDs and messages for details
 		var ruleIDs, ruleMsgs []string
 		for _, r := range entry.Rules {
-			if r.ID != "" { ruleIDs = append(ruleIDs, r.ID) }
-			if r.Msg != "" { ruleMsgs = append(ruleMsgs, r.Msg) }
+			if r.ID != "" {
+				ruleIDs = append(ruleIDs, r.ID)
+			}
+			if r.Msg != "" {
+				ruleMsgs = append(ruleMsgs, r.Msg)
+			}
 		}
+
 		details := map[string]string{
-			"source": "modsecurity", "attack_type": attackCat,
-			"rule_ids": strings.Join(ruleIDs, ","), "uri": entry.URI,
-			"action": entry.Action, "engine_mode": entry.EngineMode,
+			"source":       "modsecurity",
+			"attack_type":  attackCat,
+			"rule_ids":     strings.Join(ruleIDs, ","),
+			"uri":          entry.URI,
+			"action":       entry.Action,
+			"engine_mode":  entry.EngineMode,
 		}
-		if entry.Host != "" { details["domain"] = entry.Host }
-		if entry.Method != "" { details["method"] = entry.Method }
-		if entry.StatusCode != "" { details["status_code"] = entry.StatusCode }
+		if entry.Host != "" {
+			details["domain"] = entry.Host
+		}
+		if entry.Method != "" {
+			details["method"] = entry.Method
+		}
+		if entry.StatusCode != "" {
+			details["status_code"] = entry.StatusCode
+		}
 		if len(ruleMsgs) > 0 {
 			msg := strings.Join(ruleMsgs, "; ")
-			if len(msg) > 500 { msg = msg[:500] }
+			if len(msg) > 500 {
+				msg = msg[:500]
+			}
 			details["rule_messages"] = msg
 		}
-		if entry.UserAgent != "" { details["user_agent"] = entry.UserAgent }
+		if entry.UserAgent != "" {
+			details["user_agent"] = entry.UserAgent
+		}
+
 		log.Printf("[modsec-audit] %s from %s: %s (rules: %s)", eventType, entry.SourceIP, attackCat, strings.Join(ruleIDs, ","))
+
+		// Record IP in dedup so the web log watcher skips this IP for 30s
 		modsecDedup.Record(entry.SourceIP)
+
 		_ = apiClient.ReportEvents([]api.EventRequest{{
-			Type: eventType, Severity: severity, SourceIP: entry.SourceIP,
-			Details: details, OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			Type:       eventType,
+			Severity:   severity,
+			SourceIP:   entry.SourceIP,
+			Details:    details,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		}})
 	}); auditWatcher != nil {
 		go auditWatcher.Run()
@@ -225,6 +247,11 @@ func runAgent() {
 	geoDBPath := os.Getenv("GEOIP_DB_PATH")
 	geo := geoip.New(geoDBPath)
 	defer geo.Close()
+
+	// Initialize proactive country geoblocker (ipset hash:net)
+	geoBlocker := firewall.NewGeoBlocker(func(cc string) ([]string, error) {
+		return geo.ExtractCIDRs(cc)
+	})
 
 	// Initialize Kubernetes client (nil if not running in K8s)
 	k8sClient := kubernetes.NewClient()
@@ -609,7 +636,7 @@ func runAgent() {
 	})
 
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
+	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -680,7 +707,7 @@ func runAgent() {
 			OnSyncRequested: func(p ws.SyncRequestedPayload) {
 				log.Printf("[reverb] sync.requested: agent_id=%d", p.AgentID)
 				go func() {
-					if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
+					if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
 						log.Printf("[sync] sync.requested failed: %v", err)
 					}
 				}()
@@ -808,7 +835,7 @@ func runAgent() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, reportUpdateEvent, wsName); err != nil {
+			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -823,7 +850,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, ftpW *watcher.FTPWatcher, geo *geoip.Lookup, reportUpdateEvent updater.EventReporter, wsType string) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, ftpW *watcher.FTPWatcher, geo *geoip.Lookup, geoBlocker *firewall.GeoBlocker, reportUpdateEvent updater.EventReporter, wsType string) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -917,6 +944,13 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	geo.SetBlocked(blockedCountries)
+
+	// Apply proactive country blocks via ipset hash:net (kernel-level, all CIDRs)
+	if !sync.Config.MonitorMode {
+		geoBlocker.ApplyCountryBlocks(blockedCountries)
+	} else if len(blockedCountries) > 0 {
+		log.Printf("[geoblock] monitor mode — country blocks not applied at kernel level")
+	}
 
 	// Apply bans (skipped in monitor mode)
 	activeBanIPs := make(map[string]bool, len(sync.Bans))
@@ -1075,6 +1109,30 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				Rules:   sync.YaraRules.Rules,
 				Version: sync.YaraRules.Version,
 			})
+		}
+	}
+
+	// Process quarantine requests from dashboard
+	if len(sync.QuarantinePending) > 0 {
+		for _, filePath := range sync.QuarantinePending {
+			log.Printf("[quarantine] processing request: %s", filePath)
+			if _, err := malware.QuarantineFile(filePath); err != nil {
+				log.Printf("[quarantine] failed to quarantine %s: %v", filePath, err)
+				_ = client.ReportEvents([]api.EventRequest{{
+					Type:     "quarantine_failed",
+					Severity: "warning",
+					Details:  map[string]string{"file": filePath, "error": err.Error()},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			} else {
+				log.Printf("[quarantine] moved %s to quarantine", filePath)
+				_ = client.ReportEvents([]api.EventRequest{{
+					Type:     "quarantine_completed",
+					Severity: "info",
+					Details:  map[string]string{"file": filePath},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			}
 		}
 	}
 

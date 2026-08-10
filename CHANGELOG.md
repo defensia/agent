@@ -2,6 +2,14 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.21
+- **Proactive country geoblocking** — ipset hash:net with full CIDR ranges from MaxMind mmdb
+- Blocks ALL traffic from a country at kernel level (not reactive per-IP anymore)
+- One ipset set per country, batch-loaded via `ipset restore` (sub-second)
+- CIDR extraction cached after first call per country
+- Graceful fallback to reactive blocking if ipset not installed
+- Added `firewall.Init()`, `FirewallStatus()`, ipset detection
+
 ## v1.2.0
 - **ModSecurity inline WAF** — auto-detects Apache + mod_security2, writes 14 static rules (SQLi, XSS, RCE, SSRF, Shellshock, Log4Shell, Spring4Shell), configures Include + graceful reload. Blocks on first request. Zero impact without ModSecurity.
 - Reports `modsec_active` in heartbeat
