@@ -26,14 +26,17 @@ func SetK8sHook(hook interface{}) {
 type Status struct {
 	Mode       string // "ipset" or "iptables"
 	HasIpset   bool
+	Capacity   int
 	ActiveBans int
 }
 
-// FirewallStatus returns mode and active ban count.
+// FirewallStatus returns mode, capacity, and active ban count.
 func FirewallStatus() Status {
 	mode := "iptables"
+	capacity := 500
 	if HasIpset() {
 		mode = "ipset"
+		capacity = 65536
 	}
 	rules, err := ListRules()
 	bans := 0
@@ -44,7 +47,7 @@ func FirewallStatus() Status {
 			}
 		}
 	}
-	return Status{Mode: mode, HasIpset: HasIpset(), ActiveBans: bans}
+	return Status{Mode: mode, HasIpset: HasIpset(), Capacity: capacity, ActiveBans: bans}
 }
 
 // RuleSpec describes a firewall rule to apply.

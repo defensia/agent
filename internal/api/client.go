@@ -259,6 +259,7 @@ type SyncResponse struct {
 	YaraRules              *YaraRulesSync         `json:"yara_rules,omitempty"`
 	YaraInstallRequested    bool                   `json:"yara_install_requested"`
 	MalwareScanRequested   bool                   `json:"malware_scan_requested"`
+	QuarantinePending      []string               `json:"quarantine_pending"`
 }
 
 // YaraRulesSync is the YARA rules content synced from the backend.
