@@ -2018,13 +2018,17 @@ func (w *WebWatcher) UpdateWAFConfig(cfg *WAFConfig) {
 		return
 	}
 
-	if len(cfg.EnabledTypes) > 0 {
+	if cfg.EnabledTypes != nil {
 		m := make(map[string]bool, len(cfg.EnabledTypes))
 		for _, t := range cfg.EnabledTypes {
 			m[t] = true
 		}
 		w.wafEnabled = m
-		log.Printf("[webwatcher] WAF config applied: %d enabled types, %d detect-only, %d thresholds", len(cfg.EnabledTypes), len(cfg.DetectOnlyTypes), len(cfg.Thresholds))
+		if len(cfg.EnabledTypes) == 0 {
+			log.Println("[webwatcher] WAF disabled — 0 enabled types")
+		} else {
+			log.Printf("[webwatcher] WAF config applied: %d enabled types, %d detect-only, %d thresholds", len(cfg.EnabledTypes), len(cfg.DetectOnlyTypes), len(cfg.Thresholds))
+		}
 	} else {
 		w.wafEnabled = nil
 		log.Println("[webwatcher] WAF config: no types specified — all types enabled by default")

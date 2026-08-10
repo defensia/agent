@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.23
+- **fix: WAF disable toggle** — empty `enabled_types` array from panel now correctly disables WAF detection (previously treated as "use all defaults")
+
 ## v1.4.22
 - **ipset for ALL bans** — BanIP/UnbanIP use `defensia-bans` hash:ip set (65K capacity)
 - Eliminates iptables "Memory allocation problem" — from 1,200+ rules to 3
