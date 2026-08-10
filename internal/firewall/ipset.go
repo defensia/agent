@@ -18,9 +18,9 @@ func checkIpset() bool {
 		_, err := exec.LookPath("ipset")
 		ipsetAvailable = err == nil
 		if ipsetAvailable {
-			log.Println("[firewall] ipset detected — using hash:net for country blocks")
+			log.Println("[firewall] ipset detected — using ipset for bans + country blocks")
 		} else {
-			log.Println("[firewall] ipset not found — country geoblocking requires ipset (apt install ipset)")
+			log.Println("[firewall] ipset not found — falling back to iptables (limited capacity)")
 		}
 	})
 	return ipsetAvailable
@@ -115,6 +115,74 @@ func removeIptablesIpsetRule(setName string) error {
 			setName, strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// createIpsetHashIP creates an ipset hash:ip set for individual IP bans.
+func createIpsetHashIP(name string) error {
+	out, err := exec.Command("ipset", "create", name, "hash:ip",
+		"maxelem", "65536", "-exist").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ipset create %s hash:ip: %s (%w)", name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// ipsetAdd adds a single IP to an ipset set.
+func ipsetAdd(setName, ip string) error {
+	out, err := exec.Command("ipset", "add", setName, ip, "-exist").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ipset add %s to %s: %s (%w)", ip, setName, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// ipsetDel removes a single IP from an ipset set.
+func ipsetDel(setName, ip string) error {
+	out, err := exec.Command("ipset", "del", setName, ip, "-exist").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ipset del %s from %s: %s (%w)", ip, setName, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// ipsetBatchAdd adds multiple IPs to an ipset using `ipset restore` for speed.
+func ipsetBatchAdd(setName string, ips []string) error {
+	if len(ips) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for _, ip := range ips {
+		fmt.Fprintf(&b, "add %s %s -exist\n", setName, ip)
+	}
+	cmd := exec.Command("ipset", "restore")
+	cmd.Stdin = strings.NewReader(b.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ipset batch add to %s (%d IPs): %s (%w)",
+			setName, len(ips), strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// ipsetListMembers returns all IPs in an ipset set.
+func ipsetListMembers(setName string) []string {
+	out, err := exec.Command("ipset", "list", setName).CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var members []string
+	inMembers := false
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "Members:" {
+			inMembers = true
+			continue
+		}
+		if inMembers && line != "" {
+			members = append(members, line)
+		}
+	}
+	return members
 }
 
 // ipsetEntryCount returns how many entries are in a set (for logging).

@@ -10,9 +10,25 @@ import (
 	"sync"
 )
 
-// Init initializes the firewall backend: detects ipset availability.
+const banSetName = "defensia-bans"
+
+// Init initializes the firewall backend: detects ipset availability
+// and creates the defensia-bans hash:ip set if ipset is present.
 func Init() {
-	checkIpset()
+	if !checkIpset() {
+		return
+	}
+	// Create the bans set (hash:ip, 65536 max)
+	if err := createIpsetHashIP(banSetName); err != nil {
+		log.Printf("[firewall] failed to create ban set: %v", err)
+		return
+	}
+	// Add the single iptables rule for the bans set
+	if err := addIptablesIpsetRule(banSetName); err != nil {
+		log.Printf("[firewall] failed to add iptables rule for ban set: %v", err)
+		return
+	}
+	log.Printf("[firewall] ipset ban set ready: %s (hash:ip, 65536 max)", banSetName)
 }
 
 // SetK8sHook registers a Kubernetes-level firewall implementation.
@@ -32,11 +48,13 @@ type Status struct {
 
 // FirewallStatus returns mode, capacity, and active ban count.
 func FirewallStatus() Status {
-	mode := "iptables"
-	capacity := 500
 	if HasIpset() {
-		mode = "ipset"
-		capacity = 65536
+		return Status{
+			Mode:       "ipset",
+			HasIpset:   true,
+			Capacity:   65536,
+			ActiveBans: ipsetEntryCount(banSetName),
+		}
 	}
 	rules, err := ListRules()
 	bans := 0
@@ -47,7 +65,7 @@ func FirewallStatus() Status {
 			}
 		}
 	}
-	return Status{Mode: mode, HasIpset: HasIpset(), Capacity: capacity, ActiveBans: bans}
+	return Status{Mode: "iptables", HasIpset: false, Capacity: 500, ActiveBans: bans}
 }
 
 // RuleSpec describes a firewall rule to apply.
@@ -201,14 +219,19 @@ func isSafeIP(ip net.IP) bool {
 }
 
 // BanIP adds a DROP rule for the given IP address.
+// When ipset is available, adds to the defensia-bans hash:ip set (O(1), 65K capacity).
+// Otherwise falls back to individual iptables rules.
 func BanIP(ip string) error {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
 	}
 	if isSafeIP(parsed) {
-		log.Printf("[firewall] refusing to ban safe IP (reserved or self): %s", ip)
 		return fmt.Errorf("refusing to ban safe IP: %s", ip)
+	}
+
+	if HasIpset() {
+		return ipsetAdd(banSetName, ip)
 	}
 
 	return ApplyRule(RuleSpec{
@@ -224,6 +247,10 @@ func UnbanIP(ip string) error {
 		return fmt.Errorf("invalid IP address: %s", ip)
 	}
 
+	if HasIpset() {
+		return ipsetDel(banSetName, ip)
+	}
+
 	return RemoveRule(RuleSpec{
 		Type:      "block",
 		Protocol:  "all",
@@ -232,7 +259,22 @@ func UnbanIP(ip string) error {
 }
 
 // ApplyBans applies a list of IPs from the server sync.
+// When ipset is available, uses batch restore for maximum speed.
 func ApplyBans(ips []string) {
+	if HasIpset() && len(ips) > 0 {
+		// Filter safe IPs before batch add
+		var safe []string
+		for _, ip := range ips {
+			parsed := net.ParseIP(ip)
+			if parsed != nil && !isSafeIP(parsed) {
+				safe = append(safe, ip)
+			}
+		}
+		if err := ipsetBatchAdd(banSetName, safe); err != nil {
+			log.Printf("[firewall] ipset batch ban failed: %v", err)
+		}
+		return
+	}
 	for _, ip := range ips {
 		if err := BanIP(ip); err != nil {
 			log.Printf("[firewall] error applying ban for %s: %v", ip, err)
@@ -240,11 +282,41 @@ func ApplyBans(ips []string) {
 	}
 }
 
-// CleanupStaleBans removes iptables DROP rules for IPs that are no longer
-// in the active ban list from the server (e.g. expired bans).
-// activeBanIPs: IPs that should remain banned.
-// activeRuleIPs: IPs managed by user-created firewall rules (not bans), so they won't be removed.
+// CleanupStaleBans removes bans for IPs that are no longer in the active ban list.
+// When ipset is available, flushes the set and re-adds only active IPs (atomic swap).
+// When using iptables, removes individual DROP rules.
 func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
+	if HasIpset() {
+		return cleanupIpsetBans(activeBanIPs)
+	}
+	return cleanupIptablesBans(activeBanIPs, activeRuleIPs)
+}
+
+// cleanupIpsetBans syncs the ipset to match exactly the active bans.
+func cleanupIpsetBans(activeBanIPs map[string]bool) int {
+	// List current entries in the set
+	currentIPs := ipsetListMembers(banSetName)
+	if len(currentIPs) == 0 && len(activeBanIPs) == 0 {
+		return 0
+	}
+
+	removed := 0
+	for _, ip := range currentIPs {
+		if !activeBanIPs[ip] {
+			if err := ipsetDel(banSetName, ip); err == nil {
+				removed++
+			}
+		}
+	}
+
+	if removed > 0 {
+		log.Printf("[firewall] cleanup: removed %d expired bans from ipset", removed)
+	}
+	return removed
+}
+
+// cleanupIptablesBans removes individual iptables DROP rules for expired bans.
+func cleanupIptablesBans(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
 	current, err := ListRules()
 	if err != nil {
 		log.Printf("[firewall] cleanup: cannot list rules: %v", err)
@@ -253,30 +325,25 @@ func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]boo
 
 	removed := 0
 	for _, r := range current {
-		// Only clean up simple DROP rules with a source IP and no port
-		// (ban rules are: -s <IP> -j DROP with no port/protocol)
 		if r.Type != "block" || r.Source == "" || r.Port != 0 || r.Protocol != "all" {
 			continue
 		}
-
-		// Still an active ban — keep it
 		if activeBanIPs[r.Source] {
 			continue
 		}
-
-		// Managed by a user firewall rule — don't touch
 		if activeRuleIPs[r.Source] {
 			continue
 		}
-
 		if err := UnbanIP(r.Source); err != nil {
 			log.Printf("[firewall] cleanup: failed to remove stale ban for %s: %v", r.Source, err)
 		} else {
-			log.Printf("[firewall] cleanup: removed expired ban for %s", r.Source)
 			removed++
 		}
 	}
 
+	if removed > 0 {
+		log.Printf("[firewall] cleanup: removed %d expired iptables bans", removed)
+	}
 	return removed
 }
 
