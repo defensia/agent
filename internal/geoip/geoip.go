@@ -130,7 +130,10 @@ func (l *Lookup) ExtractCIDRs(countryCode string) ([]string, error) {
 			continue
 		}
 		if record.Country.ISOCode == countryCode {
-			cidrs = append(cidrs, subnet.String())
+			// Only include IPv4 CIDRs (ipset hash:net doesn't support IPv6)
+			if subnet.IP.To4() != nil {
+				cidrs = append(cidrs, subnet.String())
+			}
 		}
 	}
 	if err := networks.Err(); err != nil {
