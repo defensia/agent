@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.25
+- **fix: iptables rule ordering** — geo DROP rules now use -A (append) instead of -I (insert first), ensuring ACCEPT rules for panel IP and whitelisted IPs always take precedence
+
 ## v1.4.24
 - **fix: geoblocking never blocks panel IP** — resolves Defensia panel URL to IP and inserts iptables ACCEPT rule before any geo DROP rules. Also protects all whitelisted IPs from geoblocking.
 

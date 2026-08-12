@@ -89,7 +89,7 @@ func populateIpsetBatch(setName string, cidrs []string) error {
 }
 
 // addIptablesIpsetRule adds an iptables rule that matches traffic from an ipset set.
-// The rule is: iptables -I INPUT 1 -m set --match-set <setName> src -j DROP
+// Uses -A (append) so protected IP ACCEPT rules (inserted with -I at position 1) always come first.
 func addIptablesIpsetRule(setName string) error {
 	// Check if rule already exists
 	if exec.Command("iptables", "-C", "INPUT",
@@ -97,7 +97,7 @@ func addIptablesIpsetRule(setName string) error {
 		return nil // already exists
 	}
 
-	out, err := exec.Command("iptables", "-I", "INPUT", "1",
+	out, err := exec.Command("iptables", "-A", "INPUT",
 		"-m", "set", "--match-set", setName, "src", "-j", "DROP").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("iptables add ipset rule for %s: %s (%w)",
