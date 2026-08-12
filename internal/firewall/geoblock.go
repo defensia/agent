@@ -2,6 +2,9 @@ package firewall
 
 import (
 	"log"
+	"net"
+	"net/url"
+	"os/exec"
 	"strings"
 	"sync"
 )
@@ -13,21 +16,43 @@ type CIDRProvider func(countryCode string) ([]string, error)
 // GeoBlocker manages ipset-based country blocking.
 // Each blocked country gets its own ipset hash:net set with all CIDRs loaded.
 type GeoBlocker struct {
-	mu            sync.Mutex
+	mu              sync.Mutex
 	activeCountries map[string]bool // currently blocked country codes (uppercase)
-	cidrProvider  CIDRProvider
+	cidrProvider    CIDRProvider
+	protectedIPs    []string // IPs that must never be geo-blocked (panel server, etc.)
 }
 
 // NewGeoBlocker creates a GeoBlocker with the given CIDR provider.
-func NewGeoBlocker(provider CIDRProvider) *GeoBlocker {
-	return &GeoBlocker{
+// panelURL is the Defensia panel URL (e.g. "https://api.defensia.cloud") —
+// its IP will always be whitelisted in iptables before any geo DROP rules.
+func NewGeoBlocker(provider CIDRProvider, panelURL string) *GeoBlocker {
+	gb := &GeoBlocker{
 		activeCountries: make(map[string]bool),
 		cidrProvider:    provider,
 	}
+
+	// Resolve panel URL to IP and protect it
+	if panelURL != "" {
+		if u, err := url.Parse(panelURL); err == nil && u.Hostname() != "" {
+			if ips, err := net.LookupHost(u.Hostname()); err == nil {
+				for _, ip := range ips {
+					if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil {
+						gb.protectedIPs = append(gb.protectedIPs, ip)
+					}
+				}
+				if len(gb.protectedIPs) > 0 {
+					log.Printf("[geoblock] panel IP(s) protected from geoblocking: %v", gb.protectedIPs)
+				}
+			}
+		}
+	}
+
+	return gb
 }
 
 // ApplyCountryBlocks synchronizes the ipset country blocks with the desired list.
 // It adds sets for new countries and removes sets for countries no longer blocked.
+// Protected IPs (panel server) always get an ACCEPT rule before any geo DROP.
 func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 	if !HasIpset() {
 		if len(countries) > 0 {
@@ -38,6 +63,11 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Ensure protected IPs have ACCEPT rules before any geo DROP
+	if len(countries) > 0 {
+		g.ensureProtectedIPs()
+	}
 
 	// Build desired set (uppercase, deduplicated)
 	desired := make(map[string]bool, len(countries))
@@ -138,6 +168,48 @@ func (g *GeoBlocker) ActiveCountries() []string {
 		result = append(result, cc)
 	}
 	return result
+}
+
+// SetWhitelistedIPs adds extra IPs that must be protected from geoblocking.
+// Called during sync when whitelists are applied.
+func (g *GeoBlocker) SetWhitelistedIPs(ips []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Rebuild protected list: panel IPs + whitelisted IPs
+	panelIPs := make([]string, 0)
+	for _, ip := range g.protectedIPs {
+		// Keep only the original panel IPs (non-whitelist)
+		panelIPs = append(panelIPs, ip)
+		if len(panelIPs) >= 5 { // cap at max 5 panel IPs
+			break
+		}
+	}
+	g.protectedIPs = panelIPs
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip != "" && net.ParseIP(ip) != nil {
+			g.protectedIPs = append(g.protectedIPs, ip)
+		}
+	}
+}
+
+// ensureProtectedIPs inserts iptables ACCEPT rules for all protected IPs.
+// These ACCEPT rules are inserted at position 1, before any geo DROP rules.
+func (g *GeoBlocker) ensureProtectedIPs() {
+	for _, ip := range g.protectedIPs {
+		// Check if ACCEPT rule already exists
+		if exec.Command("iptables", "-C", "INPUT", "-s", ip, "-j", "ACCEPT").Run() == nil {
+			continue // already exists
+		}
+		// Insert at position 1 (before any DROP rules)
+		out, err := exec.Command("iptables", "-I", "INPUT", "1", "-s", ip, "-j", "ACCEPT").CombinedOutput()
+		if err != nil {
+			log.Printf("[geoblock] failed to add ACCEPT rule for protected IP %s: %s", ip, strings.TrimSpace(string(out)))
+		} else {
+			log.Printf("[geoblock] ✓ protected IP %s: ACCEPT rule added (immune to geoblocking)", ip)
+		}
+	}
 }
 
 // Cleanup removes all geoblock ipset sets and iptables rules (used on shutdown).

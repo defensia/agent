@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.24
+- **fix: geoblocking never blocks panel IP** — resolves Defensia panel URL to IP and inserts iptables ACCEPT rule before any geo DROP rules. Also protects all whitelisted IPs from geoblocking.
+
 ## v1.4.23
 - **fix: WAF disable toggle** — empty `enabled_types` array from panel now correctly disables WAF detection (previously treated as "use all defaults")
 

@@ -249,9 +249,10 @@ func runAgent() {
 	defer geo.Close()
 
 	// Initialize proactive country geoblocker (ipset hash:net)
+	// Panel URL is protected so geoblocking never cuts off agent ↔ panel communication.
 	geoBlocker := firewall.NewGeoBlocker(func(cc string) ([]string, error) {
 		return geo.ExtractCIDRs(cc)
-	})
+	}, cfg.ServerURL)
 
 	// Initialize Kubernetes client (nil if not running in K8s)
 	k8sClient := kubernetes.NewClient()
@@ -944,6 +945,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	geo.SetBlocked(blockedCountries)
+
+	// Pass whitelisted IPs to geoblocker so they get ACCEPT rules before geo DROPs
+	geoBlocker.SetWhitelistedIPs(wlIPs)
 
 	// Apply proactive country blocks via ipset hash:net (kernel-level, all CIDRs)
 	if !sync.Config.MonitorMode {
