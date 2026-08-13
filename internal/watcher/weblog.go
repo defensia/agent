@@ -1678,7 +1678,11 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 		for _, pat := range rule.patterns {
 			if strings.Contains(uriLower, pat) || strings.Contains(uriRaw, pat) {
-				w.addScore(ip, rule.eventType, logPath, line, map[string]string{
+				eventType := rule.eventType
+				if eventType == "web_shell" && entry.status != 200 && entry.status != 0 {
+					eventType = "scanner_detected"
+				}
+				w.addScore(ip, eventType, logPath, line, map[string]string{
 				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"method":     entry.method,
