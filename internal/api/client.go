@@ -579,6 +579,33 @@ func (c *Client) LookupMalwareHashes(hashes []string) (*HashLookupResponse, erro
 	return &resp, err
 }
 
+// WpInventoryRequest is the payload for WordPress plugin/theme inventory.
+type WpInventoryRequest struct {
+	WpSites []WpSite `json:"wp_sites"`
+}
+
+// WpSite represents a WordPress installation.
+type WpSite struct {
+	WebRoot    string        `json:"web_root"`
+	Domain     string        `json:"domain,omitempty"`
+	WpVersion  string        `json:"wp_version,omitempty"`
+	Components []WpComponent `json:"components"`
+}
+
+// WpComponent represents a plugin or theme.
+type WpComponent struct {
+	Slug     string `json:"slug"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Type     string `json:"type"`
+	IsActive bool   `json:"is_active"`
+}
+
+// ReportWpInventory sends WordPress plugin/theme inventory to the panel.
+func (c *Client) ReportWpInventory(req WpInventoryRequest) error {
+	return c.post("/api/v1/agent/wp-inventory", c.token, req, nil)
+}
+
 func (c *Client) post(path, token string, body, out any) error {
 	data, err := json.Marshal(body)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,9 +31,10 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "0.9.92"
+var version = "1.4.26"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
+var malwareScanRunning  atomic.Bool
 var malwareScheduler    *malware.Scheduler
 var malwareAllowList    *malware.AllowList
 var malwareScanner      *malware.Scanner
@@ -1548,6 +1550,11 @@ func loadThreatFeedCache() {
 
 // runMalwareScan detects web roots, runs malware signature scanning and framework checks.
 func runMalwareScan(client *api.Client, intensityStr string) {
+	if !malwareScanRunning.CompareAndSwap(false, true) {
+		log.Printf("[malware] scan already running, skipping duplicate request")
+		return
+	}
+	defer malwareScanRunning.Store(false)
 	log.Printf("[malware] starting scan (intensity=%s)", intensityStr)
 
 	_ = client.ReportEvents([]api.EventRequest{{
@@ -1609,6 +1616,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 	var totalFiles, totalSkipped int64
 	var allFindings []malware.Finding
 	var allFwFindings []malware.FrameworkFinding
+	var wpInventories []api.WpSite
 
 	// Scan each root individually and submit results incrementally
 	for i, root := range webRoots {
@@ -1636,6 +1644,23 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		// Framework checks for this root
 		rootFwFindings := malware.CheckFramework(root)
 		allFwFindings = append(allFwFindings, rootFwFindings...)
+
+		// WordPress plugin/theme inventory
+		if root.Framework.Name == "wordpress" {
+			if inv := malware.ReadWpInventory(root.Path, root.Domain, root.Framework.Version); inv != nil {
+				comps := make([]api.WpComponent, 0, len(inv.Components))
+				for _, c := range inv.Components {
+					comps = append(comps, api.WpComponent{
+						Slug: c.Slug, Name: c.Name, Version: c.Version,
+						Type: c.Type, IsActive: c.IsActive,
+					})
+				}
+				wpInventories = append(wpInventories, api.WpSite{
+					WebRoot: inv.WebRoot, Domain: inv.Domain,
+					WpVersion: inv.WpVersion, Components: comps,
+				})
+			}
+		}
 
 		// Filter findings
 		var chunkFindings []api.MalwareScanFinding
@@ -1716,6 +1741,23 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 			},
 		}); err != nil {
 			log.Printf("[malware] failed to complete scan: %v", err)
+		}
+	}
+
+	// Report WordPress inventory if collected
+	if len(wpInventories) > 0 {
+		if err := client.ReportWpInventory(api.WpInventoryRequest{WpSites: wpInventories}); err != nil {
+			log.Printf("[malware] failed to report WP inventory: %v", err)
+		} else {
+			totalPlugins := 0
+			for _, s := range wpInventories {
+				for _, c := range s.Components {
+					if c.Type == "plugin" {
+						totalPlugins++
+					}
+				}
+			}
+			log.Printf("[malware] reported WP inventory: %d sites, %d plugins", len(wpInventories), totalPlugins)
 		}
 	}
 
