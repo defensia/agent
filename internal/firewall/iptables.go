@@ -40,20 +40,24 @@ func SetK8sHook(hook interface{}) {
 
 // FirewallStatus returns the current firewall backend status.
 type Status struct {
-	Mode       string // "ipset" or "iptables"
+	Mode       string    // "ipset" or "iptables"
 	HasIpset   bool
 	Capacity   int
 	ActiveBans int
+	CSF        CSFStatus // CSF info (empty if not installed)
 }
 
-// FirewallStatus returns mode, capacity, and active ban count.
+// FirewallStatus returns mode, capacity, active ban count, and CSF info.
 func FirewallStatus() Status {
+	csf := CSFInfo()
+
 	if HasIpset() {
 		return Status{
 			Mode:       "ipset",
 			HasIpset:   true,
 			Capacity:   65536,
 			ActiveBans: ipsetEntryCount(banSetName),
+			CSF:        csf,
 		}
 	}
 	rules, err := ListRules()
@@ -65,7 +69,7 @@ func FirewallStatus() Status {
 			}
 		}
 	}
-	return Status{Mode: "iptables", HasIpset: false, Capacity: 500, ActiveBans: bans}
+	return Status{Mode: "iptables", HasIpset: false, Capacity: 500, ActiveBans: bans, CSF: csf}
 }
 
 // RuleSpec describes a firewall rule to apply.

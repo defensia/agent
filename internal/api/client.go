@@ -162,6 +162,12 @@ type HeartbeatRequest struct {
 	RequestsAnalyzed   uint64            `json:"requests_analyzed,omitempty"`
 	ListeningServices  []ListeningService `json:"listening_services,omitempty"`
 	Runtime            *RuntimeStats     `json:"runtime,omitempty"`
+	CSFInstalled       bool           `json:"csf_installed,omitempty"`
+	CSFVersion         string         `json:"csf_version,omitempty"`
+	CSFPortsIn         string         `json:"csf_ports_in,omitempty"`
+	CSFPortsOut        string         `json:"csf_ports_out,omitempty"`
+	CSFDenyCount       int            `json:"csf_deny_count,omitempty"`
+	CSFAllowCount      int            `json:"csf_allow_count,omitempty"`
 }
 
 // RuntimeStats reports the agent's own resource usage so we can detect leaks
@@ -604,6 +610,19 @@ type WpComponent struct {
 // ReportWpInventory sends WordPress plugin/theme inventory to the panel.
 func (c *Client) ReportWpInventory(req WpInventoryRequest) error {
 	return c.post("/api/v1/agent/wp-inventory", c.token, req, nil)
+}
+
+// MonitorRunRequest is a single monitor scan result.
+type MonitorRunRequest struct {
+	Monitor    string            `json:"monitor"`
+	Detections int               `json:"detections"`
+	Summary    map[string]string `json:"summary"`
+	RanAt      string            `json:"ran_at"`
+}
+
+// ReportMonitorRun sends a background monitor result to the panel.
+func (c *Client) ReportMonitorRun(req MonitorRunRequest) error {
+	return c.post("/api/v1/agent/monitor-runs", c.token, req, nil)
 }
 
 func (c *Client) post(path, token string, body, out any) error {

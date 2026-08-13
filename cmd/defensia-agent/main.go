@@ -800,6 +800,12 @@ func runAgent() {
 				YaraInstalled:    func() bool { if yaraScanner != nil { yaraScanner.Recheck() }; return yaraScanner != nil && yaraScanner.IsAvailable() }(),
 				ModsecActive:     modsecEngine != nil && modsecEngine.IsAvailable(),
 				RequestsAnalyzed: reqAnalyzed,
+				CSFInstalled:     fwStatus.CSF.Installed,
+				CSFVersion:       fwStatus.CSF.Version,
+				CSFPortsIn:       fwStatus.CSF.PortsIn,
+				CSFPortsOut:      fwStatus.CSF.PortsOut,
+				CSFDenyCount:     fwStatus.CSF.DenyCount,
+				CSFAllowCount:    fwStatus.CSF.AllowCount,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -831,6 +837,9 @@ func runAgent() {
 
 	// Zombie process monitor (check every 60s, report events when threshold exceeded)
 	go runZombieMonitor(apiClient)
+
+	// Background security monitors (port scan, flood, file integrity)
+	go runSecurityMonitors(apiClient)
 
 	// Fallback sync ticker (every 5min, in case WS misses something)
 	go func() {
@@ -1498,6 +1507,47 @@ func runZombieMonitor(client *api.Client) {
 		}
 
 		lastReported = report.Count
+	}
+}
+
+// ── Security Monitors (port scan, flood, file integrity) ─────────────────────
+
+func runSecurityMonitors(client *api.Client) {
+	portScan := monitor.NewPortScanDetector()
+	flood := monitor.NewFloodDetector()
+	integrity := monitor.NewIntegrityMonitor()
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	// Run integrity immediately to establish baseline
+	result := integrity.Run()
+	reportMonitorRun(client, result)
+
+	for range ticker.C {
+		psResult := portScan.Run()
+		reportMonitorRun(client, psResult)
+
+		flResult := flood.Run()
+		reportMonitorRun(client, flResult)
+
+		// File integrity every 5 min
+		if time.Now().Minute()%5 == 0 {
+			fiResult := integrity.Run()
+			reportMonitorRun(client, fiResult)
+		}
+	}
+}
+
+func reportMonitorRun(client *api.Client, result monitor.ScanResult) {
+	req := api.MonitorRunRequest{
+		Monitor:    result.Monitor,
+		Detections: result.Detections,
+		Summary:    result.Summary,
+		RanAt:      result.RanAt,
+	}
+	if err := client.ReportMonitorRun(req); err != nil {
+		log.Printf("[monitor] failed to report %s: %v", result.Monitor, err)
 	}
 }
 
