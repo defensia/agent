@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -201,45 +202,115 @@ func checkOpenPorts() []Finding {
 		service  string
 		severity string
 	}{
-		21:   {"FTP", "high"},
-		23:   {"Telnet", "critical"},
-		25:   {"SMTP", "medium"},
-		3306: {"MySQL", "high"},
-		5432: {"PostgreSQL", "high"},
-		6379: {"Redis", "critical"},
+		21:    {"FTP", "high"},
+		23:    {"Telnet", "critical"},
+		25:    {"SMTP", "medium"},
+		3306:  {"MySQL", "high"},
+		5432:  {"PostgreSQL", "high"},
+		6379:  {"Redis", "critical"},
 		11211: {"Memcached", "high"},
 		27017: {"MongoDB", "critical"},
 	}
 
+	// Get actual bind addresses from ss (more reliable than connecting to localhost)
+	exposedPorts := getExposedPorts()
+
 	for port, info := range dangerousPorts {
-		open := isPortOpen("127.0.0.1", port)
-		if open {
-			findings = append(findings, Finding{
-				Category:       "open_ports",
-				Severity:       info.severity,
-				CheckID:        fmt.Sprintf("PORT_%d", port),
-				Title:          fmt.Sprintf("%s port %d is open", info.service, port),
-				Description:    fmt.Sprintf("%s is listening on port %d", info.service, port),
-				Recommendation: fmt.Sprintf("Ensure %s is not exposed publicly or bind to 127.0.0.1", info.service),
-				Details:        map[string]string{"port": fmt.Sprintf("%d", port), "service": info.service},
-				Passed:         false,
-			})
+		bindAddr, listening := exposedPorts[port]
+		if !listening {
+			continue
 		}
+
+		// Services bound to 127.0.0.1 or ::1 are safe (localhost only)
+		if bindAddr == "127.0.0.1" || bindAddr == "::1" || bindAddr == "[::1]" {
+			findings = append(findings, Finding{
+				Category:    "open_ports",
+				Severity:    "info",
+				CheckID:     fmt.Sprintf("PORT_%d", port),
+				Title:       fmt.Sprintf("%s port %d is bound to localhost (safe)", info.service, port),
+				Description: fmt.Sprintf("%s is listening on %s:%d — not externally accessible", info.service, bindAddr, port),
+				Details:     map[string]string{"port": fmt.Sprintf("%d", port), "service": info.service, "bind": bindAddr},
+				Passed:      true,
+			})
+			continue
+		}
+
+		// Service is exposed on 0.0.0.0 or a public IP — real risk
+		findings = append(findings, Finding{
+			Category:       "open_ports",
+			Severity:       info.severity,
+			CheckID:        fmt.Sprintf("PORT_%d", port),
+			Title:          fmt.Sprintf("%s port %d is exposed externally", info.service, port),
+			Description:    fmt.Sprintf("%s is listening on %s:%d — accessible from the network", info.service, bindAddr, port),
+			Recommendation: fmt.Sprintf("Bind %s to 127.0.0.1 or restrict access with firewall rules", info.service),
+			Details:        map[string]string{"port": fmt.Sprintf("%d", port), "service": info.service, "bind": bindAddr},
+			Passed:         false,
+		})
 	}
 
-	// If no dangerous ports found, add a pass
-	if len(findings) == 0 {
+	// If no dangerous ports found at all, add a pass
+	hasFailed := false
+	for _, f := range findings {
+		if !f.Passed {
+			hasFailed = true
+			break
+		}
+	}
+	if !hasFailed && len(findings) == 0 {
 		findings = append(findings, Finding{
 			Category:    "open_ports",
 			Severity:    "info",
 			CheckID:     "PORTS_CLEAN",
 			Title:       "No dangerous ports exposed",
-			Description: "None of the commonly exploited ports are open locally",
+			Description: "None of the commonly exploited ports are externally accessible",
 			Passed:      true,
 		})
 	}
 
 	return findings
+}
+
+// getExposedPorts reads listening TCP ports and their bind addresses via ss.
+// Returns map[port]bindAddress where bindAddress is "0.0.0.0", "127.0.0.1", "::", etc.
+func getExposedPorts() map[int]string {
+	result := make(map[int]string)
+
+	out, err := exec.Command("ss", "-tlnH").Output()
+	if err != nil {
+		return result
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		// Local address is field[3], format: "127.0.0.1:6379" or "*:80" or "0.0.0.0:3306" or ":::22" or "[::]:80"
+		local := fields[3]
+		lastColon := strings.LastIndex(local, ":")
+		if lastColon == -1 {
+			continue
+		}
+		addr := local[:lastColon]
+		portStr := local[lastColon+1:]
+
+		port := 0
+		fmt.Sscanf(portStr, "%d", &port)
+		if port == 0 {
+			continue
+		}
+
+		// Normalize bind address
+		if addr == "*" || addr == "" || addr == "0.0.0.0" || addr == "[::]" || addr == "::" {
+			result[port] = "0.0.0.0"
+		} else if addr == "[::1]" || addr == "::1" {
+			result[port] = "::1"
+		} else {
+			result[port] = addr
+		}
+	}
+
+	return result
 }
 
 // ─── User Checks ───

@@ -125,9 +125,21 @@ func checkSecurityUpdates() []Finding {
 		if err == nil {
 			count, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 		}
+	} else if _, err := exec.LookPath("dnf"); err == nil {
+		pkgManager = "dnf"
+		// dnf has reliable --security support
+		cmd := exec.Command("bash", "-c", "dnf check-update --security --quiet 2>/dev/null | grep -cE '^[a-zA-Z]' || true")
+		out, err := cmd.Output()
+		if err == nil {
+			count, _ = strconv.Atoi(strings.TrimSpace(string(out)))
+		}
+		// dnf exits 100 if updates available, 0 if none — both are OK
 	} else if _, err := exec.LookPath("yum"); err == nil {
 		pkgManager = "yum"
-		out, err := exec.Command("bash", "-c", "yum check-update --security 2>/dev/null | tail -n +3 | grep -c '^' || true").Output()
+		// Use 'yum updateinfo list security' which is more reliable than 'check-update --security'
+		// On systems without security plugin, this returns empty = 0 updates (correct)
+		cmd := exec.Command("bash", "-c", "yum updateinfo list security installed 2>/dev/null | grep -cE '^(RHSA|CESA|ALAS|ELSA)' || echo 0")
+		out, err := cmd.Output()
 		if err == nil {
 			count, _ = strconv.Atoi(strings.TrimSpace(string(out)))
 		}
