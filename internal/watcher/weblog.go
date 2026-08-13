@@ -1293,7 +1293,7 @@ type accessLogEntry struct {
 	method    string
 	uri       string
 	status    int
-	bodySize  int // response body size in bytes
+	bodySize  int
 	referer   string
 	userAgent string
 	domain    string // extracted from vhost_combined format (domain:port IP ...)
@@ -1341,6 +1341,19 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 		return e, false
 	}
 
+	// Check for domain between timestamp "]" and request quote (FarmaOffice/custom format)
+	// Format: IP - - [timestamp] DOMAIN "METHOD URI PROTO" STATUS ...
+	if e.domain == "" {
+		closeBracket := strings.IndexByte(line, ']')
+		q1Check := strings.IndexByte(line, '"')
+		if closeBracket > 0 && q1Check > closeBracket+2 {
+			between := strings.TrimSpace(line[closeBracket+1 : q1Check])
+			if between != "" && strings.ContainsRune(between, '.') && !isIPAddress(between) {
+				e.domain = between
+			}
+		}
+	}
+
 	// Find request line between first pair of quotes: "METHOD URI PROTO"
 	q1 := strings.IndexByte(line, '"')
 	if q1 < 0 {
@@ -1373,21 +1386,12 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 	if statusStr != "" {
 		e.status, _ = strconv.Atoi(statusStr)
 	}
-
-	// Parse body size: number right after status code (STATUS SIZE)
-	sizeStart := len(statusStr)
-	if sizeStart < len(afterReq) && afterReq[sizeStart] == ' ' {
-		sizeStr := ""
-		for _, c := range afterReq[sizeStart+1:] {
-			if c >= '0' && c <= '9' {
-				sizeStr += string(c)
-			} else {
-				break
-			}
+	if idx := len(statusStr); idx < len(afterReq) && afterReq[idx] == ' ' {
+		sz := ""
+		for _, c := range afterReq[idx+1:] {
+			if c >= '0' && c <= '9' { sz += string(c) } else { break }
 		}
-		if sizeStr != "" {
-			e.bodySize, _ = strconv.Atoi(sizeStr)
-		}
+		if sz != "" { e.bodySize, _ = strconv.Atoi(sz) }
 	}
 
 	// Extract user-agent (last quoted string) and referer (second-to-last)
@@ -1536,7 +1540,6 @@ var instantBanPatterns = []struct {
 	}, "ssrf_attempt"},
 
 	// Web shell access attempts
-	// NOTE: /shell.php removed — matches WordPress core /wp-includes/Text/Diff/Engine/shell.php (legit)
 	{"web_shell", []string{
 		"/c99.php", "/r57.php", "/webshell",
 		"/wso.php", "/b374k.php", "/alfa.php",
@@ -1588,11 +1591,13 @@ var (
 // enrichDetails adds domain, log_file, and raw log line to event details.
 // lineDomain is the domain extracted from vhost_combined log format (may be empty).
 func (w *WebWatcher) enrichDetails(logPath, rawLine, lineDomain string, details map[string]string) map[string]string {
-	// Priority: domain from log line (vhost_combined) > domain from config (domainMap)
+	// Priority: domain from log line (vhost_combined) > existing in details > domain from config (domainMap)
 	if lineDomain != "" {
 		details["domain"] = lineDomain
-	} else if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
-		details["domain"] = strings.Join(domains, ",")
+	} else if details["domain"] == "" {
+		if domains, ok := w.domainMap[logPath]; ok && len(domains) > 0 {
+			details["domain"] = strings.Join(domains, ",")
+		}
 	}
 	details["log_file"] = filepath.Base(logPath)
 	if len(rawLine) > 2000 {
@@ -1682,11 +1687,6 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		for _, pat := range rule.patterns {
 			if strings.Contains(uriLower, pat) || strings.Contains(uriRaw, pat) {
 				eventType := rule.eventType
-
-				// Webshell probes: only flag as web_shell if HTTP 200 AND response is large enough
-				// to be an actual webshell (>20KB). Smaller 200 responses are typically cPanel/hosting
-				// error pages that return 200 instead of 404.
-				// Non-200 responses (404/301/403) are always scanner_detected.
 				if eventType == "web_shell" {
 					if entry.status != 200 && entry.status != 0 {
 						eventType = "scanner_detected"
@@ -1694,8 +1694,8 @@ func (w *WebWatcher) processLine(logPath, line string) {
 						eventType = "scanner_detected"
 					}
 				}
-
 				w.addScore(ip, eventType, logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"method":     entry.method,
 					"user_agent": entry.userAgent,
@@ -1729,6 +1729,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		}
 		if matched {
 			w.addScore(ip, rule.Category, logPath, line, map[string]string{
+				"domain":     entry.domain,
 				"uri":        entry.uri,
 				"method":     entry.method,
 				"user_agent": entry.userAgent,
@@ -1745,6 +1746,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		for _, agent := range scannerAgents {
 			if strings.Contains(uaLower, agent) {
 				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"scanner":    agent,
@@ -1833,6 +1835,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Score-based: Shellshock (CVE-2014-6271) ──
 	if w.isTypeEnabled("shellshock") && (strings.Contains(refLower, "() {") || strings.Contains(uaLower, "() {")) {
 		w.addScore(ip, "shellshock", logPath, line, map[string]string{
+				"domain":     entry.domain,
 			"uri":        entry.uri,
 			"user_agent": entry.userAgent,
 			"referer":    entry.referer,
@@ -1845,6 +1848,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		for _, pat := range []string{"\r\n", "%0d%0a", "content-type:", "set-cookie:"} {
 			if strings.Contains(uaLower, pat) || strings.Contains(refLower, pat) {
 				w.addScore(ip, "header_injection", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri":        entry.uri,
 					"user_agent": entry.userAgent,
 					"referer":    entry.referer,
@@ -1879,9 +1883,14 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Threshold → score: WP Login brute force ──
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-login.php") && entry.status != 302 {
 		if w.isTypeEnabled("wp_bruteforce") {
-			rule := thresholdRule{ruleWPLogin.key, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
+			ruleKey := ruleWPLogin.key
+			if entry.domain != "" {
+				ruleKey = ruleWPLogin.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleWPLogin.eventType, w.wafThreshold("wp_bruteforce", ruleWPLogin.threshold), ruleWPLogin.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "wp_bruteforce", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -1892,9 +1901,14 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Threshold → score: XMLRPC abuse ──
 	if entry.method == "POST" && strings.Contains(uriLower, "xmlrpc.php") {
 		if w.isTypeEnabled("xmlrpc_abuse") {
-			rule := thresholdRule{ruleXMLRPC.key, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
+			ruleKey := ruleXMLRPC.key
+			if entry.domain != "" {
+				ruleKey = ruleXMLRPC.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleXMLRPC.eventType, w.wafThreshold("xmlrpc_abuse", ruleXMLRPC.threshold), ruleXMLRPC.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "xmlrpc_abuse", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -1905,9 +1919,14 @@ func (w *WebWatcher) processLine(logPath, line string) {
 	// ── Threshold → score: plugin scanner ──
 	if strings.Contains(uriLower, "wp-content/plugins/") && entry.status == 404 {
 		if w.isTypeEnabled("scanner_detected") {
-			rule := thresholdRule{rulePluginScan.key, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
+			ruleKey := rulePluginScan.key
+			if entry.domain != "" {
+				ruleKey = rulePluginScan.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, rulePluginScan.eventType, w.wafThreshold("scanner_detected", rulePluginScan.threshold), rulePluginScan.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "scanner_detected", logPath, line, map[string]string{
+				"domain":     entry.domain,
 					"uri": entry.uri,
 				})
 			}
@@ -1917,16 +1936,55 @@ func (w *WebWatcher) processLine(logPath, line string) {
 
 	// ── Threshold → score: 404 flood ──
 	if entry.status == 404 {
+		// Skip static assets — 404s for favicon, images, CSS, JS, fonts are never attacks.
+		// This prevents false positives on shared hosting where users browse multiple sites.
+		if isStaticAsset404(uriLower) {
+			return
+		}
 		if w.isTypeEnabled("404_flood") {
-			rule := thresholdRule{rule404Flood.key, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
+			// Use per-domain threshold when domain is available (shared hosting).
+			// This prevents a user browsing 10 sites from being flagged as a 404 flooder.
+			ruleKey := rule404Flood.key
+			if entry.domain != "" {
+				ruleKey = rule404Flood.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, rule404Flood.eventType, w.wafThreshold("404_flood", rule404Flood.threshold), rule404Flood.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "404_flood", logPath, line, map[string]string{
-					"uri": entry.uri,
+					"domain": entry.domain,
+					"uri":    entry.uri,
 				})
 			}
 		}
 		return
 	}
+}
+
+// isStaticAsset404 returns true if the URI is a request for a static asset.
+// 404s for these are normal (missing favicon, broken image links) and should
+// not count toward 404_flood scoring, especially on shared hosting.
+func isStaticAsset404(uriLower string) bool {
+	// Common static asset extensions
+	staticExts := []string{
+		".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif",
+		".css", ".js", ".map",
+		".woff", ".woff2", ".ttf", ".eot", ".otf",
+		".mp4", ".webm", ".mp3", ".ogg",
+		".pdf", ".txt",
+	}
+	for _, ext := range staticExts {
+		if strings.HasSuffix(uriLower, ext) {
+			return true
+		}
+	}
+	// Common static paths
+	if strings.HasPrefix(uriLower, "/favicon") {
+		return true
+	}
+	if strings.HasPrefix(uriLower, "/apple-touch-icon") {
+		return true
+	}
+	return false
 }
 
 // checkThresholdOnly increments the counter for a rule+IP and returns true if
@@ -2110,7 +2168,7 @@ func (w *WebWatcher) addScore(ip, eventType, logPath, line string, details map[s
 	details["bot_score"] = strconv.Itoa(score)
 	details["bot_action"] = action
 	details["bot_category"] = category
-	details = w.enrichDetails(logPath, line, entry.domain, details)
+	details = w.enrichDetails(logPath, line, "", details)
 
 	// Always report the event when score reaches observe level (30+)
 	if score >= thresholdObserve {
