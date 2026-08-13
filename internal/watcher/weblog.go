@@ -1533,7 +1533,8 @@ var instantBanPatterns = []struct {
 
 	// Web shell access attempts
 	{"web_shell", []string{
-		"/c99.php", "/r57.php", "/shell.php", "/webshell",
+		"/c99.php", "/r57.php", "/webshell",
+		"/wso.php", "/b374k.php", "/alfa.php",
 		"cmd=whoami", "cmd=id", "cmd=ls",
 	}, "web_shell"},
 
