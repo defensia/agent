@@ -1515,39 +1515,47 @@ func runZombieMonitor(client *api.Client) {
 func runSecurityMonitors(client *api.Client) {
 	portScan := monitor.NewPortScanDetector()
 	flood := monitor.NewFloodDetector()
-	integrity := monitor.NewIntegrityMonitor()
+	integrity := monitor.NewIntegrityDetector()
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
 	// Run integrity immediately to establish baseline
-	result := integrity.Run()
-	reportMonitorRun(client, result)
+	result := integrity.Scan()
+	reportScanResult(client, "integrity_change", result)
 
 	for range ticker.C {
-		psResult := portScan.Run()
-		reportMonitorRun(client, psResult)
+		psResult := portScan.Scan()
+		reportScanResult(client, "port_scan", psResult)
 
-		flResult := flood.Run()
-		reportMonitorRun(client, flResult)
+		flResult := flood.Scan()
+		reportScanResult(client, "flood", flResult)
 
 		// File integrity every 5 min
 		if time.Now().Minute()%5 == 0 {
-			fiResult := integrity.Run()
-			reportMonitorRun(client, fiResult)
+			fiResult := integrity.Scan()
+			reportScanResult(client, "integrity_change", fiResult)
 		}
 	}
 }
 
-func reportMonitorRun(client *api.Client, result monitor.ScanResult) {
+func reportScanResult(client *api.Client, monitorType string, result monitor.ScanResult) {
+	// Report events if any detections occurred
+	if len(result.Events) > 0 {
+		if err := client.ReportEvents(result.Events); err != nil {
+			log.Printf("[monitor] failed to report %s events: %v", monitorType, err)
+		}
+	}
+
+	// Report monitor run to panel
 	req := api.MonitorRunRequest{
-		Monitor:    result.Monitor,
-		Detections: result.Detections,
+		Monitor:    monitorType,
+		Detections: len(result.Events),
 		Summary:    result.Summary,
-		RanAt:      result.RanAt,
+		RanAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := client.ReportMonitorRun(req); err != nil {
-		log.Printf("[monitor] failed to report %s: %v", result.Monitor, err)
+		log.Printf("[monitor] failed to report %s run: %v", monitorType, err)
 	}
 }
 
