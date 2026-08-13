@@ -1511,6 +1511,15 @@ func runZombieMonitor(client *api.Client) {
 }
 
 // ── Security Monitors (port scan, flood, file integrity) ─────────────────────
+//
+// Execution frequency:
+//   Port scan + Flood: every 60s (time-sensitive, lightweight kernel reads)
+//   File integrity:    every 30 min (changes are persistent, no rush)
+//
+// Reporting strategy (reduce API noise):
+//   Detections > 0 → report immediately (events + monitor run)
+//   Health check    → every 5 min, one combined report for all 3 monitors
+//   No "0 detections" spam — only report when something happens or on health tick
 
 func runSecurityMonitors(client *api.Client) {
 	portScan := monitor.NewPortScanDetector()
@@ -1520,34 +1529,54 @@ func runSecurityMonitors(client *api.Client) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	// Run integrity immediately to establish baseline
-	result := integrity.Scan()
-	reportScanResult(client, "integrity_change", result)
+	// Establish file integrity baseline immediately
+	integrity.Scan()
+	log.Println("[monitor] file integrity baseline established")
+
+	// Track latest results for health check reporting
+	var lastPS, lastFL, lastFI monitor.ScanResult
+	tick := 0
 
 	for range ticker.C {
-		psResult := portScan.Scan()
-		reportScanResult(client, "port_scan", psResult)
+		tick++
 
-		flResult := flood.Scan()
-		reportScanResult(client, "flood", flResult)
+		// Port scan + flood: every 60s
+		lastPS = portScan.Scan()
+		if len(lastPS.Events) > 0 {
+			reportScanResult(client, "port_scan", lastPS)
+		}
 
-		// File integrity every 5 min
-		if time.Now().Minute()%5 == 0 {
-			fiResult := integrity.Scan()
-			reportScanResult(client, "integrity_change", fiResult)
+		lastFL = flood.Scan()
+		if len(lastFL.Events) > 0 {
+			reportScanResult(client, "flood", lastFL)
+		}
+
+		// File integrity: every 30 min (tick 1800 at 60s interval)
+		if tick%30 == 0 {
+			lastFI = integrity.Scan()
+			if len(lastFI.Events) > 0 {
+				reportScanResult(client, "integrity_change", lastFI)
+			}
+		}
+
+		// Health check: every 5 min — report latest summary for all 3 monitors
+		// so the panel knows monitors are active (no "no scan runs" message)
+		if tick%5 == 0 {
+			reportHealthCheck(client, "port_scan", lastPS)
+			reportHealthCheck(client, "flood", lastFL)
+			reportHealthCheck(client, "integrity_change", lastFI)
 		}
 	}
 }
 
+// reportScanResult sends events + monitor run when detections occur.
 func reportScanResult(client *api.Client, monitorType string, result monitor.ScanResult) {
-	// Report events if any detections occurred
 	if len(result.Events) > 0 {
 		if err := client.ReportEvents(result.Events); err != nil {
 			log.Printf("[monitor] failed to report %s events: %v", monitorType, err)
 		}
 	}
 
-	// Report monitor run to panel
 	req := api.MonitorRunRequest{
 		Monitor:    monitorType,
 		Detections: len(result.Events),
@@ -1556,6 +1585,20 @@ func reportScanResult(client *api.Client, monitorType string, result monitor.Sca
 	}
 	if err := client.ReportMonitorRun(req); err != nil {
 		log.Printf("[monitor] failed to report %s run: %v", monitorType, err)
+	}
+}
+
+// reportHealthCheck sends a summary monitor run (0 detections) so the panel
+// knows the monitor is active. Called every 5 min, much less noisy than every 60s.
+func reportHealthCheck(client *api.Client, monitorType string, result monitor.ScanResult) {
+	req := api.MonitorRunRequest{
+		Monitor:    monitorType,
+		Detections: 0,
+		Summary:    result.Summary,
+		RanAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := client.ReportMonitorRun(req); err != nil {
+		log.Printf("[monitor] failed to report %s health: %v", monitorType, err)
 	}
 }
 
