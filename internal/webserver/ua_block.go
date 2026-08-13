@@ -320,7 +320,12 @@ func generateNginxBlocklist(fps []UAFingerprint) string {
 			pat = regexp.QuoteMeta(fp.Pattern)
 		}
 		// ~* = case-insensitive PCRE match in nginx map
-		fmt.Fprintf(&sb, "~*%s    1;\n", pat)
+		// Patterns with spaces or semicolons MUST be quoted for nginx map syntax
+		if strings.ContainsAny(pat, " \t;{}") {
+			fmt.Fprintf(&sb, "\"~*%s\"    1;\n", pat)
+		} else {
+			fmt.Fprintf(&sb, "~*%s    1;\n", pat)
+		}
 	}
 	return sb.String()
 }
