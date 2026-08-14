@@ -31,7 +31,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.34"
+var version = "1.4.36"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -1769,21 +1769,19 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		rootFwFindings := malware.CheckFramework(root)
 		allFwFindings = append(allFwFindings, rootFwFindings...)
 
-		// WordPress plugin/theme inventory
+		// CMS plugin/theme/extension inventory
+		var inv *malware.WpInventory
 		if root.Framework.Name == "wordpress" {
-			if inv := malware.ReadWpInventory(root.Path, root.Domain, root.Framework.Version); inv != nil {
-				comps := make([]api.WpComponent, 0, len(inv.Components))
-				for _, c := range inv.Components {
-					comps = append(comps, api.WpComponent{
-						Slug: c.Slug, Name: c.Name, Version: c.Version,
-						Type: c.Type, IsActive: c.IsActive,
-					})
-				}
-				wpInventories = append(wpInventories, api.WpSite{
-					WebRoot: inv.WebRoot, Domain: inv.Domain,
-					WpVersion: inv.WpVersion, Components: comps,
-				})
+			inv = malware.ReadWpInventory(root.Path, root.Domain, root.Framework.Version)
+		} else if root.Framework.Name == "joomla" {
+			inv = malware.ReadJoomlaInventory(root.Path, root.Domain, root.Framework.Version)
+		}
+		if inv != nil {
+			comps := make([]api.WpComponent, 0, len(inv.Components))
+			for _, c := range inv.Components {
+				comps = append(comps, api.WpComponent{Slug: c.Slug, Name: c.Name, Version: c.Version, Type: c.Type, IsActive: c.IsActive})
 			}
+			wpInventories = append(wpInventories, api.WpSite{WebRoot: inv.WebRoot, Domain: inv.Domain, WpVersion: inv.WpVersion, Components: comps})
 		}
 
 		// Filter findings
