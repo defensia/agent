@@ -67,6 +67,50 @@ func checkOSVersion() []Finding {
 	}}
 }
 
+// ─── RHEL Backport Helpers ───
+
+// isRHELBased returns true for distros that backport security patches
+// to older version numbers (RHEL, AlmaLinux, Rocky, CentOS, Oracle Linux).
+func isRHELBased() bool {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return false
+	}
+	id := strings.ToLower(osReleaseValue(string(data), "ID"))
+	idLike := strings.ToLower(osReleaseValue(string(data), "ID_LIKE"))
+	rhelIDs := []string{"rhel", "almalinux", "rocky", "centos", "ol", "amzn", "fedora"}
+	for _, rid := range rhelIDs {
+		if id == rid || strings.Contains(idLike, rid) || strings.Contains(idLike, "rhel") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPackageUpdate checks if a specific package has an available update
+// using dnf or yum. Returns true if an update IS available.
+func hasPackageUpdate(pkg string) bool {
+	// dnf check-update exits 100 if updates available, 0 if none
+	if _, err := exec.LookPath("dnf"); err == nil {
+		cmd := exec.Command("dnf", "check-update", "--quiet", pkg)
+		err := cmd.Run()
+		// exit 100 = updates available, exit 0 = no updates
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode() == 100
+		}
+		return false // exit 0 = no updates
+	}
+	if _, err := exec.LookPath("yum"); err == nil {
+		cmd := exec.Command("yum", "check-update", "--quiet", pkg)
+		err := cmd.Run()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode() == 100
+		}
+		return false
+	}
+	return false
+}
+
 // ─── Kernel Version Check ───
 
 func checkKernelVersion() []Finding {
@@ -94,9 +138,16 @@ func checkKernelVersion() []Finding {
 		passed = false
 		desc += " — very old kernel, known vulnerabilities"
 	} else if major < 5 || (major == 5 && minor < 4) {
-		severity = "medium"
-		passed = false
-		desc += " — outdated kernel"
+		// On RHEL-based distros, check if the kernel has a pending update
+		// RHEL 8 ships 4.18.x with all security patches backported
+		if isRHELBased() && !hasPackageUpdate("kernel") {
+			desc += " — latest available for this OS (security patches backported)"
+			passed = true
+		} else {
+			severity = "medium"
+			passed = false
+			desc += " — outdated kernel"
+		}
 	} else {
 		desc += " — up to date"
 	}
@@ -317,13 +368,20 @@ func checkOpenSSHVersion() []Finding {
 	desc := fmt.Sprintf("OpenSSH %s", version)
 
 	if major < 8 {
+		// Even on RHEL, OpenSSH < 8 is truly old (RHEL 7 = EOL)
 		severity = "high"
 		passed = false
 		desc += " — very old, known vulnerabilities"
 	} else if major == 8 && minor < 9 {
-		severity = "medium"
-		passed = false
-		desc += " — outdated"
+		// RHEL 8 ships OpenSSH 8.0 with backported security patches
+		if isRHELBased() && !hasPackageUpdate("openssh-server") {
+			desc += " — latest available for this OS (security patches backported)"
+			passed = true
+		} else {
+			severity = "medium"
+			passed = false
+			desc += " — outdated"
+		}
 	} else {
 		desc += " — up to date"
 	}
@@ -353,13 +411,22 @@ func checkWebServerVersion() []Finding {
 			desc := fmt.Sprintf("Nginx %s", version)
 
 			if major == 1 && minor < 22 {
-				severity = "high"
-				passed = false
-				desc += " — outdated, known vulnerabilities"
+				if isRHELBased() && !hasPackageUpdate("nginx") {
+					desc += " — latest available for this OS"
+					// pass — no update available in repos
+				} else {
+					severity = "high"
+					passed = false
+					desc += " — outdated, known vulnerabilities"
+				}
 			} else if major == 1 && minor < 24 {
-				severity = "medium"
-				passed = false
-				desc += " — consider upgrading"
+				if isRHELBased() && !hasPackageUpdate("nginx") {
+					desc += " — latest available for this OS"
+				} else {
+					severity = "medium"
+					passed = false
+					desc += " — consider upgrading"
+				}
 			} else {
 				desc += " — up to date"
 			}
@@ -396,9 +463,13 @@ func checkWebServerVersion() []Finding {
 
 				_ = minor // Apache is always 2.4.x nowadays
 				if patch < 54 {
-					severity = "high"
-					passed = false
-					desc += " — outdated, known vulnerabilities"
+					if isRHELBased() && !hasPackageUpdate("httpd") {
+						desc += " — latest available for this OS"
+					} else {
+						severity = "high"
+						passed = false
+						desc += " — outdated, known vulnerabilities"
+					}
 				} else {
 					desc += " — up to date"
 				}
