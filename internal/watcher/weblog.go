@@ -74,6 +74,7 @@ var defaultScorePoints = map[string]int{
 	"path_traversal":     30,
 	"header_injection":   30,
 	"wp_bruteforce":      30,
+	"cms_bruteforce":     30,
 	"xss_attempt":        25,
 	"env_probe":          25,
 	"xmlrpc_abuse":       25,
@@ -1582,6 +1583,9 @@ type thresholdRule struct {
 var (
 	ruleWPLogin    = thresholdRule{"wp_login", "wp_bruteforce", 10, 2 * time.Minute}
 	ruleXMLRPC     = thresholdRule{"xmlrpc", "xmlrpc_abuse", 5, 1 * time.Minute}
+	ruleWPAjax     = thresholdRule{"wp_ajax", "wp_bruteforce", 10, 30 * time.Second}
+	ruleDrupalAuth = thresholdRule{"drupal_auth", "cms_bruteforce", 5, 30 * time.Second}
+	ruleJoomlaAuth = thresholdRule{"joomla_auth", "cms_bruteforce", 5, 30 * time.Second}
 	rulePluginScan = thresholdRule{"plugin_scan", "scanner_detected", 5, 5 * time.Minute}
 	rule404Flood   = thresholdRule{"404_flood", "404_flood", 15, 5 * time.Minute}
 )
@@ -1910,6 +1914,63 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				w.addScore(ip, "xmlrpc_abuse", logPath, line, map[string]string{
 				"domain":     entry.domain,
 					"uri": entry.uri,
+				})
+			}
+		}
+		return
+	}
+
+	// ── Threshold → score: WP admin-ajax abuse (unauthenticated POST flood) ──
+	if entry.method == "POST" && strings.Contains(uriLower, "wp-admin/admin-ajax.php") {
+		if w.isTypeEnabled("wp_bruteforce") {
+			ruleKey := ruleWPAjax.key
+			if entry.domain != "" {
+				ruleKey = ruleWPAjax.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleWPAjax.eventType, w.wafThreshold("wp_bruteforce", ruleWPAjax.threshold), ruleWPAjax.window}
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "wp_bruteforce", logPath, line, map[string]string{
+					"domain": entry.domain,
+					"uri":    entry.uri,
+				})
+			}
+		}
+		return
+	}
+
+	// ── Threshold → score: Drupal login brute force ──
+	// POST /user/login with 302 redirect back to /user/login = failed login
+	if entry.method == "POST" && (uriLower == "/user/login" || strings.HasPrefix(uriLower, "/user/login?")) && entry.status != 303 {
+		if w.isTypeEnabled("cms_bruteforce") {
+			ruleKey := ruleDrupalAuth.key
+			if entry.domain != "" {
+				ruleKey = ruleDrupalAuth.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleDrupalAuth.eventType, w.wafThreshold("cms_bruteforce", ruleDrupalAuth.threshold), ruleDrupalAuth.window}
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "cms_bruteforce", logPath, line, map[string]string{
+					"domain": entry.domain,
+					"uri":    entry.uri,
+					"cms":    "drupal",
+				})
+			}
+		}
+		return
+	}
+
+	// ── Threshold → score: Joomla admin brute force ──
+	if entry.method == "POST" && strings.Contains(uriLower, "/administrator/index.php") {
+		if w.isTypeEnabled("cms_bruteforce") {
+			ruleKey := ruleJoomlaAuth.key
+			if entry.domain != "" {
+				ruleKey = ruleJoomlaAuth.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, ruleJoomlaAuth.eventType, w.wafThreshold("cms_bruteforce", ruleJoomlaAuth.threshold), ruleJoomlaAuth.window}
+			if w.checkThresholdOnly(ip, rule, now) {
+				w.addScore(ip, "cms_bruteforce", logPath, line, map[string]string{
+					"domain": entry.domain,
+					"uri":    entry.uri,
+					"cms":    "joomla",
 				})
 			}
 		}

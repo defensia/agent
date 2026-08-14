@@ -1192,6 +1192,29 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		go runMalwareScan(client, "medium")
 	}
 
+	// Apply CSF port actions if requested from dashboard
+	if len(sync.CSFPortActions) > 0 && firewall.HasCSF() {
+		for _, action := range sync.CSFPortActions {
+			log.Printf("[csf] port action: %s port %d %s", action.Action, action.Port, action.Direction)
+			if err := firewall.CSFPortAction(action.Port, action.Direction, action.Action); err != nil {
+				log.Printf("[csf] port action failed: %v", err)
+				client.ReportEvents([]api.EventRequest{{
+					Type:     "csf_port_error",
+					Severity: "warning",
+					Details:  map[string]string{"port": fmt.Sprintf("%d", action.Port), "direction": action.Direction, "action": action.Action, "error": err.Error()},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			} else {
+				client.ReportEvents([]api.EventRequest{{
+					Type:     "csf_port_changed",
+					Severity: "info",
+					Details:  map[string]string{"port": fmt.Sprintf("%d", action.Port), "direction": action.Direction, "action": action.Action},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				}})
+			}
+		}
+	}
+
 	// Check for agent update from sync response
 	if sync.AgentUpdate != nil && sync.AgentUpdate.LatestVersion != "" {
 		go updater.CheckAndUpdate(version, sync.AgentUpdate.LatestVersion, sync.AgentUpdate.DownloadBaseURL, reportUpdateEvent)

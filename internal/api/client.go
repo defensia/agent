@@ -266,6 +266,14 @@ type SyncResponse struct {
 	YaraInstallRequested    bool                   `json:"yara_install_requested"`
 	MalwareScanRequested   bool                   `json:"malware_scan_requested"`
 	QuarantinePending      []string               `json:"quarantine_pending"`
+	CSFPortActions         []CSFPortAction        `json:"csf_port_actions"`
+}
+
+// CSFPortAction is a pending CSF port management command from the panel.
+type CSFPortAction struct {
+	Port      int    `json:"port"`
+	Direction string `json:"direction"` // "in" or "out"
+	Action    string `json:"action"`    // "add" or "remove"
 }
 
 // YaraRulesSync is the YARA rules content synced from the backend.
