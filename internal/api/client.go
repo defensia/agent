@@ -170,6 +170,7 @@ type HeartbeatRequest struct {
 	CSFAllowCount      int            `json:"csf_allow_count,omitempty"`
 	ControlPanel        string         `json:"control_panel,omitempty"`
 	ControlPanelVersion string         `json:"control_panel_version,omitempty"`
+	PanelDomains        []string       `json:"panel_domains,omitempty"`
 }
 
 // RuntimeStats reports the agent's own resource usage so we can detect leaks

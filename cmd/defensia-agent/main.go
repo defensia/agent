@@ -31,7 +31,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.39"
+var version = "1.4.40"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -424,6 +424,7 @@ func runAgent() {
 	}
 
 	cpName, cpVersion := detectControlPanel()
+	panelDomains := collectPanelDomains(cpName)
 
 	// Setup UA blocking at web server level (runs once; no-op if sentinel exists)
 	uaReport := func(eventType, severity string, details map[string]string) {
@@ -811,6 +812,7 @@ func runAgent() {
 				CSFAllowCount:    fwStatus.CSF.AllowCount,
 				ControlPanel:        cpName,
 				ControlPanelVersion: cpVersion,
+				PanelDomains:        panelDomains,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -1536,6 +1538,67 @@ func detectControlPanel() (name, version string) {
 	}
 
 	return "", ""
+}
+
+// collectPanelDomains lists all domains managed by the hosting panel.
+// Used to detect domains not covered by WAF monitoring.
+func collectPanelDomains(panel string) []string {
+	var domains []string
+
+	switch panel {
+	case "plesk":
+		out, err := exec.Command("plesk", "bin", "domain", "--list").Output()
+		if err != nil {
+			return nil
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			d := strings.TrimSpace(line)
+			if d != "" {
+				domains = append(domains, d)
+			}
+		}
+	case "cpanel":
+		// Fallback: read /etc/trueuserdomains
+		data, err := os.ReadFile("/etc/trueuserdomains")
+		if err != nil {
+			return nil
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) >= 1 {
+				d := strings.TrimSpace(parts[0])
+				if d != "" {
+					domains = append(domains, d)
+				}
+			}
+		}
+	case "directadmin":
+		entries, err := os.ReadDir("/usr/local/directadmin/data/users")
+		if err != nil {
+			return nil
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			data, err := os.ReadFile(fmt.Sprintf("/usr/local/directadmin/data/users/%s/domains.list", e.Name()))
+			if err != nil {
+				continue
+			}
+			for _, line := range strings.Split(string(data), "\n") {
+				d := strings.TrimSpace(line)
+				if d != "" {
+					domains = append(domains, d)
+				}
+			}
+		}
+	}
+
+	if len(domains) > 0 {
+		sort.Strings(domains)
+		log.Printf("[panel] found %d domains from %s", len(domains), panel)
+	}
+	return domains
 }
 // runZombieMonitor periodically scans for zombie processes and reports events when threshold is exceeded.
 func runZombieMonitor(client *api.Client) {

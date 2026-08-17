@@ -281,6 +281,145 @@ func checkPHPVersion() []Finding {
 	}}
 }
 
+// ─── Panel PHP Handlers Check (Plesk, cPanel) ───
+
+func checkPanelPHPHandlers() []Finding {
+	var findings []Finding
+
+	// Plesk: plesk bin php_handler --list
+	if _, err := os.Stat("/usr/local/psa/version"); err == nil {
+		out, err := exec.Command("plesk", "bin", "php_handler", "--list").Output()
+		if err == nil {
+			findings = append(findings, parsePleskPHPHandlers(string(out))...)
+		}
+		return findings
+	}
+
+	// cPanel: scan /opt/cpanel/ea-php*/root/usr/bin/php
+	if _, err := os.Stat("/usr/local/cpanel/version"); err == nil {
+		findings = append(findings, scanCpanelPHPHandlers()...)
+		return findings
+	}
+
+	return findings
+}
+
+// parsePleskPHPHandlers parses "plesk bin php_handler --list" output.
+// Format: id | Display name | Version | Path | CLI | FPM | CGI | Status
+func parsePleskPHPHandlers(output string) []Finding {
+	var findings []Finding
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "id") || strings.HasPrefix(line, "--") {
+			continue
+		}
+		fields := strings.Split(line, "|")
+		if len(fields) < 4 {
+			continue
+		}
+		handlerID := strings.TrimSpace(fields[0])
+		version := strings.TrimSpace(fields[2])
+		if version == "" {
+			// Try extracting from handler ID like "plesk-php82-fpm"
+			version = extractVersionFromID(handlerID)
+		}
+		if version == "" {
+			continue
+		}
+		findings = append(findings, evalPHPHandler(handlerID, version))
+	}
+	return findings
+}
+
+// scanCpanelPHPHandlers finds all EA PHP versions installed via cPanel.
+func scanCpanelPHPHandlers() []Finding {
+	var findings []Finding
+	// cPanel installs PHP as /opt/cpanel/ea-phpNN/root/usr/bin/php
+	entries, err := os.ReadDir("/opt/cpanel")
+	if err != nil {
+		return findings
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "ea-php") {
+			continue
+		}
+		phpBin := fmt.Sprintf("/opt/cpanel/%s/root/usr/bin/php", e.Name())
+		if _, err := os.Stat(phpBin); err != nil {
+			continue
+		}
+		out, err := exec.Command(phpBin, "-v").Output()
+		if err != nil {
+			continue
+		}
+		version := parsePHPVersion(string(out))
+		if version == "" || version == "unknown" {
+			continue
+		}
+		findings = append(findings, evalPHPHandler(e.Name(), version))
+	}
+	return findings
+}
+
+// evalPHPHandler evaluates a single PHP handler version for EOL status.
+func evalPHPHandler(handlerID, version string) Finding {
+	major, minor := parseMajorMinor(version)
+	severity := "info"
+	passed := true
+	desc := fmt.Sprintf("PHP %s (%s)", version, handlerID)
+
+	if major < 8 || (major == 8 && minor < 1) {
+		severity = "critical"
+		passed = false
+		desc += " — end of life, no security patches"
+	} else if major == 8 && minor == 1 {
+		severity = "high"
+		passed = false
+		desc += " — end of life since Nov 2025"
+	} else if major == 8 && minor == 2 {
+		severity = "medium"
+		passed = false
+		desc += " — security-only, upgrade recommended"
+	} else {
+		desc += " — supported"
+	}
+
+	return Finding{
+		Category:       "software_versions",
+		Severity:       severity,
+		CheckID:        "VER_PHP_HANDLER_" + strings.ToUpper(strings.ReplaceAll(handlerID, "-", "_")),
+		Title:          fmt.Sprintf("PHP handler: %s", handlerID),
+		Description:    desc,
+		Recommendation: conditionalStr(!passed, "Remove or upgrade this PHP handler to 8.3+", ""),
+		Details:        map[string]string{"handler": handlerID, "version": version, "eol": fmt.Sprintf("%v", !passed)},
+		Passed:         passed,
+	}
+}
+
+// extractVersionFromID extracts version from handler IDs like "plesk-php82-fpm" → "8.2"
+func extractVersionFromID(id string) string {
+	// Match patterns like php82, php74, php56
+	for _, prefix := range []string{"php"} {
+		idx := strings.Index(strings.ToLower(id), prefix)
+		if idx < 0 {
+			continue
+		}
+		digits := strings.ToLower(id)[idx+len(prefix):]
+		// Take first digits before any separator
+		numStr := ""
+		for _, c := range digits {
+			if c >= '0' && c <= '9' {
+				numStr += string(c)
+			} else {
+				break
+			}
+		}
+		if len(numStr) >= 2 {
+			return string(numStr[0]) + "." + numStr[1:]
+		}
+	}
+	return ""
+}
+
 // ─── MySQL/MariaDB Version Check ───
 
 func checkMySQLVersion() []Finding {
