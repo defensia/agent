@@ -400,6 +400,7 @@ func parseNginxBlocks(output string) []nginxBlock {
 				names := strings.TrimSuffix(strings.TrimPrefix(trimmed, "server_name "), ";")
 				for _, n := range strings.Fields(names) {
 					n = strings.TrimSpace(n)
+					n = strings.Trim(n, "\"'") // Plesk wraps server_name values in quotes
 					if n != "" && n != "_" {
 						current.serverNames = append(current.serverNames, n)
 					}
