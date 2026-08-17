@@ -519,6 +519,71 @@ func nginxBlocksToLogPathInfos(blocks []nginxBlock, mountMap map[string]string) 
 	return result
 }
 
+// CollectAllWebServerDomains returns every domain name found in nginx server_name
+// and Apache ServerName/ServerAlias directives, regardless of whether those blocks
+// have an access_log directive.  This catches Plesk/cPanel domain aliases that share
+// the parent vhost's log file and would otherwise not appear in monitored_domains.
+func CollectAllWebServerDomains() []string {
+	domainSet := make(map[string]bool)
+
+	// nginx: parse all server blocks for server_name values
+	if out, err := exec.Command("nginx", "-T").CombinedOutput(); err == nil {
+		for _, block := range parseNginxBlocks(string(out)) {
+			for _, name := range block.serverNames {
+				domainSet[name] = true
+			}
+		}
+	}
+
+	// Apache: parse all vhost configs for ServerName/ServerAlias
+	apacheInstalled := false
+	for _, cmd := range []string{"apache2ctl", "apachectl", "httpd"} {
+		if _, err := exec.LookPath(cmd); err == nil {
+			apacheInstalled = true
+			break
+		}
+	}
+	if apacheInstalled {
+		configFiles := []string{
+			"/etc/apache2/apache2.conf",
+			"/etc/httpd/conf/httpd.conf",
+			"/usr/local/apache/conf/httpd.conf",
+		}
+		for _, pattern := range []string{
+			"/etc/apache2/sites-enabled/*.conf",
+			"/etc/httpd/conf.d/*.conf",
+			"/etc/apache2/conf-enabled/*.conf",
+			"/etc/apache2/plesk.conf.d/vhosts/*.conf",
+			"/var/www/vhosts/system/*/conf/*.conf",
+		} {
+			if matches, err := filepath.Glob(pattern); err == nil {
+				configFiles = append(configFiles, matches...)
+			}
+		}
+		for _, cf := range configFiles {
+			data, err := os.ReadFile(cf)
+			if err != nil {
+				continue
+			}
+			for _, vhost := range parseApacheVhosts(string(data)) {
+				for _, d := range vhost.serverNames {
+					domainSet[d] = true
+				}
+			}
+		}
+	}
+
+	// Filter out wildcard entries
+	var domains []string
+	for d := range domainSet {
+		if d != "" && d != "_" && d != "*" && !strings.HasPrefix(d, "*.") {
+			domains = append(domains, d)
+		}
+	}
+	sort.Strings(domains)
+	return domains
+}
+
 // resolveApacheEnvVars expands ${APACHE_LOG_DIR} in a path by parsing /etc/apache2/envvars.
 func resolveApacheEnvVars(path string) string {
 	if !strings.Contains(path, "${") && !strings.Contains(path, "$APACHE") {

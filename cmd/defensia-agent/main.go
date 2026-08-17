@@ -31,7 +31,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.40"
+var version = "1.4.41"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -340,12 +340,17 @@ func runAgent() {
 			webLogPaths[i] = info.Path
 		}
 		monitoredLogPaths = webLogPaths
-		// Collect unique domains from all log files
+		// Collect unique domains from all log files + web server configs
 		domainSet := make(map[string]bool)
 		for _, domains := range domainMap {
 			for _, d := range domains {
 				domainSet[d] = true
 			}
+		}
+		// Also collect domains from nginx/apache server_name directives
+		// (catches Plesk aliases that share a parent vhost's log file)
+		for _, d := range watcher.CollectAllWebServerDomains() {
+			domainSet[d] = true
 		}
 		for d := range domainSet {
 			monitoredDomains = append(monitoredDomains, d)
