@@ -31,7 +31,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.36"
+var version = "1.4.39"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -420,7 +420,10 @@ func runAgent() {
 	wsName, wsVersion := detectWebServerInfo()
 	if wsName != "" {
 		log.Printf("[webserver] detected %s %s", wsName, wsVersion)
+
 	}
+
+	cpName, cpVersion := detectControlPanel()
 
 	// Setup UA blocking at web server level (runs once; no-op if sentinel exists)
 	uaReport := func(eventType, severity string, details map[string]string) {
@@ -806,6 +809,8 @@ func runAgent() {
 				CSFPortsOut:      fwStatus.CSF.PortsOut,
 				CSFDenyCount:     fwStatus.CSF.DenyCount,
 				CSFAllowCount:    fwStatus.CSF.AllowCount,
+				ControlPanel:        cpName,
+				ControlPanelVersion: cpVersion,
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -1492,6 +1497,46 @@ func parseApacheVersion(output string) string {
 	return ""
 }
 
+
+// detectControlPanel detects hosting control panels (Plesk, cPanel, DirectAdmin).
+// Runs once at startup — checks for well-known paths and binaries.
+func detectControlPanel() (name, version string) {
+	// Plesk: /usr/local/psa/version contains "18.0.65"
+	if data, err := os.ReadFile("/usr/local/psa/version"); err == nil {
+		v := strings.TrimSpace(string(data))
+		if fields := strings.Fields(v); len(fields) > 0 {
+			v = fields[0]
+		}
+		log.Printf("[panel] Plesk %s detected", v)
+		return "plesk", v
+	}
+
+	// cPanel: /usr/local/cpanel/version contains "122.0.28"
+	if data, err := os.ReadFile("/usr/local/cpanel/version"); err == nil {
+		v := strings.TrimSpace(string(data))
+		log.Printf("[panel] cPanel %s detected", v)
+		return "cpanel", v
+	}
+
+	// DirectAdmin: /usr/local/directadmin/directadmin binary
+	if _, err := os.Stat("/usr/local/directadmin/directadmin"); err == nil {
+		v := ""
+		out, err := exec.Command("/usr/local/directadmin/directadmin", "v").CombinedOutput()
+		if err == nil {
+			s := strings.TrimSpace(string(out))
+			if idx := strings.Index(s, "v"); idx >= 0 {
+				v = s[idx+1:]
+				if spIdx := strings.IndexByte(v, ' '); spIdx >= 0 {
+					v = v[:spIdx]
+				}
+			}
+		}
+		log.Printf("[panel] DirectAdmin %s detected", v)
+		return "directadmin", v
+	}
+
+	return "", ""
+}
 // runZombieMonitor periodically scans for zombie processes and reports events when threshold is exceeded.
 func runZombieMonitor(client *api.Client) {
 	const threshold = 5 // report event when zombies exceed this

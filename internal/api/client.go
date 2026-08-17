@@ -168,6 +168,8 @@ type HeartbeatRequest struct {
 	CSFPortsOut        string         `json:"csf_ports_out,omitempty"`
 	CSFDenyCount       int            `json:"csf_deny_count,omitempty"`
 	CSFAllowCount      int            `json:"csf_allow_count,omitempty"`
+	ControlPanel        string         `json:"control_panel,omitempty"`
+	ControlPanelVersion string         `json:"control_panel_version,omitempty"`
 }
 
 // RuntimeStats reports the agent's own resource usage so we can detect leaks
