@@ -108,6 +108,8 @@ jobs:
         with:
           token: ${{ secrets.BOT_TOKEN }}
           name: ${{ steps.version.outputs.VERSION }}
+          fail_on_unmatched_files: true
+          make_latest: true
           body: |
             ## Defensia Agent ${{ steps.version.outputs.VERSION }}
 
