@@ -452,10 +452,20 @@ func downloadFile(url, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
 	_, err = io.Copy(f, resp.Body)
-	return err
+	if err != nil {
+		f.Close()
+		return err
+	}
+
+	// Sync + Close explicitly to avoid "text file busy" when exec follows immediately.
+	// Without Sync, the kernel may still be flushing pages when we try to exec the file.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func fileHash(path string) (string, error) {
