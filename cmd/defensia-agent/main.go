@@ -25,13 +25,14 @@ import (
 	"github.com/defensia/agent/internal/modsecurity"
 	"github.com/defensia/agent/internal/monitor"
 	"github.com/defensia/agent/internal/scanner"
+	"github.com/defensia/agent/internal/session"
 	"github.com/defensia/agent/internal/updater"
 	"github.com/defensia/agent/internal/watcher"
 	"github.com/defensia/agent/internal/webserver"
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.44"
+var version = "1.4.45"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -42,6 +43,7 @@ var malwareRTWatcher    *malware.RealtimeWatcher
 var yaraScanner         *malware.YaraScanner
 var malwareCustomPaths  []string
 var modsecEngine      *modsecurity.Engine
+var sessionTracker    *session.SessionTracker
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -647,6 +649,19 @@ func runAgent() {
 		go runMalwareScan(apiClient, intensity)
 	})
 
+	// Initialize SSH session tracker (monitor-only — never bans)
+	sessionTracker = session.New(func(eventType, severity string, details map[string]string) {
+		if err := apiClient.ReportEvents([]api.EventRequest{{
+			Type:       eventType,
+			Severity:   severity,
+			Details:    details,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}}); err != nil {
+			log.Printf("[session] failed to report event: %v", err)
+		}
+	})
+	log.Printf("[session] tracker initialized (waiting for panel activation)")
+
 	// Initial sync (applies config, whitelists, rules, bans)
 	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
@@ -1224,6 +1239,25 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
 				}})
 			}
+		}
+	}
+
+	// Session tracking — activate/deactivate per panel config or env override
+	if os.Getenv("SESSION_ENABLED") == "true" && sessionTracker != nil {
+		sessionTracker.UpdateConfig(session.Config{Enabled: true})
+		if !sessionTracker.IsRunning() {
+			go sessionTracker.Run()
+			log.Printf("[session] tracker started via SESSION_ENABLED env (monitor-only)")
+		}
+	} else if sessionTracker != nil {
+		if sync.Config.SessionConfig != nil && sync.Config.SessionConfig.Enabled {
+			sessionTracker.UpdateConfig(session.Config{Enabled: true})
+			if !sessionTracker.IsRunning() {
+				go sessionTracker.Run()
+				log.Printf("[session] tracker started (monitor-only, per-server activation)")
+			}
+		} else {
+			sessionTracker.UpdateConfig(session.Config{Enabled: false})
 		}
 	}
 

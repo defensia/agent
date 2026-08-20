@@ -311,11 +311,24 @@ type SyncConfig struct {
 	BlockedCountries  []string          `json:"blocked_countries"`
 	MonitorConfig     *MonitorConfig    `json:"monitor_config,omitempty"`
 	MalwareScanConfig *MalwareScanConfig `json:"malware_scan_config,omitempty"`
+	SigmaConfig       *SigmaConfig      `json:"sigma_config,omitempty"`
+	SessionConfig     *SessionConfig    `json:"session_config,omitempty"`
 }
 
 // MonitorConfig holds monitoring settings synced from the panel.
 type MonitorConfig struct {
 	CustomLogPaths []string `json:"custom_log_paths"` // additional access log paths to monitor
+}
+
+// SigmaConfig controls Sigma rule-based detection.
+type SigmaConfig struct {
+	Enabled  bool   `json:"enabled"`
+	MinLevel string `json:"min_level,omitempty"`
+}
+
+// SessionConfig controls SSH session timeline tracking.
+type SessionConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // MalwareScanConfig controls scheduled malware scanning.
