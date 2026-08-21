@@ -1760,7 +1760,7 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				if eventType == "web_shell" {
 					if entry.status != 200 && entry.status != 0 {
 						eventType = "scanner_detected"
-					} else if entry.status == 200 && entry.bodySize < 20000 {
+					} else if entry.status == 200 && entry.bodySize < 50000 {
 						eventType = "scanner_detected"
 					}
 				}
