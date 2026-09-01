@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.50
+- **fix: false positive PHP in uploads** — standard anti-directory-listing `index.php` files (< 120 bytes, "Silence is golden") in `wp-content/uploads/` subdirectories are now skipped by the framework checker. Affects plugins like Astra, Elementor, MainWP, iThemes Security.
+
 ## v1.4.49
 - **feat: cancel malware scan from dashboard** — new WebSocket event `malware_scan.cancelled` stops the scan between root iterations. Reports partial results before exiting.
 
