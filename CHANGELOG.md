@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.51
+- **fix: false positive CORE_FILE_MODIFIED on wp-includes/version.php** — this file changes on every WordPress update and is not a useful injection target. Now excluded from core file integrity checks.
+
 ## v1.4.50
 - **fix: false positive PHP in uploads** — standard anti-directory-listing `index.php` files (< 120 bytes, "Silence is golden") in `wp-content/uploads/` subdirectories are now skipped by the framework checker. Affects plugins like Astra, Elementor, MainWP, iThemes Security.
 
