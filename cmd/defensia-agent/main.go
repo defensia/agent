@@ -36,6 +36,7 @@ var version = "1.4.47"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
+var malwareScanCancel   atomic.Bool
 var malwareScheduler    *malware.Scheduler
 var malwareAllowList    *malware.AllowList
 var malwareScanner      *malware.Scanner
@@ -762,6 +763,10 @@ func runAgent() {
 			OnMalwareScanRequested: func(p ws.MalwareScanRequestedPayload) {
 				log.Printf("[reverb] malware_scan.requested: intensity=%s", p.Intensity)
 				go runMalwareScan(apiClient, p.Intensity)
+			},
+			OnMalwareScanCancelled: func() {
+				log.Printf("[reverb] malware_scan.cancelled")
+				malwareScanCancel.Store(true)
 			},
 			OnYaraInstallRequested: func(p ws.YaraInstallRequestedPayload) {
 				log.Printf("[reverb] yara_install.requested")
@@ -1826,6 +1831,7 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		return
 	}
 	defer malwareScanRunning.Store(false)
+	malwareScanCancel.Store(false)
 	log.Printf("[malware] starting scan (intensity=%s)", intensityStr)
 
 	_ = client.ReportEvents([]api.EventRequest{{
@@ -1891,6 +1897,19 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 
 	// Scan each root individually and submit results incrementally
 	for i, root := range webRoots {
+		if malwareScanCancel.Load() {
+			log.Printf("[malware] scan cancelled by user after %d/%d roots", i, len(webRoots))
+			_ = client.ReportEvents([]api.EventRequest{{
+				Type: "malware_scan_completed", Severity: "info",
+				Details: map[string]string{
+					"result":        "cancelled",
+					"files_scanned": fmt.Sprintf("%d", totalFiles),
+					"web_roots":     fmt.Sprintf("%d/%d", i, len(webRoots)),
+				},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+			return
+		}
 		log.Printf("[malware] scanning root %d/%d: %s", i+1, len(webRoots), root.Path)
 
 		// Scan this single root

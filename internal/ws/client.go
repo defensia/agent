@@ -104,6 +104,7 @@ type Handlers struct {
 	OnSyncRequested           func(SyncRequestedPayload)
 	OnUpdateRequested         func(UpdateRequestedPayload)
 	OnMalwareScanRequested    func(MalwareScanRequestedPayload)
+	OnMalwareScanCancelled    func()
 	OnYaraInstallRequested    func(YaraInstallRequestedPayload)
 }
 
@@ -397,6 +398,11 @@ func (c *Client) dispatch(event string, rawData json.RawMessage) {
 			if err := json.Unmarshal([]byte(dataStr), &p); err == nil {
 				c.handlers.OnMalwareScanRequested(p)
 			}
+		}
+
+	case "malware_scan.cancelled":
+		if c.handlers.OnMalwareScanCancelled != nil {
+			c.handlers.OnMalwareScanCancelled()
 		}
 
 	case "yara_install.requested":

@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.49
+- **feat: cancel malware scan from dashboard** — new WebSocket event `malware_scan.cancelled` stops the scan between root iterations. Reports partial results before exiting.
+
 ## v1.4.48
 - **fix: MariaDB deprecation warning causing false positive malware findings** — `CombinedOutput()` mixed stderr warnings ("Deprecated program name") into query results, triggering `WP_DB_INJECTED_POST`, `WP_DB_INJECTED_OPTION`, and `WP_DB_ROGUE_ADMIN` on every WordPress site using MariaDB. Now uses `Output()` (stdout only) and filters any remaining warning lines.
 - **fix: false positive HEURISTIC_RECENT_PHP on plugin index.php files** — standard anti-directory-listing files (`<?php // Silence is golden`) in plugin asset directories are now skipped.
