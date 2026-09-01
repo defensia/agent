@@ -2,6 +2,10 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.48
+- **fix: MariaDB deprecation warning causing false positive malware findings** — `CombinedOutput()` mixed stderr warnings ("Deprecated program name") into query results, triggering `WP_DB_INJECTED_POST`, `WP_DB_INJECTED_OPTION`, and `WP_DB_ROGUE_ADMIN` on every WordPress site using MariaDB. Now uses `Output()` (stdout only) and filters any remaining warning lines.
+- **fix: false positive HEURISTIC_RECENT_PHP on plugin index.php files** — standard anti-directory-listing files (`<?php // Silence is golden`) in plugin asset directories are now skipped.
+
 ## v1.4.47
 - **fix: custom scan paths ending in `/` were silently ignored** — a trailing separator makes `filepath.Glob` return zero matches *and* a nil error, so a path like `/home/*/web/*/public_html/` never got scanned and never reported an error. Patterns are now trimmed before matching, and blank entries are skipped instead of resolving to `.` or `/` (which made the scanner walk the whole filesystem).
 - **HestiaCP / VestaCP support** — `/home/*/web/*/public_html` is now detected automatically, no custom path needed. The vhost directory is the domain, so each web root is reported with its domain.
