@@ -705,6 +705,18 @@ type apacheVhost struct {
 	logPaths    []string
 }
 
+// isBandwidthLog reports whether a CustomLog directive points at a bandwidth
+// accounting file rather than an access log. HestiaCP/VestaCP emit two CustomLog
+// lines per vhost — the real "combined" log plus a "<domain>.bytes" file written
+// with the "bytes" format. The latter holds byte counters, not HTTP requests, so
+// tailing it finds nothing and wastes a watcher on every vhost.
+func isBandwidthLog(path string, parts []string) bool {
+	if strings.HasSuffix(path, ".bytes") {
+		return true
+	}
+	return len(parts) >= 3 && strings.Trim(parts[2], "\"") == "bytes"
+}
+
 // parseApacheVhosts extracts ServerName/ServerAlias + CustomLog pairs from Apache config.
 func parseApacheVhosts(content string) []apacheVhost {
 	var results []apacheVhost
@@ -735,7 +747,7 @@ func parseApacheVhosts(content string) []apacheVhost {
 				parts := strings.Fields(trimmed)
 				if len(parts) >= 2 {
 					path := strings.Trim(parts[1], "\"")
-					if !strings.HasPrefix(path, "|") && !strings.HasPrefix(path, "syslog:") {
+					if !strings.HasPrefix(path, "|") && !strings.HasPrefix(path, "syslog:") && !isBandwidthLog(path, parts) {
 						results = append(results, apacheVhost{logPaths: []string{path}})
 					}
 				}
@@ -759,7 +771,7 @@ func parseApacheVhosts(content string) []apacheVhost {
 			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
 				path := strings.Trim(parts[1], "\"")
-				if !strings.HasPrefix(path, "|") && !strings.HasPrefix(path, "syslog:") {
+				if !strings.HasPrefix(path, "|") && !strings.HasPrefix(path, "syslog:") && !isBandwidthLog(path, parts) {
 					current.logPaths = append(current.logPaths, path)
 				}
 			}

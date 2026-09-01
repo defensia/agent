@@ -2,6 +2,11 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.47
+- **fix: custom scan paths ending in `/` were silently ignored** — a trailing separator makes `filepath.Glob` return zero matches *and* a nil error, so a path like `/home/*/web/*/public_html/` never got scanned and never reported an error. Patterns are now trimmed before matching, and blank entries are skipped instead of resolving to `.` or `/` (which made the scanner walk the whole filesystem).
+- **HestiaCP / VestaCP support** — `/home/*/web/*/public_html` is now detected automatically, no custom path needed. The vhost directory is the domain, so each web root is reported with its domain.
+- **fix: stop tailing bandwidth accounting logs** — HestiaCP/VestaCP write a second `CustomLog <domain>.bytes` per vhost holding byte counters, not HTTP requests. These are now skipped, removing roughly 40% of watched log sources on those servers.
+
 ## v1.4.25
 - **fix: iptables rule ordering** — geo DROP rules now use -A (append) instead of -I (insert first), ensuring ACCEPT rules for panel IP and whitelisted IPs always take precedence
 
