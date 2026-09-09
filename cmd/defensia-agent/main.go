@@ -918,8 +918,8 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			webW.SetMonitorMode(true)
 		}
 		// Still check for agent updates so the agent can be updated while suspended
-		if sync.AgentUpdate != nil {
-			handleAgentUpdate(sync.AgentUpdate, reportUpdateEvent)
+		if sync.AgentUpdate != nil && sync.AgentUpdate.LatestVersion != "" {
+			go updater.CheckAndUpdate(version, sync.AgentUpdate.LatestVersion, sync.AgentUpdate.DownloadBaseURL, reportUpdateEvent)
 		}
 		return nil
 	}
