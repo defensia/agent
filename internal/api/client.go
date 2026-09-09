@@ -303,6 +303,7 @@ type MalwareIgnoreEntry struct {
 }
 
 type SyncConfig struct {
+	Suspended         bool              `json:"suspended"`
 	BFThreshold       int               `json:"bf_threshold"`
 	BFWindow          int               `json:"bf_window"`
 	BFBanDuration     *int              `json:"bf_ban_duration"`

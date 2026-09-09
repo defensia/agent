@@ -32,7 +32,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.56"
+var version = "1.4.57"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -898,6 +898,30 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	sync, err := client.Sync()
 	if err != nil {
 		return err
+	}
+
+	// Handle suspension: when suspended, stop all active protection but keep heartbeat alive.
+	// The agent stays installed — upgrading the plan automatically lifts the suspension.
+	if sync.Config.Suspended {
+		log.Printf("[sync] agent is SUSPENDED (plan server limit exceeded) — disabling all watchers")
+		w.SetMonitorMode(true)
+		if mailW != nil {
+			mailW.SetMonitorMode(true)
+		}
+		if dbW != nil {
+			dbW.SetMonitorMode(true)
+		}
+		if ftpW != nil {
+			ftpW.SetMonitorMode(true)
+		}
+		if webW != nil {
+			webW.SetMonitorMode(true)
+		}
+		// Still check for agent updates so the agent can be updated while suspended
+		if sync.AgentUpdate != nil {
+			handleAgentUpdate(sync.AgentUpdate, reportUpdateEvent)
+		}
+		return nil
 	}
 
 	// Apply brute force config to watcher
