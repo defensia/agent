@@ -18,6 +18,7 @@ import (
 	"github.com/defensia/agent/internal/api"
 	"github.com/defensia/agent/internal/collector"
 	"github.com/defensia/agent/internal/config"
+	"github.com/defensia/agent/internal/fim"
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
 	"github.com/defensia/agent/internal/kubernetes"
@@ -32,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.57"
+var version = "1.4.58"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -45,6 +46,7 @@ var yaraScanner         *malware.YaraScanner
 var malwareCustomPaths  []string
 var modsecEngine      *modsecurity.Engine
 var sessionTracker    *session.SessionTracker
+var fimMonitor        *fim.Monitor
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -626,6 +628,40 @@ func runAgent() {
 		}
 		log.Printf("[malware-rt] detected %d findings in %s", len(findings), path)
 	})
+
+	// File Integrity Monitor: baseline-based detection of unauthorized file changes
+	fimMonitor = fim.New(func(change fim.Change) {
+		details := map[string]string{
+			"change_type": change.ChangeType,
+			"file_path":   change.Path,
+		}
+		if change.OldHash != "" {
+			details["old_hash"] = change.OldHash
+		}
+		if change.NewHash != "" {
+			details["new_hash"] = change.NewHash
+		}
+		if change.OldPerms != "" {
+			details["old_perms"] = change.OldPerms
+			details["new_perms"] = change.NewPerms
+		}
+		if change.OldOwner != "" {
+			details["old_owner"] = change.OldOwner
+			details["new_owner"] = change.NewOwner
+		}
+		if change.Domain != "" {
+			details["domain"] = change.Domain
+		}
+		_ = apiClient.ReportEvents([]api.EventRequest{{
+			Type:       "integrity_change",
+			Severity:   change.Severity,
+			Details:    details,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	})
+	fimMonitor.Start()
+	log.Printf("[fim] file integrity monitor started")
+
 	malwareScanner.HashLookup = func(hashes []string) map[string]string {
 		resp, err := apiClient.LookupMalwareHashes(hashes)
 		if err != nil {
@@ -1220,6 +1256,15 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 				if len(webRoots) > 0 {
 					malwareRTWatcher.SetDirectories(webRoots)
 					malwareRTWatcher.Start()
+
+					// Feed web roots to FIM monitor
+					if fimMonitor != nil {
+						fimRoots := make([]fim.WebRoot, len(webRoots))
+						for i, r := range webRoots {
+							fimRoots[i] = fim.WebRoot{Path: r.Path, Domain: r.Domain}
+						}
+						fimMonitor.SetWebRoots(fimRoots)
+					}
 				}
 			}()
 		} else if !cfg.Enabled && malwareRTWatcher != nil {
