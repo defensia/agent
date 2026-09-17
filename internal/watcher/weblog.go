@@ -1760,6 +1760,31 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		return
 	}
 
+	// ── Skip WAF scoring for verified search engine bots ──
+	// Googlebot, Applebot, etc. may follow links to /.env or /secrets.json
+	// from indexed pages. Banning them is a false positive — log but don't score.
+	if bot := w.matchAllowBot(uaLower, entry.userAgent); bot != nil {
+		// Async FCrDNS verification — only skip scoring if actually verified
+		w.mu.Unlock()
+		verified, hostname := w.checkBotFcrdns(ip, bot.Slug)
+		w.mu.Lock()
+		if verified {
+			go w.onEvent(ip, "bot_crawl", "info", map[string]string{
+				"domain":       entry.domain,
+				"uri":          entry.uri,
+				"user_agent":   entry.userAgent,
+				"bot_slug":     bot.Slug,
+				"bot_name":     bot.Name,
+				"bot_action":   "allow",
+				"fcrdns_verified": "true",
+				"fcrdns_hostname": hostname,
+				"note":         "WAF rule matched but bot verified — not scored",
+			})
+			return
+		}
+		// Bot failed FCrDNS — it's spoofing, let scoring proceed normally
+	}
+
 	// ── Score-based detection: path traversal, SQL injection, etc. ──
 	// Each match adds points to the IP's cumulative score. Action depends on total score.
 	for _, rule := range instantBanPatterns {

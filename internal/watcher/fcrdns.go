@@ -154,6 +154,25 @@ func verifyFcrdns(ip string, expectedSuffixes []string) (bool, string) {
 	return false, hostname
 }
 
+// matchAllowBot checks if a UA matches a known bot with action="allow".
+// Returns the matched bot fingerprint or nil. Must be called with w.mu held.
+func (w *WebWatcher) matchAllowBot(uaLower, uaRaw string) *compiledBot {
+	for i := range w.botFingerprints {
+		bot := &w.botFingerprints[i]
+		if bot.Action != "allow" {
+			continue
+		}
+		if bot.IsRegex && bot.Re != nil {
+			if bot.Re.MatchString(uaRaw) {
+				return bot
+			}
+		} else if strings.Contains(uaLower, strings.ToLower(bot.Pattern)) {
+			return bot
+		}
+	}
+	return nil
+}
+
 // checkBotFcrdns verifies if a bot IP is legitimate using FCrDNS.
 // slug is the bot fingerprint slug (e.g., "googlebot", "bingbot").
 // Returns: verified (true = legitimate), hostname from rDNS.
