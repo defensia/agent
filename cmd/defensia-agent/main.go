@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.61"
+var version = "1.4.62"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -1066,8 +1066,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		activeBanIPs[b.IPAddress] = true
 		banIPs = append(banIPs, b.IPAddress)
 	}
+	bansApplied := 0
 	if !sync.Config.MonitorMode {
-		firewall.ApplyBans(banIPs)
+		bansApplied = firewall.ApplyBans(banIPs)
 	}
 
 	// Apply threat feed blocks (IPs + CIDRs from Spamhaus, Feodo, etc.)
@@ -1284,8 +1285,8 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		malwareAllowList.SetUserIgnored(entries)
 	}
 
-	log.Printf("[sync] applied %d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",
-		len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries), len(sync.BotFingerprints))
+	log.Printf("[sync] applied %d/%d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",
+		bansApplied, len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries), len(sync.BotFingerprints))
 
 	// Run malware scan if requested via dashboard (sync-based fallback for when WebSocket is unreachable)
 	if sync.MalwareScanRequested {

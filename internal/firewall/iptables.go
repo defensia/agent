@@ -11,24 +11,31 @@ import (
 )
 
 const banSetName = "defensia-bans"
+const banSet6Name = "defensia-bans6"
 
 // Init initializes the firewall backend: detects ipset availability
-// and creates the defensia-bans hash:ip set if ipset is present.
+// and creates the defensia-bans hash:ip set(s) if ipset is present.
 func Init() {
 	if !checkIpset() {
 		return
 	}
-	// Create the bans set (hash:ip, 65536 max)
+	// Create the IPv4 bans set (hash:ip family inet, 65536 max)
 	if err := createIpsetHashIP(banSetName); err != nil {
 		log.Printf("[firewall] failed to create ban set: %v", err)
 		return
 	}
-	// Add the single iptables rule for the bans set
 	if err := addIptablesIpsetRule(banSetName); err != nil {
 		log.Printf("[firewall] failed to add iptables rule for ban set: %v", err)
 		return
 	}
-	log.Printf("[firewall] ipset ban set ready: %s (hash:ip, 65536 max)", banSetName)
+	// Create the IPv6 bans set (hash:ip family inet6, 65536 max)
+	if err := createIpsetHashIP6(banSet6Name); err != nil {
+		log.Printf("[firewall] failed to create IPv6 ban set: %v", err)
+		// Non-fatal — IPv4 still works
+	} else if err := addIp6tablesIpsetRule(banSet6Name); err != nil {
+		log.Printf("[firewall] failed to add ip6tables rule for ban set: %v", err)
+	}
+	log.Printf("[firewall] ipset ban sets ready: %s (inet) + %s (inet6)", banSetName, banSet6Name)
 }
 
 // SetK8sHook registers a Kubernetes-level firewall implementation.
@@ -56,7 +63,7 @@ func FirewallStatus() Status {
 			Mode:       "ipset",
 			HasIpset:   true,
 			Capacity:   65536,
-			ActiveBans: ipsetEntryCount(banSetName),
+			ActiveBans: ipsetEntryCount(banSetName) + ipsetEntryCount(banSet6Name),
 			CSF:        csf,
 		}
 	}
@@ -223,8 +230,8 @@ func isSafeIP(ip net.IP) bool {
 }
 
 // BanIP adds a DROP rule for the given IP address.
-// When ipset is available, adds to the defensia-bans hash:ip set (O(1), 65K capacity).
-// Otherwise falls back to individual iptables rules.
+// When ipset is available, adds to the appropriate set (IPv4 → defensia-bans, IPv6 → defensia-bans6).
+// Otherwise falls back to individual iptables/ip6tables rules.
 func BanIP(ip string) error {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
@@ -235,7 +242,10 @@ func BanIP(ip string) error {
 	}
 
 	if HasIpset() {
-		return ipsetAdd(banSetName, ip)
+		if parsed.To4() != nil {
+			return ipsetAdd(banSetName, ip)
+		}
+		return ipsetAdd(banSet6Name, ip)
 	}
 
 	return ApplyRule(RuleSpec{
@@ -247,12 +257,16 @@ func BanIP(ip string) error {
 
 // UnbanIP removes the DROP rule for the given IP address.
 func UnbanIP(ip string) error {
-	if net.ParseIP(ip) == nil {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
 	}
 
 	if HasIpset() {
-		return ipsetDel(banSetName, ip)
+		if parsed.To4() != nil {
+			return ipsetDel(banSetName, ip)
+		}
+		return ipsetDel(banSet6Name, ip)
 	}
 
 	return RemoveRule(RuleSpec{
@@ -264,30 +278,53 @@ func UnbanIP(ip string) error {
 
 // ApplyBans applies a list of IPs from the server sync.
 // When ipset is available, uses batch restore for maximum speed.
-func ApplyBans(ips []string) {
+// Splits IPv4 and IPv6 into separate sets to prevent ipset restore atomicity failures.
+// Returns the number of IPs actually applied to the kernel.
+func ApplyBans(ips []string) int {
 	if HasIpset() && len(ips) > 0 {
-		// Filter safe IPs before batch add
-		var safe []string
+		// Split by address family — ipset restore is atomic, one bad entry kills the whole batch
+		var v4, v6 []string
 		for _, ip := range ips {
 			parsed := net.ParseIP(ip)
-			if parsed != nil && !isSafeIP(parsed) {
-				safe = append(safe, ip)
+			if parsed == nil || isSafeIP(parsed) {
+				continue
+			}
+			if parsed.To4() != nil {
+				v4 = append(v4, ip)
+			} else {
+				v6 = append(v6, ip)
 			}
 		}
-		if err := ipsetBatchAdd(banSetName, safe); err != nil {
-			log.Printf("[firewall] ipset batch ban failed: %v", err)
+		v4applied, v6applied := 0, 0
+		if len(v4) > 0 {
+			if err := ipsetBatchAdd(banSetName, v4); err != nil {
+				log.Printf("[firewall] ipset batch ban failed (v4, %d IPs): %v", len(v4), err)
+			} else {
+				v4applied = len(v4)
+			}
 		}
-		return
+		if len(v6) > 0 {
+			if err := ipsetBatchAdd(banSet6Name, v6); err != nil {
+				log.Printf("[firewall] ipset batch ban failed (v6, %d IPs): %v", len(v6), err)
+			} else {
+				v6applied = len(v6)
+			}
+		}
+		return v4applied + v6applied
 	}
+	applied := 0
 	for _, ip := range ips {
 		if err := BanIP(ip); err != nil {
 			log.Printf("[firewall] error applying ban for %s: %v", ip, err)
+		} else {
+			applied++
 		}
 	}
+	return applied
 }
 
 // CleanupStaleBans removes bans for IPs that are no longer in the active ban list.
-// When ipset is available, flushes the set and re-adds only active IPs (atomic swap).
+// When ipset is available, cleans both IPv4 and IPv6 sets.
 // When using iptables, removes individual DROP rules.
 func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
 	if HasIpset() {
@@ -296,23 +333,25 @@ func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]boo
 	return cleanupIptablesBans(activeBanIPs, activeRuleIPs)
 }
 
-// cleanupIpsetBans syncs the ipset to match exactly the active bans.
+// cleanupIpsetBans syncs both IPv4 and IPv6 ipsets to match exactly the active bans.
 func cleanupIpsetBans(activeBanIPs map[string]bool) int {
-	// List current entries in the set
-	currentIPs := ipsetListMembers(banSetName)
-	if len(currentIPs) == 0 && len(activeBanIPs) == 0 {
-		return 0
-	}
-
 	removed := 0
-	for _, ip := range currentIPs {
+	// Clean IPv4 set
+	for _, ip := range ipsetListMembers(banSetName) {
 		if !activeBanIPs[ip] {
 			if err := ipsetDel(banSetName, ip); err == nil {
 				removed++
 			}
 		}
 	}
-
+	// Clean IPv6 set
+	for _, ip := range ipsetListMembers(banSet6Name) {
+		if !activeBanIPs[ip] {
+			if err := ipsetDel(banSet6Name, ip); err == nil {
+				removed++
+			}
+		}
+	}
 	if removed > 0 {
 		log.Printf("[firewall] cleanup: removed %d expired bans from ipset", removed)
 	}

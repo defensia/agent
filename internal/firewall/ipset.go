@@ -106,6 +106,21 @@ func addIptablesIpsetRule(setName string) error {
 	return nil
 }
 
+// addIp6tablesIpsetRule adds an ip6tables rule that matches traffic from an ipset set (IPv6).
+func addIp6tablesIpsetRule(setName string) error {
+	if exec.Command("ip6tables", "-C", "INPUT",
+		"-m", "set", "--match-set", setName, "src", "-j", "DROP").Run() == nil {
+		return nil // already exists
+	}
+	out, err := exec.Command("ip6tables", "-A", "INPUT",
+		"-m", "set", "--match-set", setName, "src", "-j", "DROP").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip6tables add ipset rule for %s: %s (%w)",
+			setName, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // removeIptablesIpsetRule removes the iptables rule referencing an ipset set.
 func removeIptablesIpsetRule(setName string) error {
 	out, err := exec.Command("iptables", "-D", "INPUT",
@@ -117,12 +132,22 @@ func removeIptablesIpsetRule(setName string) error {
 	return nil
 }
 
-// createIpsetHashIP creates an ipset hash:ip set for individual IP bans.
+// createIpsetHashIP creates an ipset hash:ip set for individual IP bans (IPv4, family inet).
 func createIpsetHashIP(name string) error {
 	out, err := exec.Command("ipset", "create", name, "hash:ip",
-		"maxelem", "65536", "-exist").CombinedOutput()
+		"family", "inet", "maxelem", "65536", "-exist").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ipset create %s hash:ip: %s (%w)", name, strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("ipset create %s hash:ip inet: %s (%w)", name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// createIpsetHashIP6 creates an ipset hash:ip set for IPv6 bans (family inet6).
+func createIpsetHashIP6(name string) error {
+	out, err := exec.Command("ipset", "create", name, "hash:ip",
+		"family", "inet6", "maxelem", "65536", "-exist").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ipset create %s hash:ip inet6: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
