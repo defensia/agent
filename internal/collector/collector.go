@@ -244,17 +244,25 @@ func detectPHP() KeySoftware {
 	return KeySoftware{Name: "PHP", Version: version, Status: status, Category: "runtime"}
 }
 
+func mariaDBStatus(version string) string {
+	major, minor := parseMajorMinor(version)
+	if major == 0 {
+		return "unknown"
+	}
+	// MariaDB EOL: 10.x below 10.6, or any single-digit major
+	if major < 10 || (major == 10 && minor < 6) {
+		return "eol"
+	}
+	return "up_to_date"
+}
+
 func detectMySQL() KeySoftware {
 	// Try mysql
 	if out, err := exec.Command("mysql", "--version").Output(); err == nil {
 		raw := string(out)
 		if strings.Contains(strings.ToLower(raw), "mariadb") {
 			version := parseMariaDBVer(raw)
-			major, minor := parseMajorMinor(version)
-			status := "up_to_date"
-			if major < 10 || (major == 10 && minor < 6) {
-				status = "eol"
-			}
+			status := mariaDBStatus(version)
 			return KeySoftware{Name: "MariaDB", Version: version, Status: status, Category: "database"}
 		}
 		version := parseMySQLVer(raw)
@@ -268,11 +276,7 @@ func detectMySQL() KeySoftware {
 	// Try mariadb
 	if out, err := exec.Command("mariadb", "--version").Output(); err == nil {
 		version := parseMariaDBVer(string(out))
-		major, minor := parseMajorMinor(version)
-		status := "up_to_date"
-		if major < 10 || (major == 10 && minor < 6) {
-			status = "eol"
-		}
+		status := mariaDBStatus(version)
 		return KeySoftware{Name: "MariaDB", Version: version, Status: status, Category: "database"}
 	}
 	return KeySoftware{Name: "Database", Version: "-", Status: "not_installed", Category: "database"}
@@ -420,16 +424,27 @@ func parseMySQLVer(raw string) string {
 
 func parseMariaDBVer(raw string) string {
 	lower := strings.ToLower(raw)
+	// Classic format: "mysql  Ver 15.1 Distrib 10.6.x-MariaDB"
 	idx := strings.Index(lower, "distrib ")
-	if idx == -1 {
-		return "unknown"
+	if idx != -1 {
+		rest := raw[idx+8:]
+		fields := strings.FieldsFunc(rest, func(c rune) bool {
+			return c == ',' || c == ' ' || c == '-'
+		})
+		if len(fields) > 0 {
+			return fields[0]
+		}
 	}
-	rest := raw[idx+8:]
-	fields := strings.FieldsFunc(rest, func(c rune) bool {
-		return c == ',' || c == ' ' || c == '-'
-	})
-	if len(fields) > 0 {
-		return fields[0]
+	// New format (MariaDB 11+): "mariadb from 11.8.9-MariaDB, client 15.2 ..."
+	idx = strings.Index(lower, " from ")
+	if idx != -1 {
+		rest := raw[idx+6:]
+		fields := strings.FieldsFunc(rest, func(c rune) bool {
+			return c == ',' || c == ' ' || c == '-'
+		})
+		if len(fields) > 0 {
+			return fields[0]
+		}
 	}
 	return "unknown"
 }
