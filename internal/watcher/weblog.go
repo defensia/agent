@@ -1379,9 +1379,11 @@ type accessLogEntry struct {
 }
 
 // parseAccessLog parses a combined log format line without regex.
-// Supports two formats:
+// Supports three formats:
 //   Standard:       IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
 //   vhost_combined: DOMAIN:PORT IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT"
+//   Proxy/CF:       PROXY_IP - - [timestamp] "METHOD URI PROTO" STATUS SIZE "REFERER" "USER-AGENT" "REAL_CLIENT_IP"
+// The proxy format is auto-detected: if the last quoted field is an IP address, it is used as the real client IP.
 func parseAccessLog(line string) (accessLogEntry, bool) {
 	var e accessLogEntry
 
@@ -1473,20 +1475,52 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 		if sz != "" { e.bodySize, _ = strconv.Atoi(sz) }
 	}
 
-	// Extract user-agent (last quoted string) and referer (second-to-last)
+	// Extract quoted fields from right to left.
+	// Standard CLF has 3: "request" "referer" "user-agent"
+	// Proxy/Cloudflare format adds a 4th: "request" "referer" "user-agent" "xff_ip"
+	// We detect the proxy format by checking if the last quoted field is an IP address.
 	lastQ2 := strings.LastIndexByte(line, '"')
 	if lastQ2 > 0 {
 		sub := line[:lastQ2]
 		lastQ1 := strings.LastIndexByte(sub, '"')
 		if lastQ1 >= 0 {
-			e.userAgent = sub[lastQ1+1:]
+			lastField := sub[lastQ1+1:]
 
-			// Referer is the quoted string before user-agent
-			sub2 := sub[:lastQ1]
-			if refQ2 := strings.LastIndexByte(sub2, '"'); refQ2 > 0 {
-				sub3 := sub2[:refQ2]
-				if refQ1 := strings.LastIndexByte(sub3, '"'); refQ1 >= 0 {
-					e.referer = sub3[refQ1+1:]
+			// Check if last quoted field is a forwarded IP (proxy/Cloudflare format).
+			// XFF can be comma-separated: "1.2.3.4, 5.6.7.8" — first IP is the real client.
+			xffIP := strings.TrimSpace(strings.SplitN(lastField, ",", 2)[0])
+			if isIPAddress(xffIP) && xffIP != "" {
+				// Proxy format: last field is XFF IP → use as real client IP
+				e.ip = xffIP
+
+				// User-agent is the second-to-last quoted field
+				sub2 := sub[:lastQ1]
+				if uaQ2 := strings.LastIndexByte(sub2, '"'); uaQ2 > 0 {
+					sub3 := sub2[:uaQ2]
+					if uaQ1 := strings.LastIndexByte(sub3, '"'); uaQ1 >= 0 {
+						e.userAgent = sub3[uaQ1+1:]
+
+						// Referer is the third-to-last quoted field
+						sub4 := sub3[:uaQ1]
+						if refQ2 := strings.LastIndexByte(sub4, '"'); refQ2 > 0 {
+							sub5 := sub4[:refQ2]
+							if refQ1 := strings.LastIndexByte(sub5, '"'); refQ1 >= 0 {
+								e.referer = sub5[refQ1+1:]
+							}
+						}
+					}
+				}
+			} else {
+				// Standard format: last field is user-agent
+				e.userAgent = lastField
+
+				// Referer is the second-to-last quoted field
+				sub2 := sub[:lastQ1]
+				if refQ2 := strings.LastIndexByte(sub2, '"'); refQ2 > 0 {
+					sub3 := sub2[:refQ2]
+					if refQ1 := strings.LastIndexByte(sub3, '"'); refQ1 >= 0 {
+						e.referer = sub3[refQ1+1:]
+					}
 				}
 			}
 		}
