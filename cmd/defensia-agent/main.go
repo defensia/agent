@@ -135,6 +135,7 @@ func runAgent() {
 
 	apiClient := api.New(cfg.ServerURL, cfg.AgentToken)
 	apiClient.SetVersion(version)
+	apiClient.StartEventConsumer()
 
 	// Callback for the updater to report update outcomes to the server
 	reportUpdateEvent := func(eventType, severity string, details map[string]string) {
@@ -238,13 +239,13 @@ func runAgent() {
 		// Record IP in dedup so the web log watcher skips this IP for 30s
 		modsecDedup.Record(entry.SourceIP)
 
-		_ = apiClient.ReportEvents([]api.EventRequest{{
+		apiClient.QueueEvent(api.EventRequest{
 			Type:       eventType,
 			Severity:   severity,
 			SourceIP:   entry.SourceIP,
 			Details:    details,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		}})
+		})
 	}); auditWatcher != nil {
 		go auditWatcher.Run()
 		log.Printf("[modsec-audit] watcher started on %s", auditWatcher.Path())
@@ -273,12 +274,12 @@ func runAgent() {
 
 		go k8sClient.WatchEvents(func(event kubernetes.K8sEvent) {
 			log.Printf("[kubernetes] event: %s (%s)", event.Type, event.Severity)
-			_ = apiClient.ReportEvents([]api.EventRequest{{
+			apiClient.QueueEvent(api.EventRequest{
 				Type:       event.Type,
 				Severity:   event.Severity,
 				Details:    event.Details,
 				OccurredAt: time.Now().UTC().Format(time.RFC3339),
-			}})
+			})
 		})
 	}
 
@@ -302,13 +303,13 @@ func runAgent() {
 	// Set event callback for monitor mode (report detections without banning)
 	w.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
 		log.Printf("[watcher] detected %s from %s (monitor mode)", eventType, ip)
-		apiClient.ReportEvents([]api.EventRequest{{
+		apiClient.QueueEvent(api.EventRequest{
 			Type:       eventType,
 			Severity:   severity,
 			SourceIP:   ip,
 			Details:    details,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		}})
+		})
 	})
 
 	// Set geoblocking check on watcher
@@ -379,13 +380,13 @@ func runAgent() {
 				}
 			},
 			func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			},
 		)
 		webW.SetCheckIP(func(ip string) string {
@@ -477,13 +478,13 @@ func runAgent() {
 		})
 		if mailW != nil {
 			mailW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			})
 			mailW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -516,13 +517,13 @@ func runAgent() {
 		})
 		if dbW != nil {
 			dbW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			})
 			dbW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -555,13 +556,13 @@ func runAgent() {
 		})
 		if ftpW != nil {
 			ftpW.SetOnEvent(func(ip, eventType, severity string, details map[string]string) {
-				apiClient.ReportEvents([]api.EventRequest{{
+				apiClient.QueueEvent(api.EventRequest{
 					Type:       eventType,
 					Severity:   severity,
 					SourceIP:   ip,
 					Details:    details,
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
+				})
 			})
 			ftpW.SetCheckIP(func(ip string) string {
 				cc, blocked := geo.IsBlocked(ip)
@@ -607,10 +608,9 @@ func runAgent() {
 		if len(findings) == 0 {
 			return
 		}
-		// Report as security events
-		var events []api.EventRequest
+		// Queue findings for batched delivery
 		for _, f := range findings {
-			events = append(events, api.EventRequest{
+			apiClient.QueueEvent(api.EventRequest{
 				Type:     "malware_realtime",
 				Severity: f.Severity,
 				Details: map[string]string{
@@ -622,9 +622,6 @@ func runAgent() {
 				},
 				OccurredAt: time.Now().UTC().Format(time.RFC3339),
 			})
-		}
-		if err := apiClient.ReportEvents(events); err != nil {
-			log.Printf("[malware-rt] failed to report: %v", err)
 		}
 		log.Printf("[malware-rt] detected %d findings in %s", len(findings), path)
 	})
@@ -652,12 +649,12 @@ func runAgent() {
 		if change.Domain != "" {
 			details["domain"] = change.Domain
 		}
-		_ = apiClient.ReportEvents([]api.EventRequest{{
+		apiClient.QueueEvent(api.EventRequest{
 			Type:       "integrity_change",
 			Severity:   change.Severity,
 			Details:    details,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		}})
+		})
 	})
 	fimMonitor.Start()
 	log.Printf("[fim] file integrity monitor started")
@@ -688,14 +685,12 @@ func runAgent() {
 
 	// Initialize SSH session tracker (monitor-only — never bans)
 	sessionTracker = session.New(func(eventType, severity string, details map[string]string) {
-		if err := apiClient.ReportEvents([]api.EventRequest{{
+		apiClient.QueueEvent(api.EventRequest{
 			Type:       eventType,
 			Severity:   severity,
 			Details:    details,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		}}); err != nil {
-			log.Printf("[session] failed to report event: %v", err)
-		}
+		})
 	})
 	log.Printf("[session] tracker initialized (waiting for panel activation)")
 
