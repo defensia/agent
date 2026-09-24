@@ -1,10 +1,12 @@
 package watcher
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -92,8 +94,13 @@ type Watcher struct {
 	monitorMode bool            // when true, detect but do not ban
 }
 
+// journaldMarker is a special path indicating journald should be used.
+const journaldMarker = "journald://"
+
 // detectLogPath returns the auth log path, checking the environment variable
 // first, then auto-detecting between Debian/Ubuntu and RHEL/CentOS paths.
+// Falls back to journald if no log file exists but journalctl is available
+// (common in LXC containers where rsyslog may not write /var/log/auth.log).
 func detectLogPath() string {
 	if p := os.Getenv("AUTH_LOG_PATH"); p != "" {
 		return p
@@ -103,6 +110,10 @@ func detectLogPath() string {
 	}
 	if _, err := os.Stat("/var/log/secure"); err == nil {
 		return "/var/log/secure"
+	}
+	// Fallback: use journald if available (LXC containers, minimal installs)
+	if _, err := exec.LookPath("journalctl"); err == nil {
+		return journaldMarker
 	}
 	return defaultLogPath
 }
@@ -223,14 +234,24 @@ func (w *Watcher) isWhitelisted(ip string) bool {
 	return false
 }
 
-// Run starts tailing the log file. Blocks indefinitely.
+// Run starts tailing the log file (or journald). Blocks indefinitely.
 func (w *Watcher) Run() {
-	log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
+	if w.logPath == journaldMarker {
+		log.Printf("[watcher] using journald (no auth.log found) (threshold: %d in %s)", w.threshold, w.window)
+	} else {
+		log.Printf("[watcher] watching %s (threshold: %d in %s)", w.logPath, w.threshold, w.window)
+	}
 
 	go w.cleanupLoop()
 
 	for {
-		if err := w.tail(); err != nil {
+		var err error
+		if w.logPath == journaldMarker {
+			err = w.tailJournald()
+		} else {
+			err = w.tail()
+		}
+		if err != nil {
 			log.Printf("[watcher] error: %v — retrying in 5s", err)
 			time.Sleep(5 * time.Second)
 		}
@@ -341,6 +362,32 @@ func (w *Watcher) tail() error {
 	}
 
 	return nil
+}
+
+// tailJournald follows sshd entries from systemd journal. Used as fallback when
+// /var/log/auth.log and /var/log/secure don't exist (LXC containers, minimal installs).
+func (w *Watcher) tailJournald() error {
+	// Use _COMM=sshd to capture all SSH daemon messages.
+	// --since "now" skips historical entries — we only care about new events.
+	cmd := exec.Command("journalctl", "_COMM=sshd", "-f", "--no-pager", "--since", "now", "-o", "short")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		w.processLine(scanner.Text())
+	}
+
+	// If journalctl exits, wait and return the error so Run() retries.
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+	return scanner.Err()
 }
 
 // isPrivateIP returns true for loopback, link-local, and RFC-1918 private IPs
