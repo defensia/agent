@@ -1280,8 +1280,14 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		malwareAllowList.SetUserIgnored(entries)
 	}
 
-	log.Printf("[sync] applied %d/%d bans, cleaned %d expired, %d/%d rules, %d whitelists, %d geoblock countries, %d bot fingerprints",
-		bansApplied, len(sync.Bans), cleaned, rulesApplied, len(sync.Rules), len(sync.Whitelists), len(blockedCountries), len(sync.BotFingerprints))
+	wafRuleCount := 0
+	for _, r := range sync.Rules {
+		if r.CountryCode == nil || *r.CountryCode == "" {
+			wafRuleCount++
+		}
+	}
+	log.Printf("[sync] applied %d/%d bans, cleaned %d expired, %d new rules (%d WAF total), %d whitelists, %d geoblock countries, %d bot fingerprints",
+		bansApplied, len(sync.Bans), cleaned, rulesApplied, wafRuleCount, len(sync.Whitelists), len(blockedCountries), len(sync.BotFingerprints))
 
 	// Run malware scan if requested via dashboard (sync-based fallback for when WebSocket is unreachable)
 	if sync.MalwareScanRequested {

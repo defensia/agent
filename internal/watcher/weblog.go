@@ -284,6 +284,8 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		"/var/log/ispconfig/httpd/*/access.log",
 		// DirectAdmin
 		"/var/log/httpd/domains/*.log",
+		// CyberPanel/OpenLiteSpeed per-site logs
+		"/home/*/logs/*_access_log",
 		// Generic per-domain
 		"/var/log/nginx/*/access.log",
 		"/var/www/*/logs/access.log",
@@ -342,6 +344,9 @@ type nginxBlock struct {
 
 // detectNginxLogInfo parses nginx config to find ALL access_log paths with their server_names.
 func detectNginxLogInfo() []LogPathInfo {
+	if _, err := exec.LookPath("nginx"); err != nil {
+		return nil // nginx not installed — skip silently (e.g. OpenLiteSpeed, Apache-only)
+	}
 	out, err := exec.Command("nginx", "-T").CombinedOutput()
 	if err != nil {
 		log.Printf("[webwatcher] nginx -T failed: %v (output: %.200s)", err, string(out))
@@ -1569,7 +1574,14 @@ func extractDomainFromLogPath(path string) string {
 		}
 	}
 
-	// Pattern: /home/USER/logs/ — can't extract domain, skip
+	// CyberPanel: /home/USER/logs/DOMAIN_access_log → extract DOMAIN
+	if strings.HasSuffix(base, "_access_log") {
+		candidate := strings.TrimSuffix(base, "_access_log")
+		if strings.ContainsRune(candidate, '.') && !isIPAddress(candidate) {
+			return candidate
+		}
+	}
+
 	// Pattern: DOMAIN.log in /domains/ dir
 	if strings.TrimSuffix(base, ".log") != base {
 		candidate := strings.TrimSuffix(base, ".log")
