@@ -137,6 +137,11 @@ type WebWatcher struct {
 
 	// Hot-reload: active goroutines with cancel functions
 	activePaths map[string]context.CancelFunc
+
+	// behindProxy is set to true when XFF format is first detected in parseAccessLog.
+	// Indicates the server is behind a reverse proxy (e.g. Cloudflare) where iptables
+	// bans on the TCP source IP don't block the real attacker.
+	behindProxy bool
 }
 
 // ── Log path detection ──────────────────────────────────────────────
@@ -1061,6 +1066,16 @@ func (w *WebWatcher) RequestsAnalyzed() uint64 {
 	return count
 }
 
+// IsBehindProxy returns true if XFF format was detected in any parsed access log line,
+// indicating the server is behind a reverse proxy (Cloudflare, load balancer, etc.).
+// When true, iptables bans on the TCP source IP don't block the real attacker —
+// web server deny rules must be used instead.
+func (w *WebWatcher) IsBehindProxy() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.behindProxy
+}
+
 func (w *WebWatcher) SetOnScoredBan(fn ScoredBanFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -1373,14 +1388,15 @@ func (w *WebWatcher) tailWithContext(ctx context.Context, logPath string) error 
 
 // accessLogEntry holds parsed fields from an access log line.
 type accessLogEntry struct {
-	ip        string
-	method    string
-	uri       string
-	status    int
-	bodySize  int
-	referer   string
-	userAgent string
-	domain    string // extracted from vhost_combined format (domain:port IP ...)
+	ip          string
+	method      string
+	uri         string
+	status      int
+	bodySize    int
+	referer     string
+	userAgent   string
+	domain      string // extracted from vhost_combined format (domain:port IP ...)
+	xffDetected bool   // true when the real client IP came from an XFF/proxy field
 }
 
 // parseAccessLog parses a combined log format line without regex.
@@ -1497,6 +1513,7 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 			if isIPAddress(xffIP) && xffIP != "" {
 				// Proxy format: last field is XFF IP → use as real client IP
 				e.ip = xffIP
+				e.xffDetected = true
 
 				// User-agent is the second-to-last quoted field
 				sub2 := sub[:lastQ1]
@@ -1761,6 +1778,13 @@ func (w *WebWatcher) processLine(logPath, line string) {
 			}
 		}
 		return
+	}
+
+	// Detect proxy/Cloudflare: once XFF format is seen, mark this server as behind a proxy.
+	// This flag is sticky — once set, it stays true for the lifetime of the process.
+	if entry.xffDetected && !w.behindProxy {
+		w.behindProxy = true
+		log.Printf("[webwatcher] proxy/Cloudflare detected (XFF format) — web server IP deny rules will be used for bans")
 	}
 
 	ip := entry.ip

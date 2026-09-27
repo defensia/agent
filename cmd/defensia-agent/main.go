@@ -438,7 +438,7 @@ func runAgent() {
 	panelDomains := collectPanelDomains(cpName)
 
 	// Setup UA blocking at web server level (runs once; no-op if sentinel exists)
-	uaReport := func(eventType, severity string, details map[string]string) {
+	wsReport := func(eventType, severity string, details map[string]string) {
 		_ = apiClient.ReportEvents([]api.EventRequest{{
 			Type:       eventType,
 			Severity:   severity,
@@ -448,14 +448,24 @@ func runAgent() {
 	}
 	if wsName == "nginx" {
 		go func() {
-			if err := webserver.SetupNginxUABlock(uaReport); err != nil {
+			if err := webserver.SetupNginxUABlock(wsReport); err != nil {
 				log.Printf("[ua-block] nginx setup error: %v", err)
+			}
+		}()
+		go func() {
+			if err := webserver.SetupNginxIPBlock(wsReport); err != nil {
+				log.Printf("[ip-block] nginx setup error: %v", err)
 			}
 		}()
 	} else if wsName == "apache" {
 		go func() {
-			if err := webserver.SetupApacheUABlock(uaReport); err != nil {
+			if err := webserver.SetupApacheUABlock(wsReport); err != nil {
 				log.Printf("[ua-block] apache setup error: %v", err)
+			}
+		}()
+		go func() {
+			if err := webserver.SetupApacheIPBlock(wsReport); err != nil {
+				log.Printf("[ip-block] apache setup error: %v", err)
 			}
 		}()
 	}
@@ -1064,6 +1074,25 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	bansApplied := 0
 	if !sync.Config.MonitorMode {
 		bansApplied = firewall.ApplyBans(banIPs)
+	}
+
+	// Write web server IP deny rules when behind a proxy (Cloudflare, etc.).
+	// iptables bans still work for non-proxied traffic (SSH, direct connections),
+	// but for HTTP traffic the TCP source is the proxy IP, not the attacker.
+	if webW != nil && webW.IsBehindProxy() && wsType != "" && !sync.Config.MonitorMode && len(banIPs) > 0 {
+		ipReport := func(eventType, severity string, details map[string]string) {
+			_ = client.ReportEvents([]api.EventRequest{{
+				Type:       eventType,
+				Severity:   severity,
+				Details:    details,
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}
+		go func(ips []string) {
+			if err := webserver.UpdateIPBlocklist(ips, wsType, ipReport); err != nil {
+				log.Printf("[ip-block] update error: %v", err)
+			}
+		}(banIPs)
 	}
 
 	// Apply threat feed blocks (IPs + CIDRs from Spamhaus, Feodo, etc.)
