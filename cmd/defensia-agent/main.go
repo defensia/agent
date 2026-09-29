@@ -42,6 +42,7 @@ var malwareScheduler    *malware.Scheduler
 var malwareAllowList    *malware.AllowList
 var malwareScanner      *malware.Scanner
 var malwareRTWatcher    *malware.RealtimeWatcher
+var malwareFanotify     *malware.FanotifyWatcher
 var yaraScanner         *malware.YaraScanner
 var malwareCustomPaths  []string
 var modsecEngine      *modsecurity.Engine
@@ -611,14 +612,12 @@ func runAgent() {
 		}
 	}
 
-	// Realtime watcher: polls upload directories for new PHP files
-	malwareRTWatcher = malware.NewRealtimeWatcher(func(path, domain string) {
-		// Scan the single file immediately
+	// Realtime file callback: shared between fanotify and polling watcher
+	rtOnNewFile := func(path, domain string) {
 		findings := malwareScanner.ScanSingleFile(path, domain)
 		if len(findings) == 0 {
 			return
 		}
-		// Queue findings for batched delivery
 		for _, f := range findings {
 			apiClient.QueueEvent(api.EventRequest{
 				Type:     "malware_realtime",
@@ -634,7 +633,52 @@ func runAgent() {
 			})
 		}
 		log.Printf("[malware-rt] detected %d findings in %s", len(findings), path)
-	})
+	}
+
+	// Fanotify block callback: fires when a malicious file is blocked
+	rtOnBlock := func(path, domain string, findings []malware.Finding) {
+		for _, f := range findings {
+			apiClient.QueueEvent(api.EventRequest{
+				Type:     "malware_blocked",
+				Severity: "critical",
+				Details: map[string]string{
+					"file_path":    f.FilePath,
+					"signature_id": f.SignatureID,
+					"name":         f.Name,
+					"type":         f.Type,
+					"domain":       f.Domain,
+					"action":       "blocked",
+				},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			})
+		}
+		// Auto-quarantine
+		if qPath, err := malware.QuarantineFile(path); err == nil {
+			log.Printf("[fanotify] quarantined %s → %s", path, qPath)
+			apiClient.QueueEvent(api.EventRequest{
+				Type:     "malware_quarantined",
+				Severity: "critical",
+				Details: map[string]string{
+					"file_path":       path,
+					"quarantine_path": qPath,
+					"domain":          domain,
+					"name":            findings[0].Name,
+				},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			})
+		} else {
+			log.Printf("[fanotify] quarantine failed for %s: %v", path, err)
+		}
+	}
+
+	// Try fanotify first (real-time kernel-level), fall back to polling
+	if malware.FanotifyAvailable() {
+		malwareFanotify = malware.NewFanotifyWatcher(malwareScanner, rtOnNewFile, rtOnBlock)
+		log.Printf("[malware-rt] using fanotify (kernel real-time protection)")
+	} else {
+		log.Printf("[malware-rt] fanotify not available, using polling fallback (30s interval)")
+	}
+	malwareRTWatcher = malware.NewRealtimeWatcher(rtOnNewFile)
 
 	// File Integrity Monitor: baseline-based detection of unauthorized file changes
 	fimMonitor = fim.New(func(change fim.Change) {
@@ -879,6 +923,10 @@ func runAgent() {
 				ControlPanel:        cpName,
 				ControlPanelVersion: cpVersion,
 				PanelDomains:        panelDomains,
+				FanotifyActive:      malwareFanotify != nil,
+				FanotifyPermMode:    malwareFanotify != nil && malwareFanotify.PermMode(),
+				RtFilesInspected:    func() int64 { if malwareFanotify != nil { return malwareFanotify.Stats().FilesInspected }; return 0 }(),
+				RtFilesBlocked:      func() int64 { if malwareFanotify != nil { return malwareFanotify.Stats().FilesBlocked }; return 0 }(),
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -1274,13 +1322,30 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		malwareScheduler.UpdateConfig(cfg.Enabled, cfg.Frequency, cfg.Time, cfg.Intensity)
 		malwareCustomPaths = cfg.CustomScanPaths
 
-		// Start/stop realtime watcher based on malware scan being enabled
-		if cfg.Enabled && malwareRTWatcher != nil {
+		// Apply fanotify settings from panel
+		if malwareFanotify != nil {
+			malwareFanotify.SetPermEnabled(cfg.FanotifyPermEnabled)
+		}
+
+		// Start/stop realtime watcher based on config
+		fanotifyUserEnabled := cfg.FanotifyEnabled
+		if cfg.Enabled && fanotifyUserEnabled {
 			go func() {
 				webRoots := malware.DetectWebRoots(malwareCustomPaths)
 				if len(webRoots) > 0 {
-					malwareRTWatcher.SetDirectories(webRoots)
-					malwareRTWatcher.Start()
+					// Prefer fanotify (real-time kernel) over polling
+					if malwareFanotify != nil {
+						malwareFanotify.SetDirectories(webRoots)
+						if err := malwareFanotify.Start(); err != nil {
+							log.Printf("[malware-rt] fanotify start failed: %v, falling back to polling", err)
+							malwareFanotify = nil
+							malwareRTWatcher.SetDirectories(webRoots)
+							malwareRTWatcher.Start()
+						}
+					} else if malwareRTWatcher != nil {
+						malwareRTWatcher.SetDirectories(webRoots)
+						malwareRTWatcher.Start()
+					}
 
 					// Feed web roots to FIM monitor
 					if fimMonitor != nil {
@@ -1292,8 +1357,13 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 					}
 				}
 			}()
-		} else if !cfg.Enabled && malwareRTWatcher != nil {
-			malwareRTWatcher.Stop()
+		} else if !cfg.Enabled || !fanotifyUserEnabled {
+			if malwareFanotify != nil {
+				malwareFanotify.Stop()
+			}
+			if malwareRTWatcher != nil {
+				malwareRTWatcher.Stop()
+			}
 		}
 	}
 

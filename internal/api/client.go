@@ -171,6 +171,10 @@ type HeartbeatRequest struct {
 	ControlPanel        string         `json:"control_panel,omitempty"`
 	ControlPanelVersion string         `json:"control_panel_version,omitempty"`
 	PanelDomains        []string       `json:"panel_domains,omitempty"`
+	FanotifyActive      bool           `json:"fanotify_active,omitempty"`
+	FanotifyPermMode    bool           `json:"fanotify_perm_mode,omitempty"`
+	RtFilesInspected    int64          `json:"rt_files_inspected,omitempty"`
+	RtFilesBlocked      int64          `json:"rt_files_blocked,omitempty"`
 }
 
 // RuntimeStats reports the agent's own resource usage so we can detect leaks
@@ -334,11 +338,13 @@ type SessionConfig struct {
 
 // MalwareScanConfig controls scheduled malware scanning.
 type MalwareScanConfig struct {
-	Enabled         bool     `json:"enabled"`
-	Frequency       string   `json:"frequency"`         // "daily", "weekly", "disabled"
-	Time            string   `json:"time"`               // "03:00" (HH:MM in server local time)
-	Intensity       string   `json:"intensity"`           // "low", "medium", "high"
-	CustomScanPaths []string `json:"custom_scan_paths"`   // additional paths to scan (e.g. "/home/*/public_html")
+	Enabled             bool     `json:"enabled"`
+	Frequency           string   `json:"frequency"`              // "daily", "weekly", "disabled"
+	Time                string   `json:"time"`                    // "03:00" (HH:MM in server local time)
+	Intensity           string   `json:"intensity"`               // "low", "medium", "high"
+	CustomScanPaths     []string `json:"custom_scan_paths"`       // additional paths to scan (e.g. "/home/*/public_html")
+	FanotifyEnabled     bool     `json:"fanotify_enabled"`        // user toggle: enable/disable real-time monitoring
+	FanotifyPermEnabled bool     `json:"fanotify_perm_enabled"`   // opt-in: allow fanotify to block malicious files
 }
 
 type WAFConfig struct {
