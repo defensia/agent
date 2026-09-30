@@ -291,6 +291,22 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		return
 	}
 
+	// 8b. Download fanotify helper binary (best-effort, non-blocking)
+	helperURL := fmt.Sprintf("%s/fanotify-helper-linux-%s", strings.TrimRight(downloadBaseURL, "/"), arch)
+	helperFallbackURL := fmt.Sprintf("%s/fanotify-helper-linux-%s", fallbackBase, arch)
+	helperPath := "/etc/defensia/fanotify-helper"
+	if err := downloadFile(helperURL, helperPath); err != nil {
+		if err2 := downloadFile(helperFallbackURL, helperPath); err2 != nil {
+			log.Printf("[updater] fanotify helper download failed (non-critical): %v", err2)
+		} else {
+			os.Chmod(helperPath, 0755)
+			log.Printf("[updater] fanotify helper installed")
+		}
+	} else {
+		os.Chmod(helperPath, 0755)
+		log.Printf("[updater] fanotify helper installed")
+	}
+
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
 	// Remember this attempt so we don't loop if the filesystem is non-persistent.
