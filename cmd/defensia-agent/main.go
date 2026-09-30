@@ -619,9 +619,13 @@ func runAgent() {
 			return
 		}
 		for _, f := range findings {
+			sev := f.Severity
+			if sev == "medium" || sev == "" {
+				sev = "warning"
+			}
 			apiClient.QueueEvent(api.EventRequest{
 				Type:     "malware_realtime",
-				Severity: f.Severity,
+				Severity: sev,
 				Details: map[string]string{
 					"file_path":    f.FilePath,
 					"signature_id": f.SignatureID,
@@ -1317,6 +1321,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	}
 
 	// Apply malware scan schedule config + realtime watcher
+	log.Printf("[DEBUG] malware_scan_config ptr: %v", sync.Config.MalwareScanConfig)
 	if sync.Config.MalwareScanConfig != nil {
 		cfg := sync.Config.MalwareScanConfig
 		malwareScheduler.UpdateConfig(cfg.Enabled, cfg.Frequency, cfg.Time, cfg.Intensity)
@@ -1329,9 +1334,11 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 		// Start/stop realtime watcher based on config
 		fanotifyUserEnabled := cfg.FanotifyEnabled
+		log.Printf("[malware-rt] sync config: enabled=%v fanotify_enabled=%v fanotify_ptr=%v", cfg.Enabled, fanotifyUserEnabled, malwareFanotify != nil)
 		if cfg.Enabled && fanotifyUserEnabled {
 			go func() {
 				webRoots := malware.DetectWebRoots(malwareCustomPaths)
+				log.Printf("[malware-rt] detected %d web roots for fanotify", len(webRoots))
 				if len(webRoots) > 0 {
 					// Prefer fanotify (real-time kernel) over polling
 					if malwareFanotify != nil {
