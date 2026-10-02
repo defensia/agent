@@ -321,6 +321,8 @@ func DetectWebLogInfo() ([]LogPathInfo, map[string][]string) {
 		"/var/log/caddy/access.log",
 		"/var/log/nginx-access.log",
 		"/var/log/access.log",
+		"/var/log/traefik/access.log",
+		"/data/coolify/proxy/access.log",
 	}
 	for _, p := range knownPaths {
 		if _, err := os.Stat(p); err == nil {
