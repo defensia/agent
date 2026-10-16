@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -23,6 +25,14 @@ const backupPath = "/usr/local/bin/defensia-agent.bak"
 const crashMarkerPath = "/tmp/defensia-agent-crash-count"
 const updateAttemptMarker = "/etc/defensia/.last-update-attempt"
 const maxCrashesBeforeRollback = 3
+
+// failedUpdateRetryInterval is how long to wait before retrying an update to the same
+// version after a previous attempt didn't take effect.
+var failedUpdateRetryInterval = time.Hour
+
+// errNoInitSystem is returned by restartService when no service manager is available
+// (e.g. the agent runs directly as a Docker container's main process).
+var errNoInitSystem = errors.New("no init system could restart the service")
 
 // EventReporter is a callback to send events to the server without
 // coupling the updater to the full API client.
@@ -128,7 +138,11 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 			os.Remove(updateAttemptMarker)
 			log.Printf("[updater] cleared update marker (successfully running %s)", currentVersion)
 		} else if markerVersion == latestVersion {
-			// Previous attempt to this version failed. Clear and retry.
+			// Previous attempt to this version failed. Retry, but at most once per
+			// interval so a failure that keeps repeating doesn't loop every check.
+			if !retryDue(updateAttemptMarker, time.Now()) {
+				return
+			}
 			os.Remove(updateAttemptMarker)
 			log.Printf("[updater] previous attempt to %s failed (still on %s) — retrying", latestVersion, currentVersion)
 		}
@@ -324,7 +338,24 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	// because our own process is dying. This is EXPECTED — do NOT rollback here.
 	// The binary is verified and in place. If the new binary fails to start,
 	// CheckStartupHealth() handles rollback via crash-loop detection.
-	restartService()
+	if err := restartService(); errors.Is(err, errNoInitSystem) {
+		// No service manager (e.g. running as a Docker container's main process):
+		// replace this process with the new binary in place, keeping the same PID.
+		log.Printf("[updater] no init system found — re-executing %s", targetPath)
+		if err := syscall.Exec(targetPath, os.Args, os.Environ()); err != nil {
+			log.Printf("[updater] re-exec failed: %v (new binary will run on next restart)", err)
+		}
+	}
+}
+
+// retryDue reports whether enough time has passed since the marker was last written
+// to retry a failed update.
+func retryDue(markerPath string, now time.Time) bool {
+	info, err := os.Stat(markerPath)
+	if err != nil {
+		return true
+	}
+	return now.Sub(info.ModTime()) >= failedUpdateRetryInterval
 }
 
 // reportFailure is a convenience wrapper that attaches recent service logs
@@ -401,7 +432,7 @@ func restartService() error {
 		}
 	}
 
-	return fmt.Errorf("no init system could restart the service")
+	return errNoInitSystem
 }
 
 // isNewer returns true if latest > current using simple semver comparison.
