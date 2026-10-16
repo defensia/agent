@@ -75,6 +75,7 @@ sshpass -p "${REMOTE_PASS}" scp -o PubkeyAuthentication=no -o StrictHostKeyCheck
 sshpass -p "${REMOTE_PASS}" ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no \
     "root@${REMOTE_HOST}" \
     "cp /tmp/defensia-agent ${MIRROR_DIR}/defensia-agent && \
+     cp /tmp/defensia-agent ${MIRROR_DIR}/defensia-agent-linux-amd64 && \
      cp /tmp/defensia-agent-linux-arm64 ${MIRROR_DIR}/defensia-agent-linux-arm64 && \
      chmod 755 ${MIRROR_DIR}/defensia-agent*"
 
@@ -83,8 +84,9 @@ echo "[7/8] Updating mirror SHA256..."
 sshpass -p "${REMOTE_PASS}" ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no \
     "root@${REMOTE_HOST}" \
     "cd ${MIRROR_DIR} && \
-     sha256sum defensia-agent | sed 's/defensia-agent/defensia-agent-linux-amd64/' > defensia-agent-linux-amd64.sha256 && \
-     sha256sum defensia-agent-linux-arm64 > defensia-agent-linux-arm64.sha256"
+     sha256sum defensia-agent-linux-amd64 > defensia-agent-linux-amd64.sha256 && \
+     sha256sum defensia-agent-linux-arm64 > defensia-agent-linux-arm64.sha256 && \
+     cmp defensia-agent defensia-agent-linux-amd64"
 
 # 8. Update panel version
 echo "[8/8] Updating panel version..."
