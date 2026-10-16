@@ -117,3 +117,37 @@ func TestParseAccessLog_IPv6MappedProxy(t *testing.T) {
 		t.Errorf("ip = %q, want %q", entry.ip, "93.184.216.34")
 	}
 }
+
+func TestWPAjaxRule(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		referer string
+		want    string
+		thresh  int
+	}{
+		{"editor autosave", 200, "https://intranet.example.es/wp-admin/post.php?post=1&action=edit", "wp_ajax_flood_ref", 120},
+		{"frontend polling page", 200, "https://example.com.br/nivel-do-rio-negro/", "wp_ajax_flood_ref", 120},
+		{"no referer success", 200, "-", "wp_ajax_flood", 60},
+		{"unknown action", 400, "https://example.com/", "wp_ajax", 10},
+		{"bad nonce", 403, "-", "wp_ajax", 10},
+		{"server error", 500, "-", "wp_ajax_flood", 60},
+	}
+	for _, c := range cases {
+		r := wpAjaxRule(accessLogEntry{method: "POST", uri: "/wp-admin/admin-ajax.php", status: c.status, referer: c.referer})
+		if r.key != c.want || r.threshold != c.thresh {
+			t.Errorf("%s: got %s/%d, want %s/%d", c.name, r.key, r.threshold, c.want, c.thresh)
+		}
+	}
+}
+
+func TestWPAjaxEditorDoesNotTrigger(t *testing.T) {
+	line := `81.44.200.157 - - [16/Oct/2026:11:01:43 +0200] "POST /wp-admin/admin-ajax.php HTTP/1.1" 200 973 "https://intranet.aunnaasociacion.es/wp-admin/post.php?post=16965&action=edit" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"`
+	entry, ok := parseAccessLog(line)
+	if !ok {
+		t.Fatal("failed to parse line")
+	}
+	if r := wpAjaxRule(entry); r.key != "wp_ajax_flood_ref" {
+		t.Fatalf("editor request got rule %s, want wp_ajax_flood_ref", r.key)
+	}
+}

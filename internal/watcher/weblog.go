@@ -1733,6 +1733,25 @@ var (
 	rule404Flood   = thresholdRule{"404_flood", "404_flood", 15, 5 * time.Minute}
 )
 
+// Successful admin-ajax calls only count as sustained floods. Same-site traffic (with referer)
+// gets the most headroom since editors and AJAX-polling pages legitimately hit it often.
+var (
+	ruleWPAjaxFlood        = thresholdRule{"wp_ajax_flood", "wp_bruteforce", 60, 30 * time.Second}
+	ruleWPAjaxFloodReferer = thresholdRule{"wp_ajax_flood_ref", "wp_bruteforce", 120, 30 * time.Second}
+)
+
+// wpAjaxRule picks the threshold rule for a POST to wp-admin/admin-ajax.php.
+func wpAjaxRule(entry accessLogEntry) thresholdRule {
+	if entry.status >= 400 && entry.status < 500 {
+		return ruleWPAjax
+	}
+	ref := strings.ToLower(entry.referer)
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return ruleWPAjaxFloodReferer
+	}
+	return ruleWPAjaxFlood
+}
+
 // ── Line processing ─────────────────────────────────────────────────
 
 // enrichDetails adds domain, log_file, and raw log line to event details.
@@ -2095,14 +2114,22 @@ func (w *WebWatcher) processLine(logPath, line string) {
 		return
 	}
 
-	// ── Threshold → score: WP admin-ajax abuse (unauthenticated POST flood) ──
+	// ── Threshold → score: WP admin-ajax abuse ──
+	// Failed calls (400 "0" unknown action, 403 "-1" bad nonce) use the strict rule.
+	// Successful calls are normal WordPress traffic (editor autosave/heartbeat, Elementor,
+	// frontend widgets polling admin-ajax) and only count as a high-volume flood.
 	if entry.method == "POST" && strings.Contains(uriLower, "wp-admin/admin-ajax.php") {
 		if w.isTypeEnabled("wp_bruteforce") {
-			ruleKey := ruleWPAjax.key
-			if entry.domain != "" {
-				ruleKey = ruleWPAjax.key + ":" + entry.domain
+			base := wpAjaxRule(entry)
+			threshold := base.threshold
+			if base.key == ruleWPAjax.key {
+				threshold = w.wafThreshold("wp_bruteforce", base.threshold)
 			}
-			rule := thresholdRule{ruleKey, ruleWPAjax.eventType, w.wafThreshold("wp_bruteforce", ruleWPAjax.threshold), ruleWPAjax.window}
+			ruleKey := base.key
+			if entry.domain != "" {
+				ruleKey = base.key + ":" + entry.domain
+			}
+			rule := thresholdRule{ruleKey, base.eventType, threshold, base.window}
 			if w.checkThresholdOnly(ip, rule, now) {
 				w.addScore(ip, "wp_bruteforce", logPath, line, map[string]string{
 					"domain": entry.domain,
