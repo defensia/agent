@@ -90,7 +90,7 @@ sshpass -p "${REMOTE_PASS}" ssh -o PubkeyAuthentication=no -o StrictHostKeyCheck
 echo "[8/8] Updating panel version..."
 sshpass -p "${REMOTE_PASS}" ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no \
     "root@${REMOTE_HOST}" \
-    "docker exec defensia-app-1 php artisan tinker --execute=\"\\\$s = app(\App\Services\SettingsService::class); \\\$s->set('latest_agent_version', '${VERSION}'); \\\$s->set('agent_download_base_url', 'https://github.com/defensia/agent/releases/download/v${VERSION}'); echo 'OK: ${VERSION}';\""
+    "docker exec defensia-app-1 php artisan tinker --execute=\"\\\$s = app(\App\Services\SettingsService::class); \\\$s->set('latest_agent_version', '${VERSION}'); \\\$s->set('agent_download_base_url', 'https://defensia.cloud/downloads'); echo 'OK: ${VERSION}';\""
 
 echo ""
 echo "=== Release v${VERSION} complete ==="
