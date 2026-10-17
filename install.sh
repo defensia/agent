@@ -837,8 +837,17 @@ uninstall() {
     rm -f /tmp/defensia-agent-crash-count
     rm -f /tmp/defensia-agent-recovered
     rm -f /var/lib/defensia/recover-download-stamp
-    # Only if empty: /var/lib/defensia also holds quarantine/, and quarantined
-    # samples must survive an uninstall rather than be destroyed silently.
+
+    # Quarantined samples are left in place on purpose: somebody uninstalling
+    # after an incident may still need them. Say so, and say where, rather than
+    # deleting evidence or leaving unexplained residue behind.
+    if [[ -d /var/lib/defensia/quarantine ]] \
+       && [[ -n "$(ls -A /var/lib/defensia/quarantine 2>/dev/null)" ]]; then
+        warn "Quarantined files kept at /var/lib/defensia/quarantine"
+        warn "  Nothing else remains. Delete that directory yourself if you do not need them."
+    fi
+
+    # Only if empty, so the quarantine directory above survives.
     rmdir /var/lib/defensia 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
 

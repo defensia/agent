@@ -500,7 +500,7 @@ We know we're asking for privileged access to your server. Here's why engineers 
 | **Data transparency** | Only attack metadata is sent to your dashboard (attacker IP, type, timestamp). Raw logs never leave your server. No telemetry, no third-party sharing. |
 | **Signed binaries** | Every release is built by GitHub Actions CI with [Cosign](https://github.com/sigstore/cosign) signatures and [build provenance attestation](https://github.com/defensia/agent/attestations). |
 | **Monitor mode** | Start in detect-only mode — see everything, block nothing. Enable protection when ready. |
-| **Clean uninstall** | `curl -fsSL https://defensia.cloud/install.sh \| sudo bash -s -- --uninstall` — removes binary, config, and firewall chain. No residual changes. |
+| **Clean uninstall** | `curl -fsSL https://defensia.cloud/install.sh \| sudo bash -s -- --uninstall` — removes binary, config, firewall chain and the recovery helper. Nothing else is left behind, with one deliberate exception: files the malware scanner quarantined stay in `/var/lib/defensia/quarantine` so an uninstall cannot destroy evidence. The uninstaller tells you if any are there. |
 
 Full details in [SECURITY.md](SECURITY.md) and [defensia.cloud/docs/trust](https://defensia.cloud/docs/trust).
 
