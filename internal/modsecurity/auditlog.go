@@ -470,6 +470,14 @@ func (e *AuditEntry) HighestSeverity() string {
 
 // AttackCategory extracts the primary attack category from rule tags.
 // Returns tags like "attack-sqli", "attack-xss", etc.
+//
+// Tags alone are too coarse to classify an event: CRS reuses "attack-protocol"
+// for both protocol *enforcement* (920xxx — missing Host header, conflicting
+// Connection header) and genuine protocol *attacks* (921xxx — request smuggling,
+// response splitting), and reuses "attack-generic" for both method enforcement
+// (911xxx) and real application attacks (934xxx). Classification goes through
+// Classify(), which keys off the rule ID; this stays for the attack_type detail
+// field and as the fallback for non-CRS rules.
 func (e *AuditEntry) AttackCategory() string {
 	for _, r := range e.Rules {
 		for _, tag := range r.Tags {
@@ -498,23 +506,185 @@ func MapSeverityToDefensia(modSecSeverity string) string {
 }
 
 // MapAttackToEventType converts CRS attack tags to Defensia event types.
+//
+// Only used as a fallback when no rule ID in the entry is recognised — prefer
+// Classify(). Tags that CRS shares between enforcement noise and real attacks
+// ("attack-protocol", "attack-generic", "attack-reputation-ip") deliberately
+// resolve to modsecurity_block: without a rule ID there is no way to tell a
+// missing Host header from request smuggling, and the safe default is to keep
+// the event but leave it out of the exploitation buckets.
 func MapAttackToEventType(attackTag string) string {
 	mapping := map[string]string{
-		"attack-sqli":            "sql_injection",
-		"attack-xss":            "xss_attempt",
-		"attack-rce":            "rce_attempt",
-		"attack-lfi":            "path_traversal",
-		"attack-rfi":            "path_traversal",
-		"attack-injection-php":  "rce_attempt",
-		"attack-fixation":       "web_exploit",
-		"attack-reputation-ip":  "web_exploit",
-		"attack-generic":        "web_exploit",
-		"attack-protocol":       "web_exploit",
-		"attack-disclosure":     "config_probe",
+		"attack-sqli":          "sql_injection",
+		"attack-xss":           "xss_attempt",
+		"attack-rce":           "rce_attempt",
+		"attack-lfi":           "path_traversal",
+		"attack-rfi":           "path_traversal",
+		"attack-injection-php": "rce_attempt",
+		"attack-fixation":      "web_exploit",
+		"attack-disclosure":    "config_probe",
 	}
 
 	if eventType, ok := mapping[attackTag]; ok {
 		return eventType
 	}
 	return "modsecurity_block"
+}
+
+// ── Classification by rule ID ───────────────────────────────────────
+//
+// A CRS audit entry almost always contains several rule matches: one or more
+// real detections plus the meta rules that accumulate and evaluate the anomaly
+// score. Picking the first "attack-" tag (the old behaviour) meant phase-1
+// protocol-enforcement rules shadowed the phase-2 rules that found the actual
+// attack, so a missing Host header on "/" and an SQL injection both came out as
+// web_exploit. Classification therefore keys off the CRS rule ID family and
+// picks the highest-ranked family present in the entry.
+
+// crsFamilyEventType maps a CRS rule-ID family to a Defensia event type.
+// Every value here must exist in the panel's accepted event type list
+// (EventController's "events.*.type" rule) or the event is rejected with a 422
+// and silently lost.
+var crsFamilyEventType = map[string]string{
+	"910": "modsecurity_block", // IP reputation — not an exploit attempt
+	"911": "modsecurity_block", // method enforcement — policy, not exploitation
+	"912": "flood",             // DoS protection
+	"913": "scanner_detected",  // scanner/crawler reputation
+	"920": "modsecurity_block", // protocol enforcement — malformed/lazy clients
+	"921": "header_injection",  // protocol attack: smuggling, response splitting
+	"922": "modsecurity_block", // multipart anomalies
+	"930": "path_traversal",    // LFI
+	"931": "path_traversal",    // RFI
+	"932": "rce_attempt",       // RCE
+	"933": "rce_attempt",       // PHP injection
+	"934": "web_exploit",       // generic app attack: SSTI, prototype pollution
+	"941": "xss_attempt",       // XSS
+	"942": "sql_injection",     // SQLi
+	"943": "web_exploit",       // session fixation
+	"944": "rce_attempt",       // Java deserialization, Log4Shell
+	"950": "config_probe",      // response data leakage
+	"951": "config_probe",      // SQL error disclosure
+	"952": "config_probe",      // source code / stack trace disclosure
+	"953": "config_probe",
+	"954": "config_probe",
+	"955": "config_probe",
+	"959": "config_probe",
+	"980": "", // correlation meta rules — never classify
+	"949": "", // blocking evaluation meta rules — never classify
+}
+
+// crsFamilyRank orders families by how specific and severe the finding is, so
+// a real detection always wins over enforcement noise in the same entry.
+var crsFamilyRank = map[string]int{
+	"942": 100, // SQLi
+	"932": 95,  // RCE
+	"944": 94,  // Java / Log4Shell
+	"933": 93,  // PHP injection
+	"930": 90,  // LFI
+	"931": 89,  // RFI
+	"941": 85,  // XSS
+	"934": 80,  // generic application attack
+	"943": 75,  // session fixation
+	"921": 70,  // protocol attack (smuggling/splitting)
+	"950": 60,  // response disclosure
+	"951": 60,
+	"952": 60,
+	"953": 60,
+	"954": 60,
+	"955": 60,
+	"959": 60,
+	"922": 40, // multipart anomalies
+	"913": 30, // scanner reputation
+	"912": 25, // DoS
+	"911": 15, // method enforcement
+	"920": 10, // protocol enforcement
+	"910": 5,  // IP reputation
+}
+
+// defensiaRuleEventType maps Defensia's own inline SecRules (9910xxx) to event
+// types. These carry no CRS tags, so without this they all fell through to
+// modsecurity_block and lost their attack classification.
+var defensiaRuleEventType = map[string]string{
+	"9910001": "sql_injection",
+	"9910002": "xss_attempt",
+	"9910003": "rce_attempt",
+	"9910004": "path_traversal",
+	"9910005": "ssrf_attempt",
+	"9910006": "shellshock",
+	"9910007": "web_shell",
+	"9910008": "env_probe",
+	"9910009": "config_probe",
+	"9910010": "header_injection",
+	"9910012": "rce_attempt", // Log4Shell
+	"9910013": "web_exploit", // Spring4Shell
+	"9910014": "scanner_detected",
+}
+
+// enforcementFamilies are the CRS families that report client sloppiness or
+// policy decisions rather than an attack. Their severity is capped at "info":
+// CRS marks a missing Host header as WARNING, and letting tens of thousands of
+// those through as warnings inflates the severity counters the same way the
+// event type inflated the exploitation counters.
+var enforcementFamilies = map[string]bool{
+	"910": true,
+	"911": true,
+	"920": true,
+	"922": true,
+}
+
+// crsRuleFamily returns the 3-digit CRS family for a 6-digit CRS rule ID,
+// or "" for anything that is not a CRS rule (Defensia's own IDs are 7 digits).
+func crsRuleFamily(ruleID string) string {
+	if len(ruleID) != 6 {
+		return ""
+	}
+	return ruleID[:3]
+}
+
+// Classify determines the Defensia event type for an audit entry.
+//
+// It scans every rule match, resolves each to an event type (Defensia's own
+// rules first, then CRS family), and returns the highest-ranked one. Meta rules
+// that only carry the anomaly score are ignored. Entries with no recognisable
+// rule ID fall back to the tag mapping.
+//
+// The second return value is true when the winning family is pure enforcement
+// noise, so the caller can cap the reported severity.
+func (e *AuditEntry) Classify() (eventType string, isEnforcement bool) {
+	bestRank := -1
+	bestType := ""
+	bestEnforcement := false
+
+	for _, r := range e.Rules {
+		if r.ID == "" {
+			continue
+		}
+
+		// Defensia's own inline rules: explicit, highest confidence.
+		if t, ok := defensiaRuleEventType[r.ID]; ok {
+			// Rank above every CRS family — these are deny-on-match rules we wrote.
+			if bestRank < 1000 {
+				bestRank, bestType, bestEnforcement = 1000, t, false
+			}
+			continue
+		}
+
+		fam := crsRuleFamily(r.ID)
+		if fam == "" {
+			continue
+		}
+		t, known := crsFamilyEventType[fam]
+		if !known || t == "" {
+			// Unknown family, or a meta rule that must never drive classification.
+			continue
+		}
+		if rank := crsFamilyRank[fam]; rank > bestRank {
+			bestRank, bestType, bestEnforcement = rank, t, enforcementFamilies[fam]
+		}
+	}
+
+	if bestType != "" {
+		return bestType, bestEnforcement
+	}
+	return MapAttackToEventType(e.AttackCategory()), false
 }
