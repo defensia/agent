@@ -836,6 +836,10 @@ uninstall() {
     rm -f "${INSTALL_DIR}/defensia-agent-recover.sh"
     rm -f /tmp/defensia-agent-crash-count
     rm -f /tmp/defensia-agent-recovered
+    rm -f /var/lib/defensia/recover-download-stamp
+    # Only if empty: /var/lib/defensia also holds quarantine/, and quarantined
+    # samples must survive an uninstall rather than be destroyed silently.
+    rmdir /var/lib/defensia 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
 
     success "Defensia Agent uninstalled."
