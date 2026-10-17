@@ -38,22 +38,32 @@ warn()    { echo -e "${YELLOW}[defensia]${NC} ! $*"; }
 error()   { echo -e "${RED}[defensia]${NC} ✗ $*" >&2; exit 1; }
 
 # Report install progress to the panel (best-effort, never blocks)
+# Minimal JSON string escaper. Applied to every interpolated field, not just
+# the error: a distro whose PRETTY_NAME contains a double quote produced invalid
+# JSON, which the endpoint rejected with a 422 and the report vanished silently.
+# Backslashes matter too — a Windows path in an error string broke it the same way.
+_json_escape() {
+    printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 report_status() {
     local step="$1"
     local err="${2:-}"
     [[ -z "${INSTALL_TOKEN:-}" ]] && return 0
-    local prefix="${INSTALL_TOKEN:0:16}"
-    local os_info
-    os_info="$(collect_system_info 2>/dev/null || echo unknown)"
-    local arch
-    arch="$(uname -m 2>/dev/null || echo unknown)"
-    local api_url="${DEFENSIA_SERVER_URL:-https://defensia.cloud}"
-    # Escape double quotes in error string for JSON safety
-    local err_json="null"
+
+    local prefix os_info arch api_url err_json="null"
+    prefix="$(_json_escape "${INSTALL_TOKEN:0:16}")"
+    os_info="$(_json_escape "$(collect_system_info 2>/dev/null || echo unknown)")"
+    arch="$(_json_escape "$(uname -m 2>/dev/null || echo unknown)")"
+    api_url="${DEFENSIA_SERVER_URL:-https://defensia.cloud}"
+
     if [[ -n "$err" ]]; then
-        err_json="\"$(echo "$err" | sed 's/"/\\"/g' | head -c 500)\""
+        # Truncate before escaping: cutting afterwards can sever an escape
+        # sequence and leave a trailing backslash, which breaks the JSON.
+        err_json="\"$(_json_escape "${err:0:500}")\""
     fi
-    curl -fsSL --max-time 5 -X POST "${api_url}/api/v1/install/status" \
+
+    curl -fsSL --connect-timeout 3 --max-time 5 -X POST "${api_url}/api/v1/install/status" \
         -H 'Content-Type: application/json' \
         -d "{\"token_prefix\":\"${prefix}\",\"step\":\"${step}\",\"error\":${err_json},\"os\":\"${os_info}\",\"arch\":\"${arch}\"}" \
         >/dev/null 2>&1 || true
@@ -466,6 +476,7 @@ BACKUP="/usr/local/bin/defensia-agent.bak"
 GITHUB_REPO="defensia/agent"
 RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download"
 MARKER="/tmp/defensia-agent-recovered"
+DOWNLOAD_STAMP="/var/lib/defensia/recover-download-stamp"
 
 log_msg() {
     if command -v systemd-cat >/dev/null 2>&1; then
@@ -486,7 +497,14 @@ verify_binary() {
     local bin="$1"
     [[ -f "$bin" ]] || return 1
     [[ -x "$bin" ]] || return 1
-    timeout 10 "$bin" check >/dev/null 2>&1
+    # Fall back to a bare call where coreutils timeout is unavailable: without
+    # this, a missing timeout makes every good binary look corrupt and sends the
+    # service into permanent recovery.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 10 "$bin" check >/dev/null 2>&1
+    else
+        "$bin" check >/dev/null 2>&1
+    fi
 }
 
 restore_from_backup() {
@@ -562,6 +580,39 @@ log_msg "binary verification failed — attempting recovery"
 if restore_from_backup; then
     exit 0
 fi
+
+# Rate-limit the download path. This runs as ExecStartPre under
+# Restart=always/RestartSec=10, so a binary that can never pass verification
+# would otherwise re-download itself every ten seconds, from every host at once.
+#
+# Reading an mtime is not portable: "stat -c %Y" is GNU/busybox, "stat -f %m" is
+# BSD. When neither answers we must fail CLOSED — assume the stamp is recent and
+# skip the download. Failing open would silently void this whole guard and bring
+# back the ten-second re-download loop, which is the worse outcome by far.
+if [[ -f "$DOWNLOAD_STAMP" ]]; then
+    stamp_mtime=""
+    for probe in "-c %Y" "-f %m"; do
+        # shellcheck disable=SC2086
+        candidate="$(stat $probe "$DOWNLOAD_STAMP" 2>/dev/null)" || candidate=""
+        if [[ "$candidate" =~ ^[0-9]+$ ]]; then
+            stamp_mtime="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$stamp_mtime" ]]; then
+        log_msg "cannot read stamp mtime (no usable stat) — not retrying the download"
+        exit 0
+    fi
+
+    if [[ $(( $(date +%s) - stamp_mtime )) -lt 900 ]]; then
+        log_msg "download recovery attempted less than 15 min ago — not retrying"
+        exit 0
+    fi
+fi
+
+mkdir -p "$(dirname "$DOWNLOAD_STAMP")" 2>/dev/null || true
+date +%s > "$DOWNLOAD_STAMP" 2>/dev/null || true
 
 if download_fresh; then
     exit 0
@@ -808,13 +859,18 @@ main() {
     check_os
     detect_init
     report_status "started"
-    bootstrap_ssl
 
     local arch
     arch="$(detect_arch)"
     info "Detected: Linux ${arch}"
 
     check_deps
+
+    # After check_deps so curl is guaranteed present: on RHEL/CentOS the Go
+    # binary reads the OpenSSL bundle, which may lack ISRG Root X1 even when
+    # curl (linked against NSS) connects fine. Called before download_binary,
+    # which is the first thing that needs working TLS.
+    bootstrap_ssl
 
     # Create config directory
     mkdir -p "$CONFIG_DIR"
