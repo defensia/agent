@@ -2,6 +2,13 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.76
+- **fix: ModSecurity audit-log events were misclassified** — CRS reuses one tag for opposite meanings (`attack-protocol` covers both 920xxx protocol enforcement and 921xxx attacks), and classification took the *first* `attack-` tag in rule order. CRS phase-1 protocol rules log before phase-2 detection rules, so protocol noise shadowed the real finding.
+- Classification now keys off the CRS rule-ID family with a priority rank, so the most severe real finding in an entry always wins. Meta rules (949xxx/980xxx) can never classify.
+- **This was hiding real attacks, not just inflating counters:** 1,224 events tagged `attack-protocol` carried a genuine attack rule — 1,016 LFI never counted as `path_traversal`, plus PHP injection, RCE, SQLi and request smuggling. Defensia's own inline rules (9910xxx) carry no tags and were all collapsing into `modsecurity_block`, including 1,161 web shell detections.
+- Enforcement families (910/911/920/922) are capped at `info` severity. CRS ships 911100 "method not allowed" at CRITICAL, so malformed Host headers were raising critical alerts.
+- Plain `GET /` requests no longer land in `web_exploit`: they were 52,477 of 65,669 events in that bucket.
+
 ## v1.4.51
 - **fix: false positive CORE_FILE_MODIFIED on wp-includes/version.php** — this file changes on every WordPress update and is not a useful injection target. Now excluded from core file integrity checks.
 
