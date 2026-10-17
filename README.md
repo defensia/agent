@@ -184,6 +184,23 @@ The agent **never bans** reserved IPs, your server's own IPs, or the Defensia AP
 curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <YOUR_TOKEN>
 ```
 
+> **About `install.sh` in this repository.** It is the installer that one-liner
+> runs, not an approximation of it. The copy here is byte-identical to the
+> source of truth, and a scheduled check — blocking at release time — compares
+> the two and fails if they drift, so what you read is what runs. The hosted
+> copy differs only in the lines the panel injects: the panel URL it registers
+> against, and which of GitHub or the defensia.cloud mirror is tried first. All
+> three are plain `${VAR:-default}` overrides you can set yourself.
+>
+> Review it before piping it to a root shell:
+>
+> ```bash
+> curl -fsSL https://defensia.cloud/install.sh | diff - install.sh
+> ```
+>
+> That prints those injected lines and nothing else. Anything more means the
+> two have drifted — which the scheduled check is there to catch first.
+
 **Supported:** Ubuntu 20+, Debian 11+, CentOS 7+, RHEL 8+, Rocky, Alma, Amazon Linux 2023, Fedora
 **Requires:** `iptables`, `systemd`, root access · **Recommended:** `ipset` (increases ban capacity to 65K+)
 
