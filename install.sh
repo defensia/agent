@@ -3,14 +3,7 @@
 # Usage: curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <INSTALL_TOKEN>
 # Non-interactive: DEFENSIA_SERVER_URL=https://... DEFENSIA_AGENT_NAME=web-01 curl -fsSL ... | sudo bash -s -- --token <TOKEN>
 # Install only (no registration): curl -fsSL ... | sudo bash -s -- --install-only
-#
-# SSL Error fix (old servers — "Peer's Certificate issuer is not recognized"):
-#   This happens on CentOS 7 / RHEL 7 and systems with ca-certificates older than 2024.
-#   curl on CentOS 7 links against NSS (not OpenSSL), so update-ca-trust has no effect on it.
-#   One-time fix — run these THREE commands, then retry the install:
-#     curl -sk https://letsencrypt.org/certs/isrgrootx1.pem -o /tmp/isrg.pem
-#     export CURL_CA_BUNDLE=/tmp/isrg.pem
-#     curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <TOKEN>
+# Old servers (SSL error): apt-get update && apt-get install -y ca-certificates && curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <TOKEN>
 
 set -euo pipefail
 
@@ -29,7 +22,14 @@ CONFIG_DIR="/etc/defensia"
 SERVICE_NAME="defensia-agent"
 INIT_SYSTEM=""
 GITHUB_REPO="${GITHUB_REPO:-defensia/agent}"
+# Where binaries come from, in order. Both are overridable, and the panel
+# injects them swapped when it serves this script: there the defensia.cloud
+# mirror is primary because agent:mirror-release verifies each checksum before
+# publishing, which is why 1cfa1b7 moved away from GitHub as the default. A
+# clone of the public repo keeps GitHub first, since that is the source a
+# reader of this file can actually verify.
 RELEASE_BASE="${RELEASE_BASE:-https://github.com/${GITHUB_REPO}/releases/latest/download}"
+RELEASE_FALLBACK="${RELEASE_FALLBACK:-https://defensia.cloud/downloads}"
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 info()    { echo -e "${CYAN}[defensia]${NC} $*"; }
@@ -37,11 +37,20 @@ success() { echo -e "${GREEN}[defensia]${NC} ✓ $*"; }
 warn()    { echo -e "${YELLOW}[defensia]${NC} ! $*"; }
 error()   { echo -e "${RED}[defensia]${NC} ✗ $*" >&2; exit 1; }
 
-# Report install progress to the panel (best-effort, never blocks)
+# ─── Parse args ───────────────────────────────────────────────────────────────
+# ─── Install telemetry ─────────────────────────────────────────────────────────
+# Reports install progress so a failed install is diagnosable instead of
+# invisible. Lands in audit_logs as action=install_step, filterable in the admin.
+#
+# Deliberately minimal: a 16-char token prefix to attribute the install, the
+# step, the OS string and the architecture. No hostname, no paths, no config.
+# The error string is free-form so it is capped and only sent on failures.
+#
+# This must never be able to block an install: short timeout, no retries,
+# output discarded, and "|| true" so a hung or missing endpoint is a no-op.
 # Minimal JSON string escaper. Applied to every interpolated field, not just
 # the error: a distro whose PRETTY_NAME contains a double quote produced invalid
 # JSON, which the endpoint rejected with a 422 and the report vanished silently.
-# Backslashes matter too — a Windows path in an error string broke it the same way.
 _json_escape() {
     printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
@@ -69,7 +78,6 @@ report_status() {
         >/dev/null 2>&1 || true
 }
 
-# ─── Parse args ───────────────────────────────────────────────────────────────
 parse_args() {
     INSTALL_TOKEN=""
     INSTALL_ONLY=false
@@ -221,6 +229,35 @@ check_deps() {
     fi
 }
 
+# install_ipset installs ipset best-effort. ipset is recommended (raises firewall
+# capacity from 500 to 65 536 entries) but not required — the agent falls back
+# to iptables FIFO rotation if unavailable.
+install_ipset() {
+    if command -v ipset &>/dev/null; then
+        success "ipset already installed — using high-capacity backend (65,536 bans)."
+        return 0
+    fi
+
+    info "Installing ipset (recommended for high-capacity firewall backend)..."
+    local ok=false
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq ipset &>/dev/null && ok=true
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q ipset &>/dev/null && ok=true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q ipset &>/dev/null && ok=true
+    elif command -v apk &>/dev/null; then
+        apk add --quiet ipset &>/dev/null && ok=true
+    fi
+
+    if [[ "$ok" == true ]]; then
+        success "ipset installed — firewall capacity raised to 65,536 bans."
+    else
+        warn "ipset install failed — agent will use iptables backend (500 bans, FIFO)."
+        warn "Install manually later for full capacity: apt/dnf/yum install ipset"
+    fi
+}
+
 # ─── SSL Bootstrap ─────────────────────────────────────────────────────────────
 # On CentOS 7 / RHEL 7, curl is linked against NSS (which already has ISRG Root X1),
 # so curl works fine — but the Go agent binary uses the OpenSSL system bundle
@@ -317,9 +354,12 @@ download_binary() {
     info "Downloading ${BINARY_NAME} (${arch}) from ${url}..."
 
     if ! curl -fsSL --progress-bar -o "$tmp" "$url"; then
-        # Fallback: try downloading from defensia.cloud mirror
-        local fallback_url="https://defensia.cloud/downloads/${BINARY_NAME}-linux-${arch}"
-        warn "GitHub download failed — trying defensia.cloud mirror..."
+        # Fall back to the other source. Which one is primary is configuration,
+        # not code: the fallback used to be hardcoded to the same URL as the
+        # primary, so an outage had no fallback at all while the warning claimed
+        # the other host had been tried.
+        local fallback_url="${RELEASE_FALLBACK}/${BINARY_NAME}-linux-${arch}"
+        warn "Download from ${RELEASE_BASE} failed — trying ${RELEASE_FALLBACK}..."
         if ! curl -fsSL --progress-bar -o "$tmp" "$fallback_url"; then
             rm -f "$tmp"
             local os_info
@@ -348,11 +388,12 @@ download_binary() {
             echo -e "  │ Error: Download failed from both GitHub and mirror"
             echo -e "  └──────────────────────────────────────"
             echo ""
-            report_status "download_failed" "Download failed from ${url} and mirror"
+            report_status "download_failed" "Download failed from ${url} and ${fallback_url}"
             exit 1
         fi
-        # Use mirror for checksum too
-        RELEASE_BASE="https://defensia.cloud/downloads"
+        # Take the checksum from wherever the binary actually came from, or the
+        # two are compared across sources and mismatch for the wrong reason.
+        RELEASE_BASE="$RELEASE_FALLBACK"
     fi
 
     # Verify checksum if available
@@ -373,23 +414,53 @@ download_binary() {
 }
 
 # ─── Registration ──────────────────────────────────────────────────────────────
+DEFAULT_SERVER_URL="https://defensia.cloud"
+
+# Read prompts from the controlling TTY so curl|bash installs (where stdin is
+# the pipe) still get real input instead of EOF.
+read_prompt() {
+    local var_name="$1" prompt="$2"
+    if [[ -t 0 ]]; then
+        read -rp "$prompt" "$var_name"
+    elif [[ -r /dev/tty ]]; then
+        read -rp "$prompt" "$var_name" </dev/tty
+    else
+        # No TTY at all (e.g. CI). Caller must rely on defaults or env vars.
+        printf '\n'
+    fi
+}
+
+validate_server_url() {
+    local url="$1"
+    [[ -n "$url" ]] || return 1
+    [[ "$url" =~ ^https?:// ]] || return 1
+    return 0
+}
+
 prompt_config() {
     local server_url="${DEFENSIA_SERVER_URL:-}"
     local agent_name="${DEFENSIA_AGENT_NAME:-}"
 
     if [[ -z "$server_url" ]]; then
         echo ""
-        read -rp "$(echo -e "${BOLD}Defensia server URL${NC} [e.g. https://panel.example.com]: ")" server_url
+        read_prompt server_url "$(echo -e "${BOLD}Defensia server URL${NC} [${DEFAULT_SERVER_URL}]: ")"
+        # Default to the public instance if the user just hits enter — this
+        # mirrors the documented install path and avoids the "unsupported
+        # protocol scheme" error that came from passing an empty URL through.
+        server_url="${server_url:-$DEFAULT_SERVER_URL}"
     fi
 
-    [[ -n "$server_url" ]] || error "Server URL is required."
-    # Strip trailing slash
+    # Strip trailing slash so callers can concatenate paths cleanly.
     server_url="${server_url%/}"
+
+    if ! validate_server_url "$server_url"; then
+        error "Server URL must start with http:// or https:// (got: '${server_url}')"
+    fi
 
     if [[ -z "$agent_name" ]]; then
         local default_name
         default_name="$(hostname -s)"
-        read -rp "$(echo -e "${BOLD}Agent name${NC} [${default_name}]: ")" agent_name
+        read_prompt agent_name "$(echo -e "${BOLD}Agent name${NC} [${default_name}]: ")"
         agent_name="${agent_name:-$default_name}"
     fi
 
@@ -430,12 +501,12 @@ register_agent() {
         echo -e "  │ Error: Registration failed"
         echo -e "  └──────────────────────────────────────"
         echo ""
-        report_status "register_failed" "Registration failed with ${server_url}"
+        report_status "register_failed" "Registration rejected by ${server_url}"
         exit 1
     fi
 
-    success "Agent registered. Token saved to ${CONFIG_DIR}/config.json"
     report_status "register_ok"
+    success "Agent registered. Token saved to ${CONFIG_DIR}/config.json"
 }
 
 # ─── Service install ──────────────────────────────────────────────────────────
@@ -443,7 +514,8 @@ install_service() {
     local auth_log
     auth_log="$(detect_auth_log)"
 
-    # Install recovery script for systemd (auto-heals corrupted binaries)
+    # Recovery script runs as systemd ExecStartPre and auto-heals a corrupted
+    # or missing binary. Only systemd has a pre-start hook to attach it to.
     if [[ "$INIT_SYSTEM" == "systemd" ]]; then
         install_recovery_script
     fi
@@ -632,8 +704,9 @@ install_service_systemd() {
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
     info "Installing systemd service..."
 
-    # If bootstrap_ssl injected a CA bundle (e.g. CentOS 7), bake SSL_CERT_FILE into the unit.
-    # systemd services do not inherit shell exports, so we must declare it explicitly.
+    # If bootstrap_ssl built a merged CA bundle (CentOS 7 and friends), bake
+    # SSL_CERT_FILE into the unit: systemd services do not inherit shell exports,
+    # so the Go agent would otherwise fail TLS exactly where curl succeeded.
     local ssl_ca_env="${_SSL_CA_ENV:-}"
 
     cat > "$service_file" <<EOF
@@ -776,35 +849,35 @@ check_service() {
     case "$INIT_SYSTEM" in
         systemd)
             if systemctl is-active --quiet "${SERVICE_NAME}"; then
-                success "Agent is running!"
                 report_status "service_started"
+                success "Agent is running!"
                 echo ""
                 systemctl status "${SERVICE_NAME}" --no-pager -l | head -15
             else
+                report_status "service_failed" "systemd unit ${SERVICE_NAME} not active after install"
                 warn "Service may not have started correctly. Check logs:"
                 echo "  journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
-                report_status "service_failed" "systemd service not active"
             fi
             ;;
         upstart)
             if initctl status "${SERVICE_NAME}" 2>/dev/null | grep -q "running"; then
-                success "Agent is running!"
                 report_status "service_started"
+                success "Agent is running!"
                 initctl status "${SERVICE_NAME}"
             else
+                report_status "service_failed" "upstart job ${SERVICE_NAME} not running after install"
                 warn "Service may not have started correctly. Check logs:"
                 echo "  cat /var/log/syslog | grep ${SERVICE_NAME}"
-                report_status "service_failed" "upstart service not running"
             fi
             ;;
         sysvinit)
             if "/etc/init.d/${SERVICE_NAME}" status 2>/dev/null; then
-                success "Agent is running!"
                 report_status "service_started"
+                success "Agent is running!"
             else
+                report_status "service_failed" "sysvinit service ${SERVICE_NAME} not running after install"
                 warn "Service may not have started correctly. Check logs:"
                 echo "  cat /var/log/syslog | grep ${SERVICE_NAME}"
-                report_status "service_failed" "sysvinit service not running"
             fi
             ;;
     esac
@@ -878,11 +951,11 @@ main() {
     info "Detected: Linux ${arch}"
 
     check_deps
+    install_ipset
 
     # After check_deps so curl is guaranteed present: on RHEL/CentOS the Go
     # binary reads the OpenSSL bundle, which may lack ISRG Root X1 even when
-    # curl (linked against NSS) connects fine. Called before download_binary,
-    # which is the first thing that needs working TLS.
+    # curl (linked against NSS) connects fine.
     bootstrap_ssl
 
     # Create config directory
@@ -928,6 +1001,15 @@ main() {
     local server_url agent_name
     server_url="$(echo "$config" | head -1)"
     agent_name="$(echo "$config" | tail -1)"
+
+    # Re-validate in the parent shell: a failed `error` inside the prompt_config
+    # subshell exits with code 1, but assignment from $() does not propagate
+    # that to the parent under set -e. Without this guard, empty/invalid values
+    # would silently flow into register_agent. (Bug observed via support #5.)
+    if ! validate_server_url "$server_url"; then
+        error "Server URL must start with http:// or https:// (got: '${server_url}')"
+    fi
+    [[ -n "$agent_name" ]] || error "Agent name is required."
 
     # Register with install token
     register_agent "$server_url" "$agent_name" "$INSTALL_TOKEN"

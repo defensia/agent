@@ -1,0 +1,28 @@
+name: Installer sync
+
+# Deliberately NOT on push or pull_request. The check compares against a live
+# server, so a panel deploy that forgot to update this repo would turn every
+# later PR red — including ones about Go that have nothing to do with it. A
+# guardrail that fails at the wrong moment gets ignored or switched off, and
+# then you are back to relying on somebody remembering, which is the failure
+# this replaces. Daily tells us; the release gate is where it must block.
+on:
+  schedule:
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  check:
+    name: Served installer matches this repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test the check itself
+        run: bash .github/scripts/test-installer-sync.sh
+
+      - name: Compare the served installer with the versioned one
+        run: bash .github/scripts/check-installer-sync.sh
