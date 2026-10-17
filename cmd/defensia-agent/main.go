@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.76"
+var version = "1.4.77"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -194,14 +194,11 @@ func runAgent() {
 	if auditWatcher := modsecurity.NewAuditLogWatcher(func(entry modsecurity.AuditEntry) {
 		attackCat := entry.AttackCategory()
 		eventType, isEnforcement := entry.Classify()
-		severity := modsecurity.MapSeverityToDefensia(entry.HighestSeverity())
 
-		// Protocol/method enforcement and IP reputation hits are client sloppiness,
-		// not attacks. CRS tags them WARNING, which at fleet volume drowns out the
-		// real findings — report them, but at info severity.
-		if isEnforcement {
-			severity = "info"
-		}
+		// Enforcement noise is pinned to info, and probe classes are rated by
+		// whether the probe was actually served rather than by how gravely the
+		// vendor rated the rule. See AuditEntry.ResolveSeverity.
+		severity := entry.ResolveSeverity(eventType, isEnforcement)
 
 		// Collect rule IDs and messages for details
 		var ruleIDs, ruleMsgs []string

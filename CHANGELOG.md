@@ -2,6 +2,14 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.77
+- **feat: Comodo cWAF rules are now classified** — Comodo ships by default on cPanel and DirectAdmin, and its rules use the vendor's reserved 200000-299999 ID range. Nothing matched them, so every Comodo detection arrived as `unknown` → `modsecurity_block` at CRITICAL severity. In production that was 7,424 uncategorised critical events across three servers, growing daily.
+- Comodo is mapped **per rule ID**, not per family. Its numbering is structural rather than semantic: it groups rules by rule *file* (`00_Init_`, `10_HTTP_`, `21_PHP_`), i.e. by the layer of the request inspected. The 210xxx block alone holds pure policy enforcement, `/.env` probing, LFI and crawler detection, so a family-prefix map would be actively wrong. 39 rules mapped; unmapped Comodo IDs degrade to `modsecurity_block` instead of returning to `unknown`.
+- The single highest-volume Comodo rule, 210492 (3,066 events), is `/.env` retrieval and now reports as `env_probe`.
+- **behaviour change — severity:** probe classes (`env_probe`, `config_probe`, `path_traversal`) are now rated by outcome using the response status rather than by how gravely the rule set rated them. A probe the server refused is `warning`; one answered with 2xx means the file was served and stays `critical`. Measured over seven days this is **12,979 fewer `critical` events per week** from ModSecurity (18,370 → 5,391). Anyone with an alert rule on `critical_event` will see the difference. Enforcement rules stay capped at `info`.
+- **behaviour change — ranking:** rules are now ranked by attack class rather than by rule family, so precedence can no longer depend on which vendor's rule fired. SQLi beats protocol enforcement because SQLi is the graver class, not because one rule set outranks another. This also changes how mixed CRS entries resolve, though only 3 such events exist in production today.
+- As part of that, **Defensia's own inline rules (9910xxx) lose their vendor precedence**. They previously outranked every CRS family unconditionally, which meant a Defensia scanner rule firing beside a CRS SQLi rule would have reported `scanner_detected`. They are now ranked by their own attack class, with an exact-ID match only breaking ties within the same class.
+
 ## v1.4.76
 - **fix: ModSecurity audit-log events were misclassified** — CRS reuses one tag for opposite meanings (`attack-protocol` covers both 920xxx protocol enforcement and 921xxx attacks), and classification took the *first* `attack-` tag in rule order. CRS phase-1 protocol rules log before phase-2 detection rules, so protocol noise shadowed the real finding.
 - Classification now keys off the CRS rule-ID family with a priority rank, so the most severe real finding in an entry always wins. Meta rules (949xxx/980xxx) can never classify.
