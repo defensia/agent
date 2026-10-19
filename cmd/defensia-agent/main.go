@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.77"
+var version = "1.4.78"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -85,46 +85,6 @@ func printUsage() {
 	fmt.Println("  defensia-agent register <server_url> <agent_name> <install_token>")
 	fmt.Println("  defensia-agent start")
 	fmt.Println("  defensia-agent check")
-}
-
-// runRegister performs first-boot registration and saves the config.
-func runRegister(serverURL, name, installToken string) {
-	hostname, _ := os.Hostname()
-	osInfo := detectOS()
-
-	client := api.New(serverURL, "")
-
-	log.Printf("Registering agent '%s' at %s...", name, serverURL)
-
-	resp, err := client.Register(api.RegisterRequest{
-		InstallToken: installToken,
-		Name:         name,
-		Hostname:     hostname,
-		IPAddress:    detectOutboundIP(),
-		OS:           osInfo.name,
-		OSVersion:    osInfo.version,
-		Version:      version,
-	})
-	if err != nil {
-		log.Fatalf("Registration failed: %v", err)
-	}
-
-	cfg := &config.Config{
-		ServerURL:    serverURL,
-		AgentToken:   resp.Token,
-		AgentID:      resp.Agent.ID,
-		ReverbURL:    resp.Reverb.URL,
-		ReverbAppKey: resp.Reverb.AppKey,
-		AuthEndpoint: resp.Reverb.AuthEndpoint,
-	}
-
-	if err := config.Save(cfg); err != nil {
-		log.Fatalf("Failed to save config: %v", err)
-	}
-
-	log.Printf("Agent registered successfully (id=%d)", resp.Agent.ID)
-	log.Printf("Config saved to %s", os.Getenv("DEFENSIA_CONFIG"))
-	log.Println("Run 'defensia-agent start' to begin monitoring.")
 }
 
 // runAgent is the main loop.
@@ -1576,8 +1536,15 @@ func detectOS() osInfo {
 		return osInfo{name: "linux", version: "unknown"}
 	}
 
+	return parseOSRelease(string(data))
+}
+
+// parseOSRelease extracts ID and VERSION_ID from os-release content and applies
+// the fallbacks for both. Split out from detectOS so the fallbacks can be tested
+// without writing to /etc.
+func parseOSRelease(data string) osInfo {
 	info := osInfo{}
-	for _, line := range splitLines(string(data)) {
+	for _, line := range splitLines(data) {
 		if len(line) < 3 {
 			continue
 		}
@@ -1598,6 +1565,14 @@ func detectOS() osInfo {
 		info.name = "linux"
 	}
 
+	// VERSION_ID is optional in os-release and absent on rolling and minimal
+	// distros (Arch, Gentoo, some container images). The panel requires
+	// os_version, so an empty value here is a 422 that blocks the install —
+	// fall back to the same "unknown" the no-os-release path above returns.
+	if info.version == "" {
+		info.version = "unknown"
+	}
+
 	return info
 }
 
@@ -1609,8 +1584,13 @@ func collectK8sInfo(c *kubernetes.Client) interface{} {
 }
 
 func detectOutboundIP() string {
+	// An override that is not a valid IP would fail the panel's `ip` rule, so
+	// validate it here rather than let it become a 422 at registration.
 	if ip := os.Getenv("AGENT_IP"); ip != "" {
-		return ip
+		if parsed := net.ParseIP(strings.TrimSpace(ip)); parsed != nil {
+			return parsed.String()
+		}
+		log.Printf("[agent] ignoring AGENT_IP=%q: not a valid IP address", ip)
 	}
 
 	// Try UDP dial to detect the preferred outbound IP (no actual traffic sent)
@@ -1635,6 +1615,27 @@ func detectOutboundIP() string {
 			}
 			for _, addr := range addrs {
 				if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
+					return ipNet.IP.String()
+				}
+			}
+		}
+	}
+
+	// IPv6-only hosts reach here: the UDP dial to 1.1.1.1 has no route and the
+	// loop above accepts IPv4 only. A global IPv6 address is the host's real
+	// address and the panel's `ip` rule accepts it, so prefer it to the
+	// placeholder below.
+	if ifaces != nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.IsGlobalUnicast() && !ipNet.IP.IsPrivate() {
 					return ipNet.IP.String()
 				}
 			}
