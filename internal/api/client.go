@@ -683,7 +683,11 @@ func (c *Client) post(path, token string, body, out any) error {
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(b))
+		return &HTTPError{
+			Status:     resp.StatusCode,
+			Body:       string(b),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 
 	if out != nil {
@@ -727,7 +731,11 @@ func (c *Client) postLong(path, token string, body, out any) error {
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(b))
+		return &HTTPError{
+			Status:     resp.StatusCode,
+			Body:       string(b),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 
 	if out != nil {
@@ -755,7 +763,11 @@ func (c *Client) get(path string, out any) error {
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(b))
+		return &HTTPError{
+			Status:     resp.StatusCode,
+			Body:       string(b),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 
 	return json.NewDecoder(resp.Body).Decode(out)
