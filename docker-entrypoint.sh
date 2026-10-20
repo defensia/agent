@@ -23,6 +23,73 @@ if [[ -z "${DEFENSIA_API_KEY:-}" ]] && [[ -n "${DEFENSIA_API_KEY_FILE:-}" ]] && 
     export DEFENSIA_API_KEY
 fi
 
+# `defensia-agent register` exits 78 (EX_CONFIG) when the panel rejected the
+# token itself (spent, expired, unknown, plan limit). Retrying cannot help.
+EXIT_REGISTER_REJECTED=78
+IDLE_CHECK_INTERVAL=60
+IDLE_REMINDER_INTERVAL=600
+
+# Exit cleanly on `docker stop` even while sleeping (bash as PID 1 ignores
+# SIGTERM unless it is trapped).
+trap 'echo "[defensia] Stopping."; exit 0' TERM INT
+
+# pause N — sleep that a trapped signal can interrupt.
+pause() {
+    sleep "$1" &
+    wait $! || true
+}
+
+warn_if_config_not_persisted() {
+    if ! grep -q " ${CONFIG_DIR} " /proc/self/mountinfo 2>/dev/null; then
+        echo "[defensia] WARNING: ${CONFIG_DIR} is not a mounted volume, so the agent config is not persisted."
+        echo "[defensia]          Install tokens are single-use: recreating this container will need a new token."
+        echo "[defensia]          Add -v ${CONFIG_DIR}:${CONFIG_DIR} to docker run (or a volume in compose)."
+    fi
+}
+
+# Where to remember a token the panel rejected: the config dir when writable,
+# otherwise /tmp. Both survive `docker restart`; neither survives a recreate.
+rejected_marker_path() {
+    if [[ -w "$CONFIG_DIR" ]]; then
+        echo "${CONFIG_DIR}/.rejected-token"
+    else
+        echo "/tmp/.defensia-rejected-token"
+    fi
+}
+
+print_rejected_help() {
+    echo "[defensia] ──────────────────────────────────────────────────────────────"
+    echo "[defensia] Registration was rejected: the install token was already used,"
+    echo "[defensia] has expired or is invalid (or the plan's server limit is reached)."
+    echo "[defensia] Retrying with the same token cannot succeed, so the agent is idle."
+    echo "[defensia]"
+    echo "[defensia] To fix it:"
+    echo "[defensia]   1. Generate a new install token at https://defensia.cloud/account/agents"
+    echo "[defensia]   2. Recreate this container with the new DEFENSIA_TOKEN and a persisted"
+    echo "[defensia]      config volume:  -v ${CONFIG_DIR}:${CONFIG_DIR}"
+    echo "[defensia] ──────────────────────────────────────────────────────────────"
+}
+
+# Never returns: the agent either starts (config.json appeared, e.g. via a
+# `docker exec ... defensia-agent register`) or stays idle. Exiting would not
+# help — with `--restart unless-stopped` Docker restarts even on exit 0.
+idle_until_configured() {
+    print_rejected_help
+    local since_reminder=0
+    while :; do
+        pause "$IDLE_CHECK_INTERVAL"
+        if [[ -f "$CONFIG_FILE" ]]; then
+            echo "[defensia] Config found at ${CONFIG_FILE} — starting agent..."
+            exec "$BINARY" start
+        fi
+        since_reminder=$((since_reminder + IDLE_CHECK_INTERVAL))
+        if [[ "$since_reminder" -ge "$IDLE_REMINDER_INTERVAL" ]]; then
+            print_rejected_help
+            since_reminder=0
+        fi
+    done
+}
+
 # ── Register if not already configured ────────────────────────────────────────
 if [[ ! -f "$CONFIG_FILE" ]]; then
     mkdir -p "$CONFIG_DIR"
@@ -91,9 +158,42 @@ CONF
 
     # ── Standard mode: register via single-use install token ──────────────────
     elif [[ -n "${DEFENSIA_TOKEN:-}" ]]; then
-        echo "[defensia] Registering agent '${AGENT_NAME}' with ${SERVER_URL}..."
-        "$BINARY" register "$SERVER_URL" "$AGENT_NAME" "$DEFENSIA_TOKEN"
-        echo "[defensia] Registration complete."
+        warn_if_config_not_persisted
+
+        TOKEN_HASH="$(printf '%s' "$DEFENSIA_TOKEN" | sha256sum | cut -d' ' -f1)"
+        MARKER="$(rejected_marker_path)"
+
+        # A token the panel already refused is not sent again: install tokens
+        # are single-use, and replaying a spent one on every container start
+        # is exactly the loop this guards against. A different token clears it.
+        if [[ -f "$MARKER" ]] && [[ "$(cat "$MARKER" 2>/dev/null)" == "$TOKEN_HASH" ]]; then
+            echo "[defensia] This DEFENSIA_TOKEN was already rejected by ${SERVER_URL} — not sending it again."
+            idle_until_configured
+        fi
+        rm -f "$MARKER" 2>/dev/null || true
+
+        BACKOFF=30
+        while :; do
+            echo "[defensia] Registering agent '${AGENT_NAME}' with ${SERVER_URL}..."
+            RC=0
+            "$BINARY" register "$SERVER_URL" "$AGENT_NAME" "$DEFENSIA_TOKEN" || RC=$?
+
+            if [[ "$RC" -eq 0 ]]; then
+                echo "[defensia] Registration complete."
+                break
+            fi
+
+            if [[ "$RC" -eq "$EXIT_REGISTER_REJECTED" ]]; then
+                printf '%s\n' "$TOKEN_HASH" > "$MARKER" 2>/dev/null || true
+                idle_until_configured
+            fi
+
+            # Transient (network, 5xx, 429): retry here instead of exiting,
+            # so a restart policy does not turn an outage into a tight loop.
+            echo "[defensia] Registration failed (exit ${RC}), retrying in ${BACKOFF}s..."
+            pause "$BACKOFF"
+            BACKOFF=60
+        done
 
     else
         echo "[defensia] ERROR: No credentials provided for registration."

@@ -2,6 +2,14 @@
 
 All notable changes to the Defensia Agent.
 
+## Unreleased
+- **fix: Docker container no longer restart-loops on a spent install token** — install tokens are single-use. A container recreated without a persisted `/etc/defensia` re-ran `register` with the already-consumed token, got a 401, exited 1, and `--restart unless-stopped` relaunched it forever (10 register calls in the first minute against a local test server, and climbing).
+- `defensia-agent register` now exits **78 (EX_CONFIG)** when the panel rejects the request itself (any 4xx except 429: spent/expired/unknown token, plan limit, rejected field) or the token is malformed locally. Transient failures (no response, 5xx, 429, unwritable config) keep exit 1. The installer treats any non-zero as failure, so it is unaffected.
+- `docker-entrypoint.sh`, on exit 78, prints what to do (new token + `-v /etc/defensia:/etc/defensia`) and **stays idle instead of exiting** — Docker restarts even on exit 0. It re-checks every 60s for a `config.json` (then starts the agent) and repeats the reminder every 10 min. The rejected token's sha256 is kept in `/etc/defensia/.rejected-token` (or `/tmp` when not writable), so a `docker restart` with the same token does not call the API again; a different `DEFENSIA_TOKEN` clears it. Same test: 1 register call, container Up, 0 restarts.
+- Transient registration failures are now retried inside the entrypoint with a 30s, then 60s backoff, instead of exiting into the restart policy.
+- The entrypoint warns before registering when `/etc/defensia` is not a mounted volume, since recreating such a container needs a new token.
+- `docker stop` on an idle or backing-off container now returns immediately (SIGTERM is trapped) instead of waiting for the 10s kill.
+
 ## v1.4.79
 - **fix: ordinary cookies no longer trip the header-injection rule** — rule 9910010 matched percent-encoded newlines (`%0d%0a|%0a|%0d`) anywhere in `REQUEST_HEADERS`. Measured against 1,040,242 legitimate requests from 692 sites, that one alternation produced **1,084 of the 2,261 false positives — 48% of every false positive the inline rule set generated**. All 1,084 were a `%0a` or `%0d` byte inside an opaque session cookie, e.g. `USER_ID=5%0a%5d%95%5b…`.
 - The encoded forms could never have caught the attack the rule is named for. `REQUEST_HEADERS` is populated *after* the HTTP parser has split the request on CRLF, so an encoded newline sitting inside a header value cannot split a header — the splitting attack needs a literal CR/LF, and a literal one in an already-parsed value means the request was malformed before ModSecurity saw it. The rule now matches literal `(\r\n|\n|\r)` only, which is the sole form that carries signal.
