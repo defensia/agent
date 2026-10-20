@@ -2,6 +2,17 @@
 
 All notable changes to the Defensia Agent.
 
+## v1.4.79
+- **fix: ordinary cookies no longer trip the header-injection rule** — rule 9910010 matched percent-encoded newlines (`%0d%0a|%0a|%0d`) anywhere in `REQUEST_HEADERS`. Measured against 1,040,242 legitimate requests from 692 sites, that one alternation produced **1,084 of the 2,261 false positives — 48% of every false positive the inline rule set generated**. All 1,084 were a `%0a` or `%0d` byte inside an opaque session cookie, e.g. `USER_ID=5%0a%5d%95%5b…`.
+- The encoded forms could never have caught the attack the rule is named for. `REQUEST_HEADERS` is populated *after* the HTTP parser has split the request on CRLF, so an encoded newline sitting inside a header value cannot split a header — the splitting attack needs a literal CR/LF, and a literal one in an already-parsed value means the request was malformed before ModSecurity saw it. The rule now matches literal `(\r\n|\n|\r)` only, which is the sole form that carries signal.
+- Nothing was given up to get this: a reflected response-splitting payload arrives percent-encoded in the URI or the body, not in a request header, so it was never in this rule's reach in the first place.
+- Effect on the same corpus: the inline false-positive rate drops from **0.243% to 0.126%** — 2,261 blocked legitimate requests down to 1,177.
+- **fix: path traversal in a POST body is now reachable at all** — rule 9910004 targeted `REQUEST_URI` only. It caught 30.2% of traversal sent as GET and **0.02% of traversal sent as POST**: 14,157 payloads were structurally unblockable rather than merely missed. It now targets `ARGS|ARGS_NAMES|REQUEST_URI` in `phase:2`.
+- Both halves of that change are required, which is why neither shipped alone. `REQUEST_URI` already carries the query string, so the only ground left to gain is the request body — and `ARGS` is not populated from a body until phase 2. Adding `ARGS` while leaving the rule in `phase:1` measured as exactly inert: POST-body traversal still returned 200.
+- Measured on 73,924 malicious payloads: traversal detection **15.11% → 30.20%**, and the inline true-positive rate across all families **14.719% → 20.498%**, +4,272 blocked attacks.
+- 9910007 (web shell), 9910008 (env probe) and 9910009 (config probe) share the same URI-only shape and were deliberately left as they are. The same widening measured no gain on them, and 9910009 already produces false positives of its own — matching shapes is not a reason to touch a rule.
+- **Both fixes raise a ceiling, not a floor.** The agent writes `SecRule` directives and never `SecRuleEngine`, so on a host whose ModSecurity is still at the stock `DetectionOnly` these rules log without blocking, and the numbers above are what you get once prevention is on. Turning it on stays the operator's decision.
+
 ## v1.4.78
 - **fix: registration could lock a new customer out for an hour** — a single rejected field cost five registration attempts and then an hour of 429s, with the real cause never shown. One production install failed 69 times in 22 minutes without the operator ever learning which field was wrong.
 - **No required field can leave the agent empty any more.** The panel validates all seven of `install_token, name, hostname, ip_address, os, os_version, version` as required, and each one now has a fallback: `os_version` → `unknown` (matching what the no-`/etc/os-release` path already sent), `os` → `linux`, `hostname` ↔ `name` (each falls back to the other, since both identify the same server), `version` → `unknown`.
