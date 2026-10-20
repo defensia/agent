@@ -131,11 +131,16 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
         fi
 
         # Parse response and write config
-        AGENT_TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
-        AGENT_ID=$(echo "$RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
-        REVERB_URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*"' | head -1 | cut -d'"' -f4)
-        REVERB_KEY=$(echo "$RESPONSE" | grep -o '"app_key":"[^"]*"' | head -1 | cut -d'"' -f4)
-        AUTH_ENDPOINT=$(echo "$RESPONSE" | grep -o '"auth_endpoint":"[^"]*"' | head -1 | cut -d'"' -f4)
+        # Tolerate whitespace after the colon, and never let a missing field end
+        # the script under `set -euo pipefail`: a grep with no match used to exit
+        # the container silently, before the explicit check below could explain.
+        json_str() { echo "$RESPONSE" | grep -oE "\"$1\":[[:space:]]*\"[^\"]*\"" | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true; }
+        json_int() { echo "$RESPONSE" | grep -oE "\"$1\":[[:space:]]*[0-9]+" | head -1 | grep -oE '[0-9]+$' || true; }
+        AGENT_TOKEN=$(json_str token)
+        AGENT_ID=$(json_int id)
+        REVERB_URL=$(json_str url)
+        REVERB_KEY=$(json_str app_key)
+        AUTH_ENDPOINT=$(json_str auth_endpoint)
 
         if [[ -z "$AGENT_TOKEN" || -z "$AGENT_ID" ]]; then
             echo "[defensia] ERROR: Could not parse registration response."
