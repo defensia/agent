@@ -37,6 +37,32 @@ const (
 	registerRetryWait = 5 * time.Second
 )
 
+// Exit codes of `defensia-agent register`. The Docker entrypoint keys off them:
+// a permanent rejection must not be retried, because install tokens are
+// single-use and a container restart policy would otherwise replay a spent
+// token in a tight loop forever.
+const (
+	// exitRegisterTransient covers failures where trying again later can
+	// succeed: no response, 5xx, a 429, or a local error such as an unwritable
+	// config.
+	exitRegisterTransient = 1
+
+	// exitRegisterRejected (EX_CONFIG, sysexits.h) means the panel refused the
+	// request itself — a spent, expired or unknown token (401/404), a plan
+	// limit (403), a rejected field (422) — or the token is malformed locally.
+	// Re-running with the same input cannot succeed.
+	exitRegisterRejected = 78
+)
+
+// registerExitCode maps a registration error onto the process exit code.
+func registerExitCode(err error) int {
+	var httpErr *api.HTTPError
+	if errors.As(err, &httpErr) && httpErr.Permanent() {
+		return exitRegisterRejected
+	}
+	return exitRegisterTransient
+}
+
 // registrar is the slice of the API client registration needs, so the retry
 // policy can be tested without an HTTP server.
 type registrar interface {
@@ -278,7 +304,8 @@ func runRegister(serverURL, name, installToken string) {
 	token, err := validateInstallToken(installToken)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Registration failed: %v\n", err)
-		os.Exit(1)
+		// A malformed token is as final as a rejected one.
+		os.Exit(exitRegisterRejected)
 	}
 
 	hostname, hostErr := os.Hostname()
@@ -301,7 +328,7 @@ func runRegister(serverURL, name, installToken string) {
 	resp, err := registerWithRetry(client, req, time.Sleep)
 	if err != nil {
 		reportRegistrationFailure(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(registerExitCode(err))
 	}
 
 	cfg := &config.Config{
@@ -315,7 +342,7 @@ func runRegister(serverURL, name, installToken string) {
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Registration succeeded but the config could not be saved: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitRegisterTransient)
 	}
 
 	fmt.Printf("Agent registered successfully (id=%d)\n", resp.Agent.ID)

@@ -529,3 +529,34 @@ func TestDetectOutboundIPHonoursAndValidatesTheOverride(t *testing.T) {
 		t.Errorf("fallback after an invalid AGENT_IP is %q, not a valid IP", got)
 	}
 }
+
+func TestRegisterExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"spent or expired token", &api.HTTPError{Status: 401, Body: `{"message":"token_expired"}`}, exitRegisterRejected},
+		{"plan limit", &api.HTTPError{Status: 403}, exitRegisterRejected},
+		{"unknown endpoint or token", &api.HTTPError{Status: 404}, exitRegisterRejected},
+		{"validation", &api.HTTPError{Status: 422}, exitRegisterRejected},
+		{"rate limited", &api.HTTPError{Status: 429, RetryAfter: time.Hour}, exitRegisterTransient},
+		{"server error", &api.HTTPError{Status: 500}, exitRegisterTransient},
+		{"bad gateway", &api.HTTPError{Status: 502}, exitRegisterTransient},
+		{"wrapped rejection", fmt.Errorf("register: %w", &api.HTTPError{Status: 401}), exitRegisterRejected},
+		{"transport", &net.OpError{Op: "dial", Err: errors.New("connection refused")}, exitRegisterTransient},
+		{"plain error", errors.New("boom"), exitRegisterTransient},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := registerExitCode(tt.err); got != tt.want {
+				t.Fatalf("registerExitCode(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+		})
+	}
+
+	if exitRegisterRejected != 78 {
+		t.Fatalf("exitRegisterRejected = %d; docker-entrypoint.sh depends on 78", exitRegisterRejected)
+	}
+}
