@@ -45,3 +45,39 @@ Service account name
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Secret holding the organization API key: the chart-managed one, or
+.Values.existingSecret when the key is managed outside the chart.
+*/}}
+{{- define "defensia-agent.secretName" -}}
+{{- default (include "defensia-agent.fullname" .) .Values.existingSecret }}
+{{- end }}
+
+{{- define "defensia-agent.secretKey" -}}
+{{- if .Values.existingSecret }}
+{{- default "api-key" .Values.existingSecretKey }}
+{{- else }}
+{{- print "api-key" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Value accessors. apiKey/serverUrl/clusterName are the documented names; the
+config.organizationApiKey / config.serverUrl / config.clusterName spellings
+from older READMEs are still honoured.
+*/}}
+{{- define "defensia-agent.apiKey" -}}
+{{- $legacy := .Values.config | default dict }}
+{{- coalesce .Values.apiKey $legacy.organizationApiKey | default "" }}
+{{- end }}
+
+{{- define "defensia-agent.serverUrl" -}}
+{{- $legacy := .Values.config | default dict }}
+{{- coalesce $legacy.serverUrl .Values.serverUrl "https://defensia.cloud" }}
+{{- end }}
+
+{{- define "defensia-agent.clusterName" -}}
+{{- $legacy := .Values.config | default dict }}
+{{- coalesce .Values.clusterName $legacy.clusterName | default "" }}
+{{- end }}

@@ -1,12 +1,18 @@
 # Defensia Agent Helm Chart — values.yaml
 
-# Required: your organization API key from defensia.cloud
+# Required: your organization API key from defensia.cloud (multi-use: one key
+# registers every node). Passed to the agent as DEFENSIA_API_KEY.
 apiKey: ""
+
+# Optional: use an existing Secret instead of apiKey (the key is read from
+# existingSecretKey, default "api-key").
+existingSecret: ""
+existingSecretKey: "api-key"
 
 # Defensia server URL (change only for self-hosted)
 serverUrl: "https://defensia.cloud"
 
-# Optional: cluster name (auto-detected if not set)
+# Optional: cluster name shown in the panel (sent as CLUSTER_NAME)
 clusterName: ""
 
 image:

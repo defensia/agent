@@ -56,7 +56,7 @@ docker run -d --name defensia-agent --restart unless-stopped \
 # Kubernetes (Helm)
 helm install defensia-agent \
   oci://ghcr.io/defensia/charts/defensia-agent \
-  --set config.organizationApiKey=<YOUR_API_KEY> \
+  --set apiKey=<YOUR_ORG_API_KEY> \
   --namespace defensia-system --create-namespace
 ```
 
@@ -251,8 +251,9 @@ DEFENSIA_TOKEN=<YOUR_TOKEN> docker compose up -d defensia-agent
 <summary>Docker Swarm (global service)</summary>
 
 ```bash
-# Store token as a Docker secret
-echo "<YOUR_TOKEN>" | docker secret create defensia_token -
+# Store the Organization API Key as a Docker secret (Dashboard -> Add server ->
+# Kubernetes / Swarm). Install tokens are single-use and only register one node.
+echo "<YOUR_ORG_API_KEY>" | docker secret create defensia_api_key -
 
 # Deploy 1 agent per node
 docker stack deploy -c docker-compose.swarm.yml defensia
@@ -267,21 +268,20 @@ See [docker-compose.swarm.yml](docker-compose.swarm.yml) for the full stack defi
 ```bash
 helm install defensia-agent \
   oci://ghcr.io/defensia/charts/defensia-agent \
-  --set config.organizationApiKey=<YOUR_API_KEY> \
-  --set config.serverUrl=https://defensia.cloud \
+  --set apiKey=<YOUR_ORG_API_KEY> \
+  --set serverUrl=https://defensia.cloud \
   --namespace defensia-system --create-namespace
 ```
 
-Deploys a **DaemonSet** — one agent per node (including control-plane). RBAC, tolerations, and resource limits pre-configured.
+Deploys a **DaemonSet** — one agent per node (including control-plane). Uses the multi-use **Organization API Key** (not a single-use install token); each node registers under its node name and keeps its credentials in `/etc/defensia` on the host. RBAC, tolerations, and resource limits pre-configured.
 
 <details>
 <summary>Custom values.yaml</summary>
 
 ```yaml
-config:
-  organizationApiKey: "your-org-api-key"
-  serverUrl: "https://defensia.cloud"
-  clusterName: "production"    # auto-detected if omitted
+apiKey: "your-org-api-key"     # Dashboard -> Add server -> Kubernetes / Swarm
+serverUrl: "https://defensia.cloud"
+clusterName: "production"      # optional, shown in the panel
 
 resources:
   limits:

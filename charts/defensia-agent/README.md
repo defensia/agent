@@ -6,7 +6,7 @@ Deploy the [Defensia](https://defensia.cloud) security agent as a DaemonSet on y
 
 - Kubernetes 1.22+
 - Helm 3+
-- A Defensia account with an install token from [defensia.cloud](https://defensia.cloud)
+- A Defensia account and your organization API key from [defensia.cloud](https://defensia.cloud) (one multi-use key registers every node; single-use install tokens do not work here)
 
 ## Install
 
@@ -19,7 +19,7 @@ helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
 
 ```bash
 helm upgrade defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
-  --version 0.6.0
+  --version 0.6.1
 ```
 
 ## Uninstall
@@ -32,9 +32,11 @@ helm uninstall defensia-agent
 
 | Parameter | Description | Default |
 |---|---|---|
-| `apiKey` | API key from Defensia panel | `""` (required) |
+| `apiKey` | Organization API key from the Defensia panel (passed as `DEFENSIA_API_KEY`) | `""` (required unless `existingSecret`) |
+| `existingSecret` | Existing Secret holding the API key, instead of `apiKey` | `""` |
+| `existingSecretKey` | Key inside `existingSecret` | `api-key` |
 | `serverUrl` | Defensia panel URL | `https://defensia.cloud` |
-| `clusterName` | Cluster name (auto-detected if not set) | `""` |
+| `clusterName` | Cluster name shown in the panel (`CLUSTER_NAME`) | `""` |
 | `image.repository` | Container image | `ghcr.io/defensia/agent` |
 | `image.tag` | Image tag (defaults to chart `appVersion`) | `""` |
 | `image.pullPolicy` | Image pull policy | `Always` |
@@ -104,7 +106,7 @@ extraEnv:
 | Logs | `/var/log` | read-only |
 | Docker socket | `/var/run/docker.sock` | read-only |
 | Containerd socket | `/run/containerd/containerd.sock` | read-only |
-| Agent config | `/etc/defensia` | read-write |
+| Agent config | `/etc/defensia` | read-write (keeps the node registered across pod restarts) |
 
 ## Agent capabilities
 

@@ -2,8 +2,8 @@ apiVersion: v2
 name: defensia-agent
 description: Defensia security agent — SSH protection, WAF, bot detection, CVE scanning, and K8s-native monitoring
 type: application
-version: 0.6.0
-appVersion: "1.4.10"
+version: 0.6.1
+appVersion: "1.4.79"
 home: https://defensia.cloud
 sources:
   - https://github.com/defensia/agent
