@@ -2,22 +2,27 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "token": {
+    "apiKey": {
       "type": "string",
-      "description": "Install token from https://defensia.cloud/dashboard"
+      "description": "Organization API key from https://defensia.cloud (multi-use, one key for all nodes)"
     },
     "existingSecret": {
       "type": "string",
-      "description": "Name of an existing Secret containing the token (key must be 'token')"
+      "description": "Name of an existing Secret holding the API key (instead of apiKey)"
+    },
+    "existingSecretKey": {
+      "type": "string",
+      "description": "Key inside existingSecret that holds the API key",
+      "default": "api-key"
     },
     "serverUrl": {
       "type": "string",
       "description": "Defensia panel URL",
       "default": "https://defensia.cloud"
     },
-    "agentName": {
+    "clusterName": {
       "type": "string",
-      "description": "Agent name override (default: node hostname)"
+      "description": "Cluster name shown in the panel"
     },
     "image": {
       "type": "object",
@@ -32,8 +37,12 @@
         },
         "pullPolicy": {
           "type": "string",
-          "enum": ["IfNotPresent", "Always", "Never"],
-          "default": "IfNotPresent"
+          "enum": [
+            "IfNotPresent",
+            "Always",
+            "Never"
+          ],
+          "default": "Always"
         }
       }
     },
@@ -43,41 +52,33 @@
         "limits": {
           "type": "object",
           "properties": {
-            "cpu": { "type": "string" },
-            "memory": { "type": "string" }
+            "cpu": {
+              "type": "string"
+            },
+            "memory": {
+              "type": "string"
+            }
           }
         },
         "requests": {
           "type": "object",
           "properties": {
-            "cpu": { "type": "string" },
-            "memory": { "type": "string" }
+            "cpu": {
+              "type": "string"
+            },
+            "memory": {
+              "type": "string"
+            }
           }
         }
       }
     },
     "tolerations": {
       "type": "array",
-      "description": "Pod tolerations — default tolerates all taints"
+      "description": "Pod tolerations \u2014 default tolerates all taints"
     },
     "nodeSelector": {
       "type": "object"
-    },
-    "affinity": {
-      "type": "object"
-    },
-    "hostPaths": {
-      "type": "object",
-      "properties": {
-        "log": {
-          "type": "string",
-          "default": "/var/log"
-        },
-        "dockerSocket": {
-          "type": "string",
-          "default": "/var/run/docker.sock"
-        }
-      }
     },
     "extraEnv": {
       "type": "array",
@@ -85,10 +86,72 @@
       "items": {
         "type": "object",
         "properties": {
-          "name": { "type": "string" },
-          "value": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
         },
-        "required": ["name", "value"]
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "priorityClassName": {
+      "type": "string"
+    },
+    "autoUpdate": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "ingressFirewall": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "configMapName": {
+          "type": "string"
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object"
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "description": "Deprecated aliases (use apiKey/serverUrl/clusterName)",
+      "properties": {
+        "organizationApiKey": {
+          "type": "string"
+        },
+        "serverUrl": {
+          "type": "string"
+        },
+        "clusterName": {
+          "type": "string"
+        }
       }
     }
   }

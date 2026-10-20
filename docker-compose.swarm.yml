@@ -1,12 +1,25 @@
 # Defensia Agent — Docker Swarm
 # Deploys one agent per node in the cluster (global mode).
 #
+# Swarm uses the reusable Organization API Key, not an install token: install
+# tokens are single-use, so in a global service only the first node would
+# register and every other node would be rejected. One API key registers every
+# node (DEFENSIA_API_KEY_FILE -> /api/v1/agents/register-k8s).
+#
+# Get the key at: https://defensia.cloud/dashboard -> Add server -> Kubernetes / Swarm
+#
 # Deploy:
-#   echo "<your-token>" | docker secret create defensia_token -
+#   echo "<YOUR_ORG_API_KEY>" | docker secret create defensia_api_key -
 #   docker stack deploy -c docker-compose.swarm.yml defensia
 #
-# Each agent auto-registers with the hostname of the Swarm node it runs on.
-# Get your token at: https://defensia.cloud/dashboard → Add Server
+# Each agent registers under the hostname of the Swarm node it runs on
+# (NODE_NAME). The defensia-config volume keeps each node's credentials in
+# /etc/defensia, so a restarted or rescheduled task reconnects as the same
+# server instead of registering again. Each node uses one server slot.
+#
+# Note: `docker stack deploy` ignores `privileged`, `pid` and `network_mode`;
+# host networking is attached through the external "host" network below and
+# firewall access through cap_add.
 
 services:
   agent:
@@ -16,21 +29,25 @@ services:
       restart_policy:
         condition: any
         delay: 10s
-    privileged: true
-    network_mode: host
-    pid: host
+    networks: [hostnet]
+    cap_add: [NET_ADMIN, NET_RAW]
     environment:
-      - DEFENSIA_TOKEN_FILE=/run/secrets/defensia_token
-      - DEFENSIA_SERVER_URL=${DEFENSIA_SERVER_URL:-https://defensia.cloud}
+      DEFENSIA_API_KEY_FILE: /run/secrets/defensia_api_key
+      NODE_NAME: "{{.Node.Hostname}}"
+      DEFENSIA_SERVER_URL: "${DEFENSIA_SERVER_URL:-https://defensia.cloud}"
     volumes:
       - /var/log:/var/log:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - defensia-config:/etc/defensia
-    secrets:
-      - defensia_token
+    secrets: [defensia_api_key]
+
+networks:
+  hostnet:
+    external: true
+    name: host
 
 secrets:
-  defensia_token:
+  defensia_api_key:
     external: true
 
 volumes:

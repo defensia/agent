@@ -40,13 +40,16 @@ spec:
           securityContext:
             privileged: true
           env:
-            - name: DEFENSIA_TOKEN
+            # Organization API key: multi-use, one key for every node. The
+            # entrypoint only takes the register-k8s path when DEFENSIA_API_KEY
+            # is set (DEFENSIA_TOKEN is for single-use install tokens).
+            - name: DEFENSIA_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "defensia-agent.fullname" . }}
-                  key: api-key
+                  name: {{ include "defensia-agent.secretName" . }}
+                  key: {{ include "defensia-agent.secretKey" . }}
             - name: DEFENSIA_SERVER_URL
-              value: {{ .Values.serverUrl | quote }}
+              value: {{ include "defensia-agent.serverUrl" . | quote }}
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
@@ -57,9 +60,9 @@ spec:
                   fieldPath: metadata.namespace
             - name: DAEMONSET_NAME
               value: {{ include "defensia-agent.fullname" . | quote }}
-            {{- if .Values.clusterName }}
+            {{- with include "defensia-agent.clusterName" . }}
             - name: CLUSTER_NAME
-              value: {{ .Values.clusterName | quote }}
+              value: {{ . | quote }}
             {{- end }}
             {{- if not .Values.autoUpdate.enabled }}
             - name: DISABLE_K8S_AUTO_UPDATE
