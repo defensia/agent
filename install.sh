@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Defensia Agent Installer
-# Usage: curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <INSTALL_TOKEN>
+# Usage: curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <INSTALL_TOKEN> [--name <AGENT_NAME>]
 # Non-interactive: DEFENSIA_SERVER_URL=https://... DEFENSIA_AGENT_NAME=web-01 curl -fsSL ... | sudo bash -s -- --token <TOKEN>
 # Install only (no registration): curl -fsSL ... | sudo bash -s -- --install-only
 # Old servers (SSL error): apt-get update && apt-get install -y ca-certificates && curl -fsSL https://defensia.cloud/install.sh | sudo bash -s -- --token <TOKEN>
@@ -35,7 +35,7 @@ RELEASE_FALLBACK="${RELEASE_FALLBACK:-https://defensia.cloud/downloads}"
 info()    { echo -e "${CYAN}[defensia]${NC} $*"; }
 success() { echo -e "${GREEN}[defensia]${NC} ✓ $*"; }
 warn()    { echo -e "${YELLOW}[defensia]${NC} ! $*"; }
-error()   { echo -e "${RED}[defensia]${NC} ✗ $*" >&2; exit 1; }
+error()   { LAST_ERROR="$*"; echo -e "${RED}[defensia]${NC} ✗ $*" >&2; exit 1; }
 
 # ─── Parse args ───────────────────────────────────────────────────────────────
 # ─── Install telemetry ─────────────────────────────────────────────────────────
@@ -58,6 +58,7 @@ _json_escape() {
 report_status() {
     local step="$1"
     local err="${2:-}"
+    LAST_STEP="$step"
     [[ -z "${INSTALL_TOKEN:-}" ]] && return 0
 
     local prefix os_info arch api_url err_json="null"
@@ -78,6 +79,42 @@ report_status() {
         >/dev/null 2>&1 || true
 }
 
+# ─── Exit handling ─────────────────────────────────────────────────────────────
+# One EXIT trap for the whole run. Temp files register here instead of each
+# setting its own trap, because a second `trap ... EXIT` silently replaces the
+# first.
+#
+# An install that dies between two reported steps used to vanish: the panel saw
+# "download_ok" and then nothing, with no way to tell a crash from a user who
+# pressed Ctrl-C at a prompt. Any exit that is not a finished install now reports
+# "aborted" with the exit code, the last step reached and the last error.
+LAST_STEP=""
+LAST_ERROR=""
+CLEANUP_FILES=()
+INSTALL_FINISHED=false
+
+on_exit() {
+    local code=$?
+    # A *_failed step already carries its own error; do not report it twice.
+    if [[ "$INSTALL_FINISHED" != true ]] && [[ -n "$LAST_STEP" ]] \
+       && [[ "$LAST_STEP" != *_failed ]]; then
+        report_status "aborted" "exit ${code} after ${LAST_STEP}${LAST_ERROR:+: ${LAST_ERROR}}"
+    fi
+    if (( ${#CLEANUP_FILES[@]} )); then
+        rm -f "${CLEANUP_FILES[@]}"
+    fi
+}
+
+on_signal() {
+    LAST_ERROR="interrupted by SIG$1"
+    exit $(( 128 + $2 ))
+}
+
+trap on_exit EXIT
+trap 'on_signal INT 2' INT
+trap 'on_signal TERM 15' TERM
+trap 'on_signal HUP 1' HUP
+
 parse_args() {
     INSTALL_TOKEN=""
     INSTALL_ONLY=false
@@ -86,6 +123,11 @@ parse_args() {
             --token)
                 INSTALL_TOKEN="${2:-}"
                 [[ -n "$INSTALL_TOKEN" ]] || error "--token requires a value."
+                shift 2
+                ;;
+            --name)
+                DEFENSIA_AGENT_NAME="${2:-}"
+                [[ -n "$DEFENSIA_AGENT_NAME" ]] || error "--name requires a value."
                 shift 2
                 ;;
             --install-only)
@@ -338,8 +380,7 @@ bootstrap_ssl() {
             || export CURL_CA_BUNDLE="$ca_tmp"
     fi
 
-    # shellcheck disable=SC2064
-    trap "rm -f '$ca_tmp'" EXIT
+    CLEANUP_FILES+=("$ca_tmp")
 
     success "Let's Encrypt root CA bootstrapped — HTTPS verification active for this session."
 }
@@ -459,9 +500,19 @@ prompt_config() {
 
     if [[ -z "$agent_name" ]]; then
         local default_name
-        default_name="$(hostname -s)"
-        read_prompt agent_name "$(echo -e "${BOLD}Agent name${NC} [${default_name}]: ")"
-        agent_name="${agent_name:-$default_name}"
+        default_name="$(hostname -s 2>/dev/null || hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || true)"
+        default_name="${default_name%%.*}"
+        default_name="${default_name:-server}"
+        # The dashboard command always carries --token: that run is meant to be
+        # one paste, so take the hostname instead of stopping at a prompt. The
+        # prompt was where installs went silent, most of all from phone SSH
+        # clients. --name or DEFENSIA_AGENT_NAME still choose a different name.
+        if [[ -n "${INSTALL_TOKEN:-}" ]]; then
+            agent_name="$default_name"
+        else
+            read_prompt agent_name "$(echo -e "${BOLD}Agent name${NC} [${default_name}]: ")"
+            agent_name="${agent_name:-$default_name}"
+        fi
     fi
 
     echo "$server_url"$'\n'"$agent_name"
@@ -473,6 +524,7 @@ register_agent() {
     local install_token="$3"
 
     info "Registering agent '${agent_name}' with ${server_url}..."
+    report_status "register_started"
 
     if ! DEFENSIA_CONFIG="${CONFIG_DIR}/config.json" \
         "${INSTALL_DIR}/${BINARY_NAME}" register "$server_url" "$agent_name" "$install_token"; then
@@ -981,16 +1033,25 @@ main() {
         echo ""
         echo "  Get your token at: https://defensia.cloud/dashboard"
         echo ""
+        INSTALL_FINISHED=true
         exit 0
     fi
 
     # Already installed? Re-register?
     if [[ -f "${CONFIG_DIR}/config.json" ]]; then
         warn "Existing config found at ${CONFIG_DIR}/config.json"
-        read -rp "Re-register agent? [y/N]: " answer
+        # A fresh install token is an explicit request to register, so do not
+        # ask. Asking was also broken under curl | bash: a bare `read` consumes
+        # the script itself from stdin instead of the user's answer.
+        local answer="y"
+        if [[ -z "${INSTALL_TOKEN:-}" ]]; then
+            answer=""
+            read_prompt answer "Re-register agent? [y/N]: "
+        fi
         if [[ "${answer,,}" != "y" ]]; then
             install_service
             check_service
+            INSTALL_FINISHED=true
             exit 0
         fi
     fi
@@ -1019,6 +1080,7 @@ main() {
 
     # Verify
     check_service
+    INSTALL_FINISHED=true
 
     echo ""
     echo -e "${GREEN}${BOLD}  Defensia Agent installed successfully!${NC}"
