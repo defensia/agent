@@ -165,8 +165,12 @@ SecRule ARGS|REQUEST_URI "@rx (?i)(eval\s*\(|exec\s*\(|system\s*\(|passthru\s*\(
     "id:9910003,phase:2,deny,status:403,log,msg:'Defensia: RCE',severity:'CRITICAL'"
 
 # ─── Path Traversal ───
-SecRule REQUEST_URI "@rx (?:\.\.\/|\.\.\\|%2e%2e%2f|%2e%2e\/|\.\.%2f|%252e%252e)" \
-    "id:9910004,phase:1,deny,status:403,log,msg:'Defensia: Path Traversal',severity:'HIGH'"
+# ARGS and phase:2 together, not either alone: REQUEST_URI already carries the
+# query string, so the only ground left to gain is the request body — and ARGS
+# is not populated from a body until phase 2. Widening the target while staying
+# in phase:1 measured as exactly inert (+0.000 TPR).
+SecRule ARGS|ARGS_NAMES|REQUEST_URI "@rx (?:\.\.\/|\.\.\\|%2e%2e%2f|%2e%2e\/|\.\.%2f|%252e%252e)" \
+    "id:9910004,phase:2,deny,status:403,log,msg:'Defensia: Path Traversal',severity:'HIGH'"
 
 # ─── SSRF ───
 SecRule ARGS|REQUEST_URI "@rx (?i)(169\.254\.169\.254|metadata\.google|file:\/\/|gopher:\/\/|dict:\/\/)" \
@@ -189,7 +193,13 @@ SecRule REQUEST_URI "@rx (?i)(wp-config\.php\.bak|\.git/config|web\.config|\.htp
     "id:9910009,phase:1,deny,status:403,log,msg:'Defensia: Config Probe',severity:'HIGH'"
 
 # ─── Header Injection ───
-SecRule REQUEST_HEADERS "@rx (\r\n|\n|\r|%0d%0a|%0a|%0d)" \
+# Literal CR/LF only. REQUEST_HEADERS holds values the HTTP parser has already
+# split on CRLF, so a percent-encoded newline sitting inside one of those values
+# cannot split a header — header injection needs a literal CR/LF to be there.
+# The encoded alternatives therefore detected nothing this rule is named for and
+# did match opaque session data: %0a/%0d inside Cookie values accounted for
+# 1,084 of 2,261 measured false positives (48% of all of them).
+SecRule REQUEST_HEADERS "@rx (\r\n|\n|\r)" \
     "id:9910010,phase:1,deny,status:403,log,msg:'Defensia: Header Injection',severity:'HIGH'"
 
 # ─── Log4Shell ───
