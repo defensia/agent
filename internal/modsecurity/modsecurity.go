@@ -213,6 +213,16 @@ SecRule ARGS_NAMES "@rx class\.module\.classLoader" \
 # ─── Scanner Blocking ───
 SecRule REQUEST_HEADERS:User-Agent "@rx (?i)(sqlmap|nikto|nmap|masscan|dirbuster|gobuster|wpscan|nuclei|acunetix|nessus)" \
     "id:9910014,phase:1,deny,status:403,nolog,msg:'Defensia: Scanner',severity:'MEDIUM'"
+
+# ─── php2shell (CVE-2026-109618 / CVE-2026-109619) ───
+# Multipart body that drives the session upload_progress handler AND carries a
+# PHP open tag or a serialized object in a filename or a body-supplied session id.
+# Phase 2: the discriminating data is in the request body. Specific by design —
+# a legit upload sends filename="x.php" (no "<?php" tag) and PHPSESSID in a cookie,
+# not the body. Partial detector of the known exploit shape, not a complete block.
+SecRule ARGS_NAMES "@streq PHP_SESSION_UPLOAD_PROGRESS" \
+    "id:9910015,phase:2,deny,status:403,log,msg:'Defensia: php2shell CVE-2026-109618/109619 attempt',severity:'CRITICAL',chain"
+    SecRule FILES_NAMES|ARGS:PHPSESSID "@rx (?i)(<\?php|\|O:[0-9]+:|php_serialize|<\?=)"
 `
 
 	path := filepath.Join(rulesDir, staticRules)
