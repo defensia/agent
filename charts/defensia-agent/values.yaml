@@ -1,13 +1,31 @@
 # Defensia Agent Helm Chart — values.yaml
 
-# Required: your organization API key from defensia.cloud (multi-use: one key
-# registers every node). Passed to the agent as DEFENSIA_API_KEY.
+# Your organization API key from defensia.cloud (multi-use: one key registers
+# every node).
+#
+# Optional. Left empty, the agent installs and runs, but stays unconnected until
+# a key arrives — create the Secret afterwards and it connects itself, with no
+# restart. That is the only way to install from a catalogue that cannot pass a
+# secret at install time (DigitalOcean Marketplace, GitOps bootstraps).
 apiKey: ""
 
 # Optional: use an existing Secret instead of apiKey (the key is read from
 # existingSecretKey, default "api-key").
 existingSecret: ""
 existingSecretKey: "api-key"
+
+# Container runtime sockets.
+#
+# Docker is off by default: managed Kubernetes (DOKS, GKE, EKS) runs containerd,
+# and mounting a socket that is not there makes kubelet create a directory in its
+# place on every node — one that `helm uninstall` leaves behind. Turn it on only
+# for a cluster that genuinely runs Docker.
+dockerSocket:
+  enabled: false
+  path: /var/run/docker.sock
+
+containerdSocket:
+  path: /run/containerd/containerd.sock
 
 # Defensia server URL (change only for self-hosted)
 serverUrl: "https://defensia.cloud"
