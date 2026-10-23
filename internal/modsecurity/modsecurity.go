@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -109,6 +110,85 @@ func (e *Engine) UpdateBannedIPs(ips []string) error {
 	}
 
 	return e.scheduleReload()
+}
+
+// detectLiteSpeedModSecurity reports whether OpenLiteSpeed has mod_security enabled.
+//
+// LiteSpeed keeps ModSecurity in its own module tree and enables it with a
+// `module mod_security { modsecurity on }` block in httpd_config.conf — nothing that
+// apachectl can see. A customer serving from OpenLiteSpeed with ols-modsecurity, OWASP
+// CRS and thousands of 403s in their error log was being told ModSecurity was "not
+// installed", and offered an Apache install command that would have sat in front of no
+// traffic.
+//
+// Detection only. Rule management stays Apache-only: writing an Apache rules file on a
+// LiteSpeed box would be dead weight, and claiming otherwise is worse than reporting
+// nothing.
+func detectLiteSpeedModSecurity() bool {
+	return liteSpeedModSecurityAt(
+		[]string{
+			"/usr/local/lsws/modules/mod_security.so",
+			"/usr/local/lsws/modules/modsecurity.so",
+		},
+		"/usr/local/lsws/conf/httpd_config.conf",
+	)
+}
+
+// liteSpeedModSecurityAt is detectLiteSpeedModSecurity with its paths injected, so the
+// config parsing can be tested without an OpenLiteSpeed install.
+func liteSpeedModSecurityAt(modulePaths []string, configPath string) bool {
+	moduleFound := false
+	for _, so := range modulePaths {
+		if _, err := os.Stat(so); err == nil {
+			moduleFound = true
+			break
+		}
+	}
+	if !moduleFound {
+		return false
+	}
+
+	// The module being present is not the same as it being switched on.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+
+	lower := strings.ToLower(string(data))
+	idx := strings.Index(lower, "module mod_security")
+	if idx < 0 {
+		return false
+	}
+
+	// Look for `modsecurity on` inside the block that follows. Whitespace is not fixed:
+	// OpenLiteSpeed writes its directives column-aligned, so the real file says
+	// "modsecurity  on" with two spaces, and an exact-string match misses every
+	// genuinely protected server.
+	block := lower[idx:]
+	if end := strings.Index(block, "\n}"); end > 0 {
+		block = block[:end]
+	}
+
+	return modSecOnPattern.MatchString(block)
+}
+
+// `modsecurity<space>on` with any run of whitespace. Anchored on a word boundary so the
+// neighbouring `modsecurity_rules` directive cannot satisfy it.
+var modSecOnPattern = regexp.MustCompile(`\bmodsecurity\s+on\b`)
+
+// IsActive reports whether ModSecurity is protecting this server, by any web server
+// we recognise.
+//
+// Distinct from IsAvailable, which answers "can this engine manage rules here" and
+// stays Apache-only. The panel needs the first question answered: telling an
+// OpenLiteSpeed operator that ModSecurity is missing — and handing them an Apache
+// install command — is wrong in a way that costs them trust and time.
+func (e *Engine) IsActive() bool {
+	if e != nil && e.IsAvailable() {
+		return true
+	}
+
+	return detectLiteSpeedModSecurity()
 }
 
 func (e *Engine) detectModSecurity() bool {

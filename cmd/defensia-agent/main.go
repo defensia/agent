@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.82"
+var version = "1.4.83"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -880,7 +880,7 @@ func runAgent() {
 				ActiveBans:        fwStatus.ActiveBans,
 				KubernetesInfo:    collectK8sInfo(k8sClient),
 				YaraInstalled:    func() bool { if yaraScanner != nil { yaraScanner.Recheck() }; return yaraScanner != nil && yaraScanner.IsAvailable() }(),
-				ModsecActive:     modsecEngine != nil && modsecEngine.IsAvailable(),
+				ModsecActive:     modsecEngine.IsActive(),
 				RequestsAnalyzed: reqAnalyzed,
 				CSFInstalled:     fwStatus.CSF.Installed,
 				CSFVersion:       fwStatus.CSF.Version,
@@ -1692,7 +1692,114 @@ func trimQuotes(s string) string {
 
 // detectWebServerInfo detects the installed web server and its version.
 // Runs once at startup — executes "nginx -v" or "apache2 -v" a single time.
+// detectWebServerInfo identifies the web server, preferring whatever is actually
+// serving :80/:443 over whatever happens to be installed.
+//
+// Installed-package order used to decide this, which misreported any box with more than
+// one server present. A customer running OpenLiteSpeed on :80/:443 with an idle Apache
+// on :8082 was reported as Apache — so the panel offered them an Apache ModSecurity
+// install that would have sat in front of no traffic at all, and added surface to a
+// service they had already stopped.
 func detectWebServerInfo() (name, version string) {
+	// What is listening on the public ports wins. Everything else is a guess.
+	if served := webServerOnPublicPorts(); served != "" {
+		if v := webServerVersion(served); v != "" || served != "" {
+			return served, v
+		}
+	}
+
+	return installedWebServerInfo()
+}
+
+// webServerOnPublicPorts returns the web server serving :80 or :443, or "" if none is.
+func webServerOnPublicPorts() string {
+	for _, svc := range monitor.DetectListeningServices() {
+		if svc.Port != 80 && svc.Port != 443 {
+			continue
+		}
+
+		if name := webServerFromProcess(svc.Process); name != "" {
+			return name
+		}
+	}
+
+	return ""
+}
+
+// webServerFromProcess maps a process name to the web server it belongs to.
+//
+// Prefix matching, not equality: /proc/<pid>/comm is truncated to 15 bytes, and
+// OpenLiteSpeed's master shows up as "litespeed" or "lshttpd" depending on the build.
+func webServerFromProcess(process string) string {
+	proc := strings.ToLower(strings.TrimSpace(process))
+	switch {
+	case strings.HasPrefix(proc, "litespeed"), strings.HasPrefix(proc, "lshttpd"), strings.HasPrefix(proc, "openlitespeed"):
+		return "litespeed"
+	case strings.HasPrefix(proc, "nginx"):
+		return "nginx"
+	case strings.HasPrefix(proc, "apache"), strings.HasPrefix(proc, "httpd"):
+		return "apache"
+	case strings.HasPrefix(proc, "caddy"):
+		return "caddy"
+	}
+
+	return ""
+}
+
+// webServerVersion asks a named server for its version.
+func webServerVersion(name string) string {
+	switch name {
+	case "litespeed":
+		return liteSpeedVersion()
+	case "nginx":
+		if out, err := exec.Command("nginx", "-v").CombinedOutput(); err == nil {
+			s := strings.TrimSpace(string(out))
+			if idx := strings.Index(s, "nginx/"); idx >= 0 {
+				if f := strings.Fields(s[idx+6:]); len(f) > 0 {
+					return f[0]
+				}
+			}
+		}
+	case "apache":
+		for _, bin := range []string{"apache2", "httpd"} {
+			if out, err := exec.Command(bin, "-v").CombinedOutput(); err == nil {
+				return parseApacheVersion(string(out))
+			}
+		}
+	}
+
+	return ""
+}
+
+// liteSpeedVersion reads the version from lshttpd, which is not on PATH by default.
+func liteSpeedVersion() string {
+	for _, bin := range []string{"/usr/local/lsws/bin/lshttpd", "/usr/local/lsws/bin/openlitespeed", "lshttpd"} {
+		out, err := exec.Command(bin, "-v").CombinedOutput()
+		if err != nil && len(out) == 0 {
+			continue
+		}
+		// "LiteSpeed/1.9.3 Open (BUILD) ..." or "openlitespeed/1.7.19"
+		s := strings.TrimSpace(string(out))
+		for _, marker := range []string{"LiteSpeed/", "litespeed/", "openlitespeed/"} {
+			if idx := strings.Index(s, marker); idx >= 0 {
+				if f := strings.Fields(s[idx+len(marker):]); len(f) > 0 {
+					return f[0]
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// installedWebServerInfo is the old behaviour, kept as a fallback for a box where
+// nothing is serving yet — during provisioning, or with the server stopped.
+func installedWebServerInfo() (name, version string) {
+	// LiteSpeed does not put its binaries on PATH, so check the install root.
+	if _, err := os.Stat("/usr/local/lsws/bin/lshttpd"); err == nil {
+		return "litespeed", liteSpeedVersion()
+	}
+
 	// Try Nginx first
 	if path, err := exec.LookPath("nginx"); err == nil && path != "" {
 		out, err := exec.Command("nginx", "-v").CombinedOutput()
