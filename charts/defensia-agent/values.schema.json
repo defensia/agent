@@ -4,7 +4,7 @@
   "properties": {
     "apiKey": {
       "type": "string",
-      "description": "Organization API key from https://defensia.cloud (multi-use, one key for all nodes)"
+      "description": "Organization API key from https://defensia.cloud (multi-use, one key for all nodes). Optional: with none, the agent installs and idles until a Secret with the key is created, then connects without a restart."
     },
     "existingSecret": {
       "type": "string",
@@ -150,6 +150,27 @@
           "type": "string"
         },
         "clusterName": {
+          "type": "string"
+        }
+      }
+    },
+    "dockerSocket": {
+      "type": "object",
+      "description": "Docker socket mount. Disabled by default: managed Kubernetes runs containerd, and mounting a socket that is absent makes kubelet create a directory in its place on every node.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "containerdSocket": {
+      "type": "object",
+      "description": "containerd socket path. Mounted with type: Socket, so a node without it fails loudly instead of growing a stray directory.",
+      "properties": {
+        "path": {
           "type": "string"
         }
       }

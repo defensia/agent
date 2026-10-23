@@ -22,6 +22,39 @@ helm upgrade defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
   --version 0.6.1
 ```
 
+## Installing without a key
+
+The key is optional. Installed without one, the agent runs but stays
+unconnected, and connects by itself once a Secret with the key appears — no
+restart, no reinstall:
+
+```bash
+helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent \
+  --namespace defensia --create-namespace
+
+# later, when you have the key
+kubectl -n defensia create secret generic defensia-agent \
+  --from-literal=api-key=YOUR_API_KEY --dry-run=client -o yaml | kubectl apply -f -
+```
+
+This is what makes the chart installable from a catalogue that cannot pass a
+secret at install time, such as the DigitalOcean Marketplace, or from a GitOps
+repo where the key lives in a sealed Secret applied separately.
+
+A wrong key behaves the same way: the agent reports it, idles, and picks up a
+corrected Secret on its own. It never crash-loops over a credential.
+
+## Container runtime sockets
+
+Docker's socket is **not** mounted by default. Managed Kubernetes (DOKS, GKE,
+EKS) runs containerd, and mounting a socket that is not there makes kubelet
+create a directory in its place on every node — one that survives
+`helm uninstall`. Enable it only on a cluster that really runs Docker:
+
+```bash
+--set dockerSocket.enabled=true
+```
+
 ## Uninstall
 
 ```bash
@@ -32,7 +65,7 @@ helm uninstall defensia-agent
 
 | Parameter | Description | Default |
 |---|---|---|
-| `apiKey` | Organization API key from the Defensia panel (passed as `DEFENSIA_API_KEY`) | `""` (required unless `existingSecret`) |
+| `apiKey` | Organization API key from the Defensia panel | `""` (optional — see *Installing without a key*) |
 | `existingSecret` | Existing Secret holding the API key, instead of `apiKey` | `""` |
 | `existingSecretKey` | Key inside `existingSecret` | `api-key` |
 | `serverUrl` | Defensia panel URL | `https://defensia.cloud` |
