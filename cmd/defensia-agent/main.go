@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.84"
+var version = "1.4.85"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -68,6 +68,12 @@ func main() {
 	case "start":
 		runAgent()
 
+	case "version", "--version", "-v":
+		// Printed so the updater can verify that the binary it just installed is
+		// actually the version it was told to fetch. Without this the updater could
+		// only check the file existed, which let it install an older binary from a
+		// stale download URL and report success.
+		fmt.Println(version)
 	case "check":
 		// Pre-flight self-test used by the auto-updater to verify the binary
 		// works before restarting the service. Exits 0 on success.

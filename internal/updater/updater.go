@@ -80,9 +80,9 @@ func CheckStartupHealth(currentVersion string, reportEvent EventReporter) {
 			log.Printf("[updater] rollback failed — manual intervention needed")
 			if reportEvent != nil {
 				reportEvent("update_rollback_failed", "critical", map[string]string{
-					"version":  currentVersion,
-					"crashes":  fmt.Sprintf("%d", crashes),
-					"reason":   "rollback_copy_or_rename_failed",
+					"version": currentVersion,
+					"crashes": fmt.Sprintf("%d", crashes),
+					"reason":  "rollback_copy_or_rename_failed",
 				})
 			}
 		}
@@ -100,8 +100,8 @@ func CheckStartupHealth(currentVersion string, reportEvent EventReporter) {
 			log.Printf("[updater] agent stable for 2min — cleared crash counter (was %d)", crashes)
 			if reportEvent != nil {
 				reportEvent("update_stable", "info", map[string]string{
-					"version":           currentVersion,
-					"previous_crashes":  fmt.Sprintf("%d", crashes),
+					"version":          currentVersion,
+					"previous_crashes": fmt.Sprintf("%d", crashes),
 				})
 			}
 		}
@@ -321,10 +321,29 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		log.Printf("[updater] fanotify helper installed")
 	}
 
+	// 8b. Verify the binary we just installed reports the version we asked for.
+	//
+	// Existing on disk is not the same as being the right build. A stale download URL
+	// — the panel advertising a new version while still handing out the previous
+	// release's path — made every agent fetch the old binary, install it, and report
+	// a successful update. Worse, the attempt marker below then recorded the target
+	// version, so the loop guard blocked any retry even after the URL was corrected.
+	// Checking the version closes both halves of that.
+	if installed := binaryVersion(targetPath); installed != "" && installed != latestVersion {
+		log.Printf("[updater] CRITICAL: installed binary reports v%s, expected v%s — rolling back", installed, latestVersion)
+		rollback()
+		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
+			"reason": "version_mismatch_after_install", "installed_version": installed,
+		}))
+		return
+	}
+
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
 	// Remember this attempt so we don't loop if the filesystem is non-persistent.
-	// Written to /etc/defensia/ which survives service restarts.
+	// Written to /etc/defensia/ which survives service restarts. Only reached once the
+	// installed binary has confirmed its version, so a failed update never blocks a
+	// later retry.
 	os.WriteFile(updateAttemptMarker, []byte(latestVersion), 0644)
 
 	// 9. Report success BEFORE restart (restart kills the current process)
@@ -649,4 +668,19 @@ func systemResources() string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+// binaryVersion asks a binary which version it is. Returns "" when the binary cannot
+// answer — an older build without the subcommand, or one that will not run here — so an
+// unknown answer never blocks an update on its own.
+func binaryVersion(path string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, path, "version").Output()
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(string(out))
 }
