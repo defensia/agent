@@ -12,16 +12,32 @@ BINARY="/usr/local/bin/defensia-agent"
 SERVER_URL="${DEFENSIA_SERVER_URL:-https://defensia.cloud}"
 AGENT_NAME="${DEFENSIA_AGENT_NAME:-$(hostname -s)}"
 
-# ── Resolve secrets (supports Docker secrets via _FILE suffix) ────────────────
-if [[ -z "${DEFENSIA_TOKEN:-}" ]] && [[ -n "${DEFENSIA_TOKEN_FILE:-}" ]] && [[ -f "$DEFENSIA_TOKEN_FILE" ]]; then
-    DEFENSIA_TOKEN="$(cat "$DEFENSIA_TOKEN_FILE")"
-    export DEFENSIA_TOKEN
-fi
+# ── Resolve secrets (supports Docker secrets and K8s Secrets via _FILE suffix) ─
+# A function rather than a one-off block: on Kubernetes the API key arrives from a
+# mounted Secret, which can be created after this pod is already running, so the
+# idle loop below re-runs this to notice it.
+resolve_credentials() {
+    # When a _FILE is given it wins over the variable, and is re-read every time
+    # rather than only when the variable is empty. That is what lets a corrected
+    # key take effect: the operator edits the Secret, kubelet rewrites the mounted
+    # file, and the next pass through the idle loop sees the new value. Reading it
+    # once would pin the pod to the first key it ever saw, including a bad one.
+    if [[ -n "${DEFENSIA_TOKEN_FILE:-}" ]] && [[ -s "$DEFENSIA_TOKEN_FILE" ]]; then
+        DEFENSIA_TOKEN="$(tr -d '[:space:]' < "$DEFENSIA_TOKEN_FILE")"
+        export DEFENSIA_TOKEN
+    fi
 
-if [[ -z "${DEFENSIA_API_KEY:-}" ]] && [[ -n "${DEFENSIA_API_KEY_FILE:-}" ]] && [[ -f "$DEFENSIA_API_KEY_FILE" ]]; then
-    DEFENSIA_API_KEY="$(cat "$DEFENSIA_API_KEY_FILE")"
-    export DEFENSIA_API_KEY
-fi
+    if [[ -n "${DEFENSIA_API_KEY_FILE:-}" ]] && [[ -s "$DEFENSIA_API_KEY_FILE" ]]; then
+        DEFENSIA_API_KEY="$(tr -d '[:space:]' < "$DEFENSIA_API_KEY_FILE")"
+        export DEFENSIA_API_KEY
+    fi
+}
+
+resolve_credentials
+
+have_credentials() {
+    [[ -n "${DEFENSIA_API_KEY:-}" ]] || [[ -n "${DEFENSIA_TOKEN:-}" ]]
+}
 
 # `defensia-agent register` exits 78 (EX_CONFIG) when the panel rejected the
 # token itself (spent, expired, unknown, plan limit). Retrying cannot help.
@@ -57,6 +73,28 @@ rejected_marker_path() {
     fi
 }
 
+# Same idea for the organization API key. Kept in its own file because the two
+# credentials are independent: a spent install token says nothing about a key.
+apikey_marker_path() {
+    if [[ -w "$CONFIG_DIR" ]]; then
+        echo "${CONFIG_DIR}/.rejected-apikey"
+    else
+        echo "/tmp/.defensia-rejected-apikey"
+    fi
+}
+
+hash_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+# True when the key we hold is one the panel has already refused. Used to idle on
+# a bad key without hammering the API: the watch loop re-reads the mounted Secret
+# every minute, and without this a typo'd key would re-register once a minute
+# forever. A corrected key hashes differently and clears the block by itself.
+apikey_already_rejected() {
+    local marker
+    marker="$(apikey_marker_path)"
+    [[ -f "$marker" ]] && [[ "$(cat "$marker" 2>/dev/null)" == "$(hash_of "${DEFENSIA_API_KEY:-}")" ]]
+}
+
 print_rejected_help() {
     echo "[defensia] ──────────────────────────────────────────────────────────────"
     echo "[defensia] Registration was rejected: the install token was already used,"
@@ -70,11 +108,50 @@ print_rejected_help() {
     echo "[defensia] ──────────────────────────────────────────────────────────────"
 }
 
+print_apikey_rejected_help() {
+    echo "[defensia] ──────────────────────────────────────────────────────────────"
+    echo "[defensia] The organization API key was refused (invalid, revoked, or the"
+    echo "[defensia] plan has no free server slots). The agent stays up and idle."
+    echo "[defensia]"
+    echo "[defensia] Replace the key and it is picked up automatically:"
+    echo "[defensia]   kubectl -n ${POD_NAMESPACE:-defensia} create secret generic ${DAEMONSET_NAME:-defensia-agent} \\"
+    echo "[defensia]     --from-literal=api-key=<ORG_API_KEY> --dry-run=client -o yaml | kubectl apply -f -"
+    echo "[defensia]"
+    echo "[defensia] Keys and plan limits: https://defensia.cloud/dashboard"
+    echo "[defensia] ──────────────────────────────────────────────────────────────"
+}
+
+print_unclaimed_help() {
+    echo "[defensia] ──────────────────────────────────────────────────────────────"
+    echo "[defensia] Installed, but not connected to an organization yet."
+    echo "[defensia]"
+    echo "[defensia] This is the expected first state for a marketplace or GitOps"
+    echo "[defensia] install, where no credential can be supplied at install time."
+    echo "[defensia] Nothing has failed. The agent stays up and connects on its own"
+    echo "[defensia] as soon as a key appears — no restart, no reinstall."
+    echo "[defensia]"
+    echo "[defensia] To connect this cluster, from https://defensia.cloud/dashboard:"
+    echo "[defensia]   kubectl -n ${POD_NAMESPACE:-defensia} create secret generic ${DAEMONSET_NAME:-defensia-agent} \\"
+    echo "[defensia]     --from-literal=api-key=<ORG_API_KEY> --dry-run=client -o yaml | kubectl apply -f -"
+    echo "[defensia]"
+    echo "[defensia] For Docker or bare metal, set DEFENSIA_TOKEN instead."
+    echo "[defensia] ──────────────────────────────────────────────────────────────"
+}
+
 # Never returns: the agent either starts (config.json appeared, e.g. via a
 # `docker exec ... defensia-agent register`) or stays idle. Exiting would not
 # help — with `--restart unless-stopped` Docker restarts even on exit 0.
+#   idle_until_configured <help_fn> [watch-for-credentials]
+#
+# Pass "watch" only when no credential was supplied. Waiting for one to appear is
+# right for a pod installed without a key, and wrong after a rejection: the token
+# that was refused is still in the environment, so watching would re-send it on a
+# loop — the exact thing the rejection marker exists to prevent.
 idle_until_configured() {
-    print_rejected_help
+    local help_fn="$1"
+    local watch_credentials="${2:-}"
+
+    "$help_fn"
     local since_reminder=0
     while :; do
         pause "$IDLE_CHECK_INTERVAL"
@@ -82,9 +159,21 @@ idle_until_configured() {
             echo "[defensia] Config found at ${CONFIG_FILE} — starting agent..."
             exec "$BINARY" start
         fi
+
+        # A mounted Secret updates in place, so a key created after this pod
+        # started shows up here. Re-exec rather than inlining the registration:
+        # it is the same path a normal start takes, so there is only one of it.
+        if [[ "$watch_credentials" == "watch" ]]; then
+            resolve_credentials
+            if have_credentials && ! apikey_already_rejected; then
+                echo "[defensia] Credentials appeared — registering."
+                exec "$0"
+            fi
+        fi
+
         since_reminder=$((since_reminder + IDLE_CHECK_INTERVAL))
         if [[ "$since_reminder" -ge "$IDLE_REMINDER_INTERVAL" ]]; then
-            print_rejected_help
+            "$help_fn"
             since_reminder=0
         fi
     done
@@ -122,12 +211,29 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
         CURL_ERR=$(cat /tmp/register-error.txt 2>/dev/null)
 
         if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
-            echo "[defensia] ERROR: K8s registration failed (HTTP ${HTTP_CODE})."
+            echo "[defensia] K8s registration failed (HTTP ${HTTP_CODE})."
             [[ -n "$CURL_ERR" ]] && echo "[defensia] curl: ${CURL_ERR}"
             [[ -n "$RESPONSE" ]] && echo "[defensia] Response: ${RESPONSE}"
             echo "[defensia] API URL: ${API_BASE}/api/v1/agents/register-k8s"
-            echo "[defensia] Check: API key is valid, server slots available, server URL reachable."
-            exit 1
+
+            # Split a refusal from an outage. A 4xx means this key will never be
+            # accepted — retrying is just noise — so remember it and wait for a
+            # different one. Anything else (5xx, 429, DNS, timeouts: HTTP_CODE is
+            # 000 when curl never got a reply) is worth retrying, and a pod that
+            # exits on a transient failure turns a brief outage into a crash loop
+            # across every node at once.
+            case "$HTTP_CODE" in
+                4*)
+                    printf '%s\n' "$(hash_of "${DEFENSIA_API_KEY:-}")" > "$(apikey_marker_path)" 2>/dev/null || true
+                    echo "[defensia] This key will not be accepted; waiting for a corrected one."
+                    idle_until_configured print_apikey_rejected_help watch
+                    ;;
+                *)
+                    echo "[defensia] Looks temporary — retrying in ${IDLE_CHECK_INTERVAL}s."
+                    pause "$IDLE_CHECK_INTERVAL"
+                    exec "$0"
+                    ;;
+            esac
         fi
 
         # Parse response and write config
@@ -173,7 +279,7 @@ CONF
         # is exactly the loop this guards against. A different token clears it.
         if [[ -f "$MARKER" ]] && [[ "$(cat "$MARKER" 2>/dev/null)" == "$TOKEN_HASH" ]]; then
             echo "[defensia] This DEFENSIA_TOKEN was already rejected by ${SERVER_URL} — not sending it again."
-            idle_until_configured
+            idle_until_configured print_rejected_help
         fi
         rm -f "$MARKER" 2>/dev/null || true
 
@@ -190,7 +296,7 @@ CONF
 
             if [[ "$RC" -eq "$EXIT_REGISTER_REJECTED" ]]; then
                 printf '%s\n' "$TOKEN_HASH" > "$MARKER" 2>/dev/null || true
-                idle_until_configured
+                idle_until_configured print_rejected_help
             fi
 
             # Transient (network, 5xx, 429): retry here instead of exiting,
@@ -201,18 +307,16 @@ CONF
         done
 
     else
-        echo "[defensia] ERROR: No credentials provided for registration."
-        echo "[defensia]"
-        echo "[defensia] For Kubernetes (DaemonSet):"
-        echo "[defensia]   Set DEFENSIA_API_KEY (multi-use, one key for the whole cluster)"
-        echo "[defensia]   helm install defensia-agent oci://ghcr.io/defensia/charts/defensia-agent --set apiKey=<KEY>"
-        echo "[defensia]"
-        echo "[defensia] For Docker / bare metal:"
-        echo "[defensia]   Set DEFENSIA_TOKEN (single-use install token)"
-        echo "[defensia]   docker run -e DEFENSIA_TOKEN=<TOKEN> ghcr.io/defensia/agent"
-        echo "[defensia]"
-        echo "[defensia] Get credentials at https://defensia.cloud/dashboard"
-        exit 1
+        # No credential yet — wait for one instead of exiting.
+        #
+        # Exiting made the agent uninstallable from any catalogue that cannot ask
+        # for a key at install time, which is all of them: DigitalOcean's
+        # Marketplace runs `helm upgrade --atomic` with a fixed values file and no
+        # way to pass a secret, so the pod crash-looped and the release rolled
+        # back. Idling turns "no key" into a state a human can resolve afterwards
+        # rather than a failed install, and the loop picks the key up on its own
+        # when the Secret lands.
+        idle_until_configured print_unclaimed_help watch
     fi
 fi
 
