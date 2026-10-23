@@ -343,6 +343,7 @@ type MalwareScanConfig struct {
 	Time                string   `json:"time"`                    // "03:00" (HH:MM in server local time)
 	Intensity           string   `json:"intensity"`               // "low", "medium", "high"
 	CustomScanPaths     []string `json:"custom_scan_paths"`       // additional paths to scan (e.g. "/home/*/public_html")
+	ExcludePaths        []string `json:"exclude_paths"`           // paths never to scan, scheduled or realtime
 	FanotifyEnabled     bool     `json:"fanotify_enabled"`        // user toggle: enable/disable real-time monitoring
 	FanotifyPermEnabled bool     `json:"fanotify_perm_enabled"`   // opt-in: allow fanotify to block malicious files
 }

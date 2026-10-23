@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.80"
+var version = "1.4.82"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -1290,6 +1290,20 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		cfg := sync.Config.MalwareScanConfig
 		malwareScheduler.UpdateConfig(cfg.Enabled, cfg.Frequency, cfg.Time, cfg.Intensity)
 		malwareCustomPaths = cfg.CustomScanPaths
+
+		// One exclusion list, shared by the scheduled scan and the realtime watcher. A
+		// path the operator excluded has to be excluded in both: the realtime watcher is
+		// where a continuously-rewritten file does the real damage, because it reports
+		// every rewrite.
+		if malwareScanner != nil {
+			malwareScanner.Exclusions.SetPatterns(cfg.ExcludePaths)
+			if malwareRTWatcher != nil {
+				malwareRTWatcher.SetExclusions(malwareScanner.Exclusions)
+			}
+			if n := malwareScanner.Exclusions.Count(); n > 0 {
+				log.Printf("[malware] %d scan exclusion(s) active", n)
+			}
+		}
 
 		// Apply fanotify settings from panel
 		if malwareFanotify != nil {
