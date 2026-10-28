@@ -8,9 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defensia/agent/internal/monitor"
 )
 
 // DBPattern pairs a compiled regex with the event reason.
@@ -150,36 +154,108 @@ func HasDBService() bool {
 	return len(detectDBLogPaths()) > 0
 }
 
-// ExposedDBPorts checks if database ports are publicly accessible and returns warnings.
-func ExposedDBPorts() []string {
-	dbPorts := map[int]string{
-		3306:  "MySQL/MariaDB",
-		5432:  "PostgreSQL",
-		27017: "MongoDB",
-		6379:  "Redis",
-	}
+// dbPorts are the database ports worth reporting on, and the service names used in
+// the operator-facing wording.
+var dbPorts = map[int]string{
+	3306:  "MySQL/MariaDB",
+	5432:  "PostgreSQL",
+	27017: "MongoDB",
+	6379:  "Redis",
+}
 
-	var warnings []string
+// DBServiceName names a database port for operator-facing text. Returns a generic
+// label for a port not in the table, so a caller never prints an empty service name.
+func DBServiceName(port int) string {
+	if name, ok := dbPorts[port]; ok {
+		return name
+	}
+	return fmt.Sprintf("Database on port %d", port)
+}
+
+// DBExposure is one database port's reachability, with the evidence for it.
+//
+// This carries the bind address because the previous version did not. It returned
+// only the sentence "MySQL/MariaDB is exposed publicly on port 3306", so when a
+// customer disputed the finding on 28-oct-2026 neither they nor we could check the
+// claim against their machine. A critical alert that cannot be verified from its own
+// record is worse than no alert: it cannot be acted on and it cannot be adjudicated.
+type DBExposure struct {
+	Port     int
+	Service  string
+	Bind     string
+	Exposure monitor.Exposure
+}
+
+// Warning renders the operator-facing sentence. The private case gets its own
+// wording: that listener really is reachable from its network, so staying silent
+// would be wrong, but calling it "publicly exposed" would also be wrong.
+func (d DBExposure) Warning() string {
+	switch d.Exposure {
+	case monitor.ExposureWildcard:
+		return fmt.Sprintf("%s is listening on every interface (%s:%d) and may be reachable from the internet", d.Service, d.Bind, d.Port)
+	case monitor.ExposurePublic:
+		return fmt.Sprintf("%s is exposed publicly on %s:%d", d.Service, d.Bind, d.Port)
+	case monitor.ExposurePrivate:
+		return fmt.Sprintf("%s is reachable on the private network at %s:%d", d.Service, d.Bind, d.Port)
+	default:
+		return fmt.Sprintf("%s is bound to localhost (%s:%d) and is not reachable off this host", d.Service, d.Bind, d.Port)
+	}
+}
+
+// Severity maps the exposure onto the panel's severities.
+func (d DBExposure) Severity() string {
+	switch d.Exposure {
+	case monitor.ExposureWildcard, monitor.ExposurePublic:
+		return "critical"
+	case monitor.ExposurePrivate:
+		return "warning"
+	default:
+		return "info"
+	}
+}
+
+// Details is the event payload — enough for the operator to confirm or refute the
+// finding with a single `ss -tlnp` on their own machine.
+func (d DBExposure) Details() map[string]string {
+	return map[string]string{
+		"warning":  d.Warning(),
+		"service":  d.Service,
+		"port":     strconv.Itoa(d.Port),
+		"bind":     d.Bind,
+		"exposure": string(d.Exposure),
+	}
+}
+
+// ExposedDBPorts reports every listening database port, classified.
+//
+// Returns loopback-bound ports too, so a caller tracking state can tell "no longer
+// exposed" apart from "no longer running" — the first should close an alert, the
+// second should not. Callers that only want problems filter on Exposure.
+//
+// The previous version gated each port on net.DialTimeout("tcp", "0.0.0.0:<port>").
+// On Linux, dialling 0.0.0.0 connects to loopback, so that succeeded for a database
+// bound only to 127.0.0.1 — it never decided anything, while costing a 2s timeout per
+// port on hosts where nothing listens. The ss parse was always what decided.
+func ExposedDBPorts() []DBExposure {
+	listeners := monitor.ListeningPorts()
+
+	var out []DBExposure
 	for port, name := range dbPorts {
-		// Check if port is listening
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("0.0.0.0:%d", port), 2*time.Second)
-		if err != nil {
+		l, listening := listeners[port]
+		if !listening {
 			continue
 		}
-		conn.Close()
-
-		// Port is listening — check if it's bound to 0.0.0.0 (all interfaces)
-		out, err := exec.Command("ss", "-tlnp", fmt.Sprintf("sport = %d", port)).Output()
-		if err != nil {
-			continue
-		}
-		output := string(out)
-		if strings.Contains(output, "0.0.0.0:"+fmt.Sprintf("%d", port)) || strings.Contains(output, "*:"+fmt.Sprintf("%d", port)) {
-			warnings = append(warnings, fmt.Sprintf("%s is exposed publicly on port %d", name, port))
-		}
+		out = append(out, DBExposure{
+			Port:     port,
+			Service:  name,
+			Bind:     l.Bind,
+			Exposure: l.Exposure,
+		})
 	}
 
-	return warnings
+	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
+
+	return out
 }
 
 // NewDBWatcher creates a watcher for database logs.

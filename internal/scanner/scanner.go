@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/defensia/agent/internal/monitor"
 )
 
 // Finding represents a single security check result.
@@ -214,40 +215,69 @@ func checkOpenPorts() []Finding {
 		27017: {"MongoDB", "critical"},
 	}
 
-	// Get actual bind addresses from ss (more reliable than connecting to localhost)
-	exposedPorts := getExposedPorts()
+	// Classify through monitor so this check and the db_exposed event in
+	// internal/watcher cannot drift apart again. They used to disagree: a database on
+	// 192.168.1.10:3306 was titled "exposed externally" here and passed over in
+	// silence there, and monitor.IsPrivateIP already existed, unused by both.
+	listeners := monitor.ListeningPorts()
 
 	for port, info := range dangerousPorts {
-		bindAddr, listening := exposedPorts[port]
+		l, listening := listeners[port]
 		if !listening {
 			continue
 		}
 
-		// Services bound to 127.0.0.1 or ::1 are safe (localhost only)
-		if bindAddr == "127.0.0.1" || bindAddr == "::1" || bindAddr == "[::1]" {
+		details := map[string]string{
+			"port":     fmt.Sprintf("%d", port),
+			"service":  info.service,
+			"bind":     l.Bind,
+			"exposure": string(l.Exposure),
+		}
+
+		switch l.Exposure {
+		case monitor.ExposureLoopback:
 			findings = append(findings, Finding{
 				Category:    "open_ports",
 				Severity:    "info",
 				CheckID:     fmt.Sprintf("PORT_%d", port),
 				Title:       fmt.Sprintf("%s port %d is bound to localhost (safe)", info.service, port),
-				Description: fmt.Sprintf("%s is listening on %s:%d — not externally accessible", info.service, bindAddr, port),
-				Details:     map[string]string{"port": fmt.Sprintf("%d", port), "service": info.service, "bind": bindAddr},
+				Description: fmt.Sprintf("%s is listening on %s:%d — not reachable off this host", info.service, l.Bind, port),
+				Details:     details,
 				Passed:      true,
 			})
-			continue
-		}
 
-		// Service is exposed on 0.0.0.0 or a public IP — real risk
-		findings = append(findings, Finding{
-			Category:       "open_ports",
-			Severity:       info.severity,
-			CheckID:        fmt.Sprintf("PORT_%d", port),
-			Title:          fmt.Sprintf("%s port %d is exposed externally", info.service, port),
-			Description:    fmt.Sprintf("%s is listening on %s:%d — accessible from the network", info.service, bindAddr, port),
-			Recommendation: fmt.Sprintf("Bind %s to 127.0.0.1 or restrict access with firewall rules", info.service),
-			Details:        map[string]string{"port": fmt.Sprintf("%d", port), "service": info.service, "bind": bindAddr},
-			Passed:         false,
-		})
+		case monitor.ExposurePrivate:
+			// Reachable, but only from the private network. Saying "exposed
+			// externally" here was simply false, and it is the claim a customer
+			// cannot verify and therefore stops trusting.
+			findings = append(findings, Finding{
+				Category:       "open_ports",
+				Severity:       "medium",
+				CheckID:        fmt.Sprintf("PORT_%d", port),
+				Title:          fmt.Sprintf("%s port %d is reachable on the private network", info.service, port),
+				Description:    fmt.Sprintf("%s is listening on %s:%d — reachable from that network, but not from the internet", info.service, l.Bind, port),
+				Recommendation: fmt.Sprintf("If %s only serves this host, bind it to 127.0.0.1. Otherwise restrict it to the hosts that need it.", info.service),
+				Details:        details,
+				Passed:         false,
+			})
+
+		default:
+			// Wildcard or a routable address — reachable from outside.
+			where := "accessible from the network"
+			if l.Exposure == monitor.ExposureWildcard {
+				where = "listening on every interface, including any public one"
+			}
+			findings = append(findings, Finding{
+				Category:       "open_ports",
+				Severity:       info.severity,
+				CheckID:        fmt.Sprintf("PORT_%d", port),
+				Title:          fmt.Sprintf("%s port %d is exposed externally", info.service, port),
+				Description:    fmt.Sprintf("%s is listening on %s:%d — %s", info.service, l.Bind, port, where),
+				Recommendation: fmt.Sprintf("Bind %s to 127.0.0.1 or restrict access with firewall rules", info.service),
+				Details:        details,
+				Passed:         false,
+			})
+		}
 	}
 
 	// If no dangerous ports found at all, add a pass
@@ -270,49 +300,6 @@ func checkOpenPorts() []Finding {
 	}
 
 	return findings
-}
-
-// getExposedPorts reads listening TCP ports and their bind addresses via ss.
-// Returns map[port]bindAddress where bindAddress is "0.0.0.0", "127.0.0.1", "::", etc.
-func getExposedPorts() map[int]string {
-	result := make(map[int]string)
-
-	out, err := exec.Command("ss", "-tlnH").Output()
-	if err != nil {
-		return result
-	}
-
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		// Local address is field[3], format: "127.0.0.1:6379" or "*:80" or "0.0.0.0:3306" or ":::22" or "[::]:80"
-		local := fields[3]
-		lastColon := strings.LastIndex(local, ":")
-		if lastColon == -1 {
-			continue
-		}
-		addr := local[:lastColon]
-		portStr := local[lastColon+1:]
-
-		port := 0
-		fmt.Sscanf(portStr, "%d", &port)
-		if port == 0 {
-			continue
-		}
-
-		// Normalize bind address
-		if addr == "*" || addr == "" || addr == "0.0.0.0" || addr == "[::]" || addr == "::" {
-			result[port] = "0.0.0.0"
-		} else if addr == "[::1]" || addr == "::1" {
-			result[port] = "::1"
-		} else {
-			result[port] = addr
-		}
-	}
-
-	return result
 }
 
 // ─── User Checks ───

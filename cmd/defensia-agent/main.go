@@ -33,7 +33,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.86"
+var version = "1.4.87"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -558,19 +558,15 @@ func runAgent() {
 		log.Printf("[ftpwatcher] no FTP service found — FTP brute force detection disabled")
 	}
 
-	// Check for exposed database ports (runs once at startup)
-	go func() {
-		warnings := watcher.ExposedDBPorts()
-		for _, warn := range warnings {
-			log.Printf("[dbwatcher] WARNING: %s", warn)
-			apiClient.ReportEvents([]api.EventRequest{{
-				Type:       "db_exposed",
-				Severity:   "critical",
-				Details:    map[string]string{"warning": warn},
-				OccurredAt: time.Now().UTC().Format(time.RFC3339),
-			}})
-		}
-	}()
+	// Watch database port exposure, re-checking on a ticker and reporting only when
+	// it changes.
+	//
+	// This used to run once at startup and never again, so an operator who fixed the
+	// bind address was left with a permanent critical alert and no way to clear it —
+	// only an agent restart re-ran the check. Reporting transitions rather than state
+	// means a resolved finding says so, and an unchanged one stays quiet instead of
+	// posting the same event every interval.
+	go watchDBExposure(apiClient)
 
 	// Initialize malware scanner globals
 	malwareScanner = malware.New()
@@ -2376,4 +2372,74 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		},
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 	}})
+}
+
+// dbExposureInterval is how often database port exposure is re-checked. Long
+// enough that it costs nothing, short enough that a fixed bind address stops
+// alerting the same working day.
+const dbExposureInterval = 30 * time.Minute
+
+// watchDBExposure reports database ports becoming, or ceasing to be, reachable.
+//
+// It reports transitions, not state. The first pass establishes a baseline and
+// reports whatever is already reachable; after that an event is sent only when a
+// port's exposure actually changes. That keeps a 30-minute ticker from posting the
+// same critical event forty-eight times a day, and means an operator who moves
+// MySQL to 127.0.0.1 gets an event saying so rather than silence.
+func watchDBExposure(client *api.Client) {
+	known := make(map[int]monitor.Exposure)
+
+	for {
+		current := make(map[int]monitor.Exposure)
+
+		for _, d := range watcher.ExposedDBPorts() {
+			current[d.Port] = d.Exposure
+
+			if prev, seen := known[d.Port]; seen && prev == d.Exposure {
+				continue
+			}
+
+			// A port that is only ever loopback is not news. Report it solely as the
+			// resolution of something that was previously reachable.
+			if !d.Exposure.Reachable() {
+				if prev, seen := known[d.Port]; !seen || !prev.Reachable() {
+					continue
+				}
+			}
+
+			log.Printf("[dbwatcher] %s: %s", d.Exposure, d.Warning())
+			client.ReportEvents([]api.EventRequest{{
+				Type:       "db_exposed",
+				Severity:   d.Severity(),
+				Details:    d.Details(),
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}
+
+		// A port that stopped listening entirely: report the resolution if it had
+		// been reachable, so the alert does not outlive the service.
+		for port, prev := range known {
+			if _, still := current[port]; still || !prev.Reachable() {
+				continue
+			}
+			service := watcher.DBServiceName(port)
+			log.Printf("[dbwatcher] %s on port %d is no longer listening", service, port)
+			client.ReportEvents([]api.EventRequest{{
+				Type:     "db_exposed",
+				Severity: "info",
+				Details: map[string]string{
+					"warning":  fmt.Sprintf("%s is no longer listening on port %d", service, port),
+					"service":  service,
+					"port":     fmt.Sprintf("%d", port),
+					"bind":     "",
+					"exposure": "closed",
+				},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			}})
+		}
+
+		known = current
+
+		time.Sleep(dbExposureInterval)
+	}
 }
