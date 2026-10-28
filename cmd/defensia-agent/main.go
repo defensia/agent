@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -33,7 +34,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.87"
+var version = "1.4.89"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
@@ -2381,13 +2382,16 @@ const dbExposureInterval = 30 * time.Minute
 
 // watchDBExposure reports database ports becoming, or ceasing to be, reachable.
 //
-// It reports transitions, not state. The first pass establishes a baseline and
-// reports whatever is already reachable; after that an event is sent only when a
-// port's exposure actually changes. That keeps a 30-minute ticker from posting the
-// same critical event forty-eight times a day, and means an operator who moves
-// MySQL to 127.0.0.1 gets an event saying so rather than silence.
+// It reports transitions, not state: an event is sent only when a port's exposure
+// actually changes. That keeps a 30-minute ticker from posting the same critical
+// event forty-eight times a day, and means an operator who moves MySQL to
+// 127.0.0.1 gets an event saying so rather than silence.
+//
+// The baseline is read from disk, not started empty, because an agent restart is
+// not a change in the host. Auto-updates restart the agent, so a memory-only
+// baseline re-reported everything on every release — see dbExposureStatePath.
 func watchDBExposure(client *api.Client) {
-	known := make(map[int]monitor.Exposure)
+	known := loadDBExposureState()
 
 	for {
 		current := make(map[int]monitor.Exposure)
@@ -2439,7 +2443,77 @@ func watchDBExposure(client *api.Client) {
 		}
 
 		known = current
+		saveDBExposureState(known)
 
 		time.Sleep(dbExposureInterval)
+	}
+}
+
+// dbExposureStatePath caches what each database port's exposure was last known to
+// be, so a restart does not re-report an unchanged state.
+//
+// Without this the map lived only in memory: every agent restart established a
+// fresh baseline and reported whatever was already reachable. Agent auto-updates
+// restart the agent, so shipping two versions in one afternoon posted the same
+// critical alert twice to a customer who had already queried the first one.
+// A var, not a const, so tests can point it at a temp directory. Nothing in
+// production reassigns it.
+var dbExposureStatePath = "/etc/defensia/db-exposure.json"
+
+// loadDBExposureState reads the cached exposures.
+//
+// A missing or unreadable file yields an empty map, which re-reports the current
+// state once. That is the deliberate direction to fail in: re-stating a real
+// exposure costs an operator one duplicate row, whereas assuming "already
+// reported" when we have no record would hide a live finding.
+func loadDBExposureState() map[int]monitor.Exposure {
+	state := make(map[int]monitor.Exposure)
+
+	data, err := os.ReadFile(dbExposureStatePath)
+	if err != nil {
+		return state
+	}
+
+	// Keyed by port as a string: JSON object keys are always strings.
+	var raw map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		log.Printf("[dbwatcher] exposure state unreadable, re-reporting current state: %v", err)
+		return state
+	}
+
+	for portStr, exposure := range raw {
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			continue
+		}
+		state[port] = monitor.Exposure(exposure)
+	}
+
+	return state
+}
+
+// saveDBExposureState writes the cache, replacing it atomically so a crash
+// mid-write cannot leave a truncated file that reads as "nothing known".
+func saveDBExposureState(state map[int]monitor.Exposure) {
+	raw := make(map[string]string, len(state))
+	for port, exposure := range state {
+		raw[strconv.Itoa(port)] = string(exposure)
+	}
+
+	data, err := json.Marshal(raw)
+	if err != nil {
+		log.Printf("[dbwatcher] failed to encode exposure state: %v", err)
+		return
+	}
+
+	tmp := dbExposureStatePath + ".tmp"
+	// 0600: this names the database ports the host listens on.
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		log.Printf("[dbwatcher] failed to write exposure state: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, dbExposureStatePath); err != nil {
+		log.Printf("[dbwatcher] failed to replace exposure state: %v", err)
+		os.Remove(tmp)
 	}
 }
