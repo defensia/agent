@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -395,7 +396,10 @@ func sshConfigValue(content, key string) string {
 }
 
 func isPortOpen(host string, port int) bool {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	// JoinHostPort, not Sprintf: an IPv6 literal has to be bracketed, so
+	// "%s:%d" turns ::1 into "::1:3306", which never dials and reports every
+	// IPv6-bound service as closed.
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 	if err != nil {
 		return false
