@@ -212,3 +212,86 @@ func withGlobs(t *testing.T, fpm, lsapi []string) {
 		os.Setenv("PATH", origPath)
 	})
 }
+
+// The package names are where this is easiest to get quietly wrong: a bad name
+// means pkgmgr answers Unknown for software that is perfectly well managed, and
+// the panel then reports advisories the distribution has already patched.
+func TestPackageCandidates(t *testing.T) {
+	cases := []struct {
+		name string
+		sw   KeySoftware
+		want []string
+	}{
+		{
+			name: "LiteSpeed PHP uses the compact branch, as LiteSpeed names it",
+			sw:   KeySoftware{Name: "PHP-LSAPI 8.4", Version: "8.4.27"},
+			want: []string{"lsphp84"},
+		},
+		{
+			name: "PHP-FPM uses the dotted branch, as Debian names it",
+			sw:   KeySoftware{Name: "PHP-FPM 8.3", Version: "8.3.36"},
+			want: []string{"php8.3-fpm", "php-fpm"},
+		},
+		{
+			name: "the CLI row asks about the CLI package",
+			sw:   KeySoftware{Name: "PHP", Version: "8.3.36"},
+			want: []string{"php8.3-cli", "php8.3-common", "php-cli", "php"},
+		},
+		{
+			name: "Apache covers both distro families",
+			sw:   KeySoftware{Name: "Apache", Version: "2.4.58"},
+			want: []string{"apache2", "httpd"},
+		},
+		{
+			name: "kernel covers Ubuntu, Debian and RHEL naming",
+			sw:   KeySoftware{Name: "Linux Kernel", Version: "6.8.0-147-generic"},
+			want: []string{"linux-image-generic", "linux-image-amd64", "kernel", "kernel-core"},
+		},
+		{
+			name: "nginx must not be asked about as nginx-common only",
+			sw:   KeySoftware{Name: "Nginx", Version: "1.24.0"},
+			want: []string{"nginx", "nginx-core"},
+		},
+		{
+			name: "an entry we have no package name for stays unverified",
+			sw:   KeySoftware{Name: "Web Server", Version: "-"},
+			want: nil,
+		},
+	}
+
+	for _, c := range cases {
+		got := packageCandidates(c.sw)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: packageCandidates() = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: packageCandidates()[%d] = %q, want %q", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestBranchFormatting(t *testing.T) {
+	for version, want := range map[string]string{"8.4.27": "8.4", "8.5.11": "8.5", "7.4.33": "7.4", "": "", "garbage": ""} {
+		if got := branchDotted(version); got != want {
+			t.Errorf("branchDotted(%q) = %q, want %q", version, got, want)
+		}
+	}
+	for version, want := range map[string]string{"8.4.27": "84", "8.5.11": "85", "": ""} {
+		if got := branchCompact(version); got != want {
+			t.Errorf("branchCompact(%q) = %q, want %q", version, got, want)
+		}
+	}
+}
+
+// An entry with no package name must come back untouched rather than carrying a
+// verdict nobody produced.
+func TestWithPackageVerdictLeavesUnmappedEntriesAlone(t *testing.T) {
+	in := []KeySoftware{{Name: "Web Server", Version: "-", Status: "not_installed"}}
+	out := withPackageVerdict(in)
+	if out[0].PkgVerdict != "" || out[0].PkgName != "" {
+		t.Errorf("unmapped entry gained a verdict: %+v", out[0])
+	}
+}
