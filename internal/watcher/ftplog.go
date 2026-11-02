@@ -7,15 +7,20 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// FTPPattern pairs a compiled regex with the event reason.
+// FTPPattern pairs a compiled regex with the event reason, the daemon whose log
+// format it recognises, and what the line says went wrong. The last two are not
+// recoverable from the line afterwards, so they are recorded here.
 type FTPPattern struct {
 	Re     *regexp.Regexp
 	Reason string
+	Daemon string
+	Detail string
 }
 
 // ftpPatterns contains all FTP auth detection patterns.
@@ -29,17 +34,73 @@ type FTPPattern struct {
 //   - "proftpd...[X.X.X.X]...no such user"
 //
 // Pure-FTPd:
-//   - "pure-ftpd:...[X.X.X.X]...Authentication failed"
+//   - "pure-ftpd: (?@X.X.X.X) [WARNING] Authentication failed for user [name]"
+//   - "pure-ftpd:...[X.X.X.X]...Authentication failed" (bracketed variants)
 var ftpPatterns = []FTPPattern{
 	// ── vsftpd ───────────────────────────────────────────────────────
-	{Re: regexp.MustCompile(`FAIL LOGIN: Client "([\d.]+)"`), Reason: "ftp_brute_force"},
+	{Re: regexp.MustCompile(`FAIL LOGIN: Client "([\d.]+)"`), Reason: "ftp_brute_force", Daemon: "vsftpd", Detail: "login_failed"},
 
 	// ── ProFTPD ──────────────────────────────────────────────────────
-	{Re: regexp.MustCompile(`\(\S+\[([\d.]+)\]\).*USER \S+.*Login failed`), Reason: "ftp_brute_force"},
-	{Re: regexp.MustCompile(`proftpd.*\[([\d.]+)\].*no such user`), Reason: "ftp_brute_force"},
+	{Re: regexp.MustCompile(`\(\S+\[([\d.]+)\]\).*USER \S+.*Login failed`), Reason: "ftp_brute_force", Daemon: "proftpd", Detail: "login_failed"},
+	{Re: regexp.MustCompile(`proftpd.*\[([\d.]+)\].*no such user`), Reason: "ftp_brute_force", Daemon: "proftpd", Detail: "no_such_user"},
 
 	// ── Pure-FTPd ────────────────────────────────────────────────────
-	{Re: regexp.MustCompile(`pure-ftpd:.*\[([\d.]+)\].*Authentication failed`), Reason: "ftp_brute_force"},
+	// Pure-FTPd writes the peer as "(user@1.2.3.4)", not "[1.2.3.4]". The
+	// bracket form this pattern used to require matched "[WARNING]" instead and
+	// captured nothing numeric, so no Pure-FTPd brute force was ever detected.
+	{Re: regexp.MustCompile(`pure-ftpd:\s*\(\S*@([\d.]+)\).*[Aa]uthentication failed`), Reason: "ftp_brute_force", Daemon: "pure-ftpd", Detail: "auth_failed"},
+	// Some builds and syslog templates do bracket the address; keep both.
+	{Re: regexp.MustCompile(`pure-ftpd:.*\[([\d.]+)\].*[Aa]uthentication failed`), Reason: "ftp_brute_force", Daemon: "pure-ftpd", Detail: "auth_failed"},
+}
+
+// ftpUserPatterns read the account the client tried, which every FTP daemon
+// reports in a different shape. Ordered most specific first.
+var ftpUserPatterns = []*regexp.Regexp{
+	// vsftpd: FAIL LOGIN: Client "1.2.3.4", "admin"
+	regexp.MustCompile(`FAIL LOGIN: Client "[\d.]+",\s*"([^"]+)"`),
+	// ProFTPD: USER admin (Login failed): Incorrect password
+	regexp.MustCompile(`USER (\S+)\s*\(`),
+	// ProFTPD: no such user 'admin' / no such user found: admin
+	regexp.MustCompile(`no such user[^\w]*'?([\w.@-]+)'?`),
+	// Pure-FTPd: Authentication failed for user [admin]
+	regexp.MustCompile(`[Aa]uthentication failed for user \[([^\]]+)\]`),
+	// Generic trailing "user admin"
+	regexp.MustCompile(`\buser\s+'?([\w.@-]+)'?`),
+}
+
+// ftpObservation is what one matched log line tells us. Everything beyond IP and
+// Reason is optional: FTP logs vary by daemon, and a consumer must treat an
+// absent key as normal rather than as an error.
+type ftpObservation struct {
+	IP     string
+	Reason string
+	Daemon string
+	Detail string
+	User   string
+}
+
+// details renders the observation as the event payload, omitting what the line
+// did not carry so a consumer can tell "not in this log line" from "empty".
+//
+// These events used to ship an empty map. Measured across the fleet, every
+// single ftp_brute_force event carried no payload at all, which makes an alert
+// impossible to verify or dispute — the same defect that lost us an argument
+// with a customer over a db_exposed finding.
+func (o ftpObservation) details(attempts int) map[string]string {
+	d := map[string]string{
+		"attempts": strconv.Itoa(attempts),
+	}
+	if o.Daemon != "" {
+		d["service"] = o.Daemon
+	}
+	if o.Detail != "" {
+		d["reason"] = o.Detail
+	}
+	if o.User != "" {
+		d["target_user"] = o.User
+	}
+
+	return d
 }
 
 // FTPWatcher tails FTP logs and calls onBan when an IP exceeds the threshold.
@@ -287,28 +348,41 @@ func (w *FTPWatcher) tail() error {
 	return nil
 }
 
-func (w *FTPWatcher) processLine(line string) {
-	var ip, reason string
+// observeFTPLine extracts everything one log line carries. Separate from
+// processLine so the pattern table can be tested against real log lines rather
+// than against a re-implementation of this loop.
+func observeFTPLine(line string) (ftpObservation, bool) {
 	for _, p := range ftpPatterns {
 		m := p.Re.FindStringSubmatch(line)
 		if len(m) >= 2 {
-			ip = m[1]
-			reason = p.Reason
-			break
+			return ftpObservation{
+				IP:     m[1],
+				Reason: p.Reason,
+				Daemon: p.Daemon,
+				Detail: p.Detail,
+				User:   firstSubmatch(line, ftpUserPatterns),
+			}, true
 		}
 	}
-	if ip == "" {
-		return
-	}
 
-	if isPrivateIP(ip) {
-		return
-	}
-
-	w.recordAttempt(ip, reason)
+	return ftpObservation{}, false
 }
 
-func (w *FTPWatcher) recordAttempt(ip, reason string) {
+func (w *FTPWatcher) processLine(line string) {
+	obs, ok := observeFTPLine(line)
+	if !ok {
+		return
+	}
+
+	if isPrivateIP(obs.IP) {
+		return
+	}
+
+	w.recordAttempt(obs)
+}
+
+func (w *FTPWatcher) recordAttempt(obs ftpObservation) {
+	ip, reason := obs.IP, obs.Reason
 	now := time.Now()
 
 	w.mu.Lock()
@@ -328,9 +402,9 @@ func (w *FTPWatcher) recordAttempt(ip, reason string) {
 			w.banned[ip] = true
 			if w.monitorMode {
 				if w.onEvent != nil {
-					go w.onEvent(ip, reason, "critical", map[string]string{
-						"reason": banReason,
-					})
+					d := obs.details(1)
+					d["reason"] = banReason
+					go w.onEvent(ip, reason, "critical", d)
 				}
 			} else {
 				go w.onBan(ip, banReason, 1)
@@ -339,13 +413,8 @@ func (w *FTPWatcher) recordAttempt(ip, reason string) {
 		}
 	}
 
-	// Report event for monitor mode or event tracking
-	if w.onEvent != nil {
-		severity := "critical"
-		go w.onEvent(ip, reason, severity, map[string]string{})
-	}
-
-	// Threshold check
+	// Count the attempt before reporting it, so the event carries how many
+	// times this IP has tried inside the window rather than a bare "1".
 	var recent []time.Time
 	for _, t := range w.attempts[ip] {
 		if now.Sub(t) <= w.window {
@@ -355,6 +424,11 @@ func (w *FTPWatcher) recordAttempt(ip, reason string) {
 
 	recent = append(recent, now)
 	w.attempts[ip] = recent
+
+	// Report event for monitor mode or event tracking
+	if w.onEvent != nil {
+		go w.onEvent(ip, reason, "critical", obs.details(len(recent)))
+	}
 
 	if len(recent) >= w.threshold {
 		w.banned[ip] = true
