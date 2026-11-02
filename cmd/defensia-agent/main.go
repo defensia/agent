@@ -35,7 +35,7 @@ import (
 	"github.com/defensia/agent/internal/ws"
 )
 
-var version = "1.4.91"
+var version = "1.4.92"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
 var malwareScanRunning  atomic.Bool
