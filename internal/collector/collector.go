@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defensia/agent/internal/monitor"
+	"github.com/defensia/agent/internal/pkgmgr"
 	"github.com/defensia/agent/internal/webserver"
 )
 
@@ -34,6 +35,24 @@ type KeySoftware struct {
 	Version  string `json:"version"`
 	Status   string `json:"status"`   // up_to_date, outdated, eol, not_installed
 	Category string `json:"category"` // system, runtime, database, webserver, security, container
+
+	// PkgVerdict is what the host's package manager says: "current",
+	// "update_pending", or "unknown". Status above is a version threshold
+	// compiled into this agent and goes stale the moment upstream moves; this is
+	// the live answer from the machine itself.
+	//
+	// The distinction matters because the panel suppresses CVE advisories for
+	// distribution-packaged software the vendor has already patched — Ubuntu
+	// backports security fixes into PHP 8.3.6 without ever moving the version, so
+	// comparing upstream numbers is meaningless there. Suppression must act only
+	// on "current". "unknown" means we could not ask, and a package we cannot see
+	// must never buy itself silence.
+	//
+	// omitempty throughout: an older panel ignores these, and a newer panel can
+	// tell an agent that does not send them from one that sent "unknown".
+	PkgVerdict string `json:"pkg_verdict,omitempty"`
+	PkgManager string `json:"pkg_manager,omitempty"` // apt, dnf, yum
+	PkgName    string `json:"pkg_name,omitempty"`    // the package actually consulted
 }
 
 // Package represents a single installed package.
@@ -139,6 +158,106 @@ func getLastUpdateTime() string {
 
 // ─── Key Software Detection ───
 
+// packageCandidates maps an inventory entry to the package names that could
+// provide it, most specific first. The same software is named differently across
+// distributions — apache2 and httpd, mysql-server and mariadb-server — and PHP
+// is named per branch, so the branch is read back out of the row.
+//
+// A name with no candidates is left unverified rather than guessed at.
+func packageCandidates(sw KeySoftware) []string {
+	name := sw.Name
+
+	switch {
+	case strings.HasPrefix(name, "PHP-LSAPI"):
+		// OpenLiteSpeed installs lsphp84 and friends from the LiteSpeed
+		// repository, which apt does manage.
+		if b := branchCompact(sw.Version); b != "" {
+			return []string{"lsphp" + b}
+		}
+		return nil
+	case strings.HasPrefix(name, "PHP-FPM"):
+		if b := branchDotted(sw.Version); b != "" {
+			return []string{"php" + b + "-fpm", "php-fpm"}
+		}
+		return []string{"php-fpm"}
+	case name == "PHP":
+		if b := branchDotted(sw.Version); b != "" {
+			return []string{"php" + b + "-cli", "php" + b + "-common", "php-cli", "php"}
+		}
+		return []string{"php-cli", "php"}
+	}
+
+	switch name {
+	case "Linux Kernel":
+		return []string{"linux-image-generic", "linux-image-amd64", "kernel", "kernel-core"}
+	case "OpenSSH":
+		return []string{"openssh-server", "openssh"}
+	case "Nginx":
+		return []string{"nginx", "nginx-core"}
+	case "Apache":
+		return []string{"apache2", "httpd"}
+	case "LiteSpeed":
+		return []string{"openlitespeed", "lsws"}
+	case "Caddy":
+		return []string{"caddy"}
+	case "MySQL":
+		return []string{"mysql-server", "mysql-community-server"}
+	case "MariaDB":
+		return []string{"mariadb-server"}
+	case "Node.js":
+		return []string{"nodejs"}
+	case "Python":
+		return []string{"python3", "python3-minimal"}
+	case "Docker":
+		return []string{"docker-ce", "docker.io", "docker"}
+	}
+
+	return nil
+}
+
+// branchDotted turns "8.3.36" into "8.3"; branchCompact turns it into "83",
+// which is how LiteSpeed names its packages.
+func branchDotted(version string) string {
+	major, minor := parseMajorMinor(version)
+	if major == 0 {
+		return ""
+	}
+	return strconv.Itoa(major) + "." + strconv.Itoa(minor)
+}
+
+func branchCompact(version string) string {
+	major, minor := parseMajorMinor(version)
+	if major == 0 {
+		return ""
+	}
+	return strconv.Itoa(major) + strconv.Itoa(minor)
+}
+
+// withPackageVerdict asks the package manager about each entry and records the
+// answer. The version-threshold Status is left untouched: it still drives the
+// existing panel display, and replacing it in the same change would conflate a
+// new signal with a change of meaning for an old one.
+func withPackageVerdict(sw []KeySoftware) []KeySoftware {
+	// One manager lookup for the whole pass; Query would otherwise re-detect it
+	// per package.
+	if pkgmgr.Manager() == "" {
+		return sw
+	}
+
+	for i := range sw {
+		candidates := packageCandidates(sw[i])
+		if len(candidates) == 0 {
+			continue
+		}
+		r := pkgmgr.Query(candidates...)
+		sw[i].PkgVerdict = string(r.Verdict)
+		sw[i].PkgManager = r.Manager
+		sw[i].PkgName = r.Package
+	}
+
+	return sw
+}
+
 func collectKeySoftware() []KeySoftware {
 	var sw []KeySoftware
 	sw = append(sw, detectKernel())
@@ -158,7 +277,8 @@ func collectKeySoftware() []KeySoftware {
 			result = append(result, s)
 		}
 	}
-	return result
+
+	return withPackageVerdict(result)
 }
 
 func detectKernel() KeySoftware {
