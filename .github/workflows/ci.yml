@@ -8,7 +8,8 @@ name: CI
 #
 # gofmt is reported but not enforced: the tree predates any formatting gate and
 # reformatting files this job does not own would bury real diffs. Drift stays
-# visible in the log instead.
+# visible in the log instead. go vet does block — the module is clean, so a new
+# finding there is a regression rather than inherited debt.
 on:
   push:
     branches: [main]
@@ -37,8 +38,9 @@ jobs:
       - name: Test
         run: go test -race ./...
 
-      - name: Vet (report only)
-        continue-on-error: true
+      # Blocking: the two long-standing findings are fixed and the module is
+      # clean, so from here a new one is a regression rather than inherited debt.
+      - name: Vet
         run: go vet ./...
 
       - name: gofmt (report only)
