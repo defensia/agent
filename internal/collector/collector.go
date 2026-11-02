@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defensia/agent/internal/monitor"
+	"github.com/defensia/agent/internal/webserver"
 )
 
 // AuditResult is the payload sent to the server.
@@ -192,46 +193,54 @@ func detectOpenSSH() KeySoftware {
 	return KeySoftware{Name: "OpenSSH", Version: version, Status: status, Category: "security"}
 }
 
+// detectWebServer reports the web server that actually serves this host.
+//
+// It asks internal/webserver, the same resolver the heartbeat uses, rather than
+// walking installed packages in the order nginx, apache2, httpd as it used to.
+// That order reported an idle Apache package as the web server on an
+// OpenLiteSpeed box — so the inventory said "Apache 2.4.58" while the heartbeat
+// said "litespeed", about the same machine at the same time, and the Apache
+// version was the one that got matched against advisories.
 func detectWebServer() KeySoftware {
-	// Nginx
-	if out, err := exec.Command("nginx", "-v").CombinedOutput(); err == nil || len(out) > 0 {
-		version := parseNginxVer(string(out))
-		if version != "" {
-			major, minor := parseMajorMinor(version)
-			status := "up_to_date"
-			if major == 1 && minor < 22 {
-				status = "eol"
-			} else if major == 1 && minor < 24 {
-				status = "outdated"
-			}
-			return KeySoftware{Name: "Nginx", Version: version, Status: status, Category: "webserver"}
-		}
+	name, version := webserver.Detect()
+	display := webserver.DisplayName(name)
+	if display == "" || version == "" {
+		return KeySoftware{Name: "Web Server", Version: "-", Status: "not_installed", Category: "webserver"}
 	}
-	// Apache
-	for _, bin := range []string{"apache2", "httpd"} {
-		if out, err := exec.Command(bin, "-v").Output(); err == nil {
-			version := parseApacheVer(string(out))
-			if version != "" {
-				parts := strings.Split(version, ".")
-				patch := 0
-				if len(parts) >= 3 {
-					patch, _ = strconv.Atoi(parts[2])
-				}
-				status := "up_to_date"
-				if patch < 54 {
-					status = "outdated"
-				}
-				return KeySoftware{Name: "Apache", Version: version, Status: status, Category: "webserver"}
-			}
-		}
-	}
-	return KeySoftware{Name: "Web Server", Version: "-", Status: "not_installed", Category: "webserver"}
+
+	return KeySoftware{Name: display, Version: version, Status: webServerStatus(name, version), Category: "webserver"}
 }
 
-// detectPHP reports the PHP command line binary. This is NOT necessarily the PHP
-// that serves the web: a host can run a different build in its PHP-FPM pools or
-// behind LiteSpeed's lsphp, and can serve the web with no CLI binary installed at
-// all. See detectServingPHP for the web facing side.
+// webServerStatus keeps the pre-existing per-server verdicts. LiteSpeed and
+// Caddy have none, so they report "unknown" rather than claiming to be current:
+// the whole key_software status rule is replaced by the real package manager
+// signal in a separate change, and inventing a threshold here would only have to
+// be removed again.
+func webServerStatus(name, version string) string {
+	major, minor := parseMajorMinor(version)
+	switch name {
+	case "nginx":
+		if major == 1 && minor < 22 {
+			return "eol"
+		}
+		if major == 1 && minor < 24 {
+			return "outdated"
+		}
+		return "up_to_date"
+	case "apache":
+		patch := 0
+		if parts := strings.Split(version, "."); len(parts) >= 3 {
+			patch, _ = strconv.Atoi(parts[2])
+		}
+		if patch < 54 {
+			return "outdated"
+		}
+		return "up_to_date"
+	}
+
+	return "unknown"
+}
+
 func detectPHP() KeySoftware {
 	if _, err := exec.LookPath("php"); err != nil {
 		return KeySoftware{Name: "PHP", Version: "-", Status: "not_installed", Category: "runtime"}
@@ -635,34 +644,6 @@ func parseSSHVersion(raw string) string {
 		}
 	}
 	return "unknown"
-}
-
-func parseNginxVer(raw string) string {
-	idx := strings.Index(raw, "nginx/")
-	if idx == -1 {
-		return ""
-	}
-	rest := raw[idx+6:]
-	fields := strings.Fields(rest)
-	if len(fields) > 0 {
-		return strings.TrimSpace(fields[0])
-	}
-	return ""
-}
-
-func parseApacheVer(raw string) string {
-	idx := strings.Index(raw, "Apache/")
-	if idx == -1 {
-		return ""
-	}
-	rest := raw[idx+7:]
-	fields := strings.FieldsFunc(rest, func(c rune) bool {
-		return c == ' ' || c == '(' || c == ')'
-	})
-	if len(fields) > 0 {
-		return strings.TrimSpace(fields[0])
-	}
-	return ""
 }
 
 func parseMySQLVer(raw string) string {
