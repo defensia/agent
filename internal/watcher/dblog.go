@@ -17,10 +17,14 @@ import (
 	"github.com/defensia/agent/internal/monitor"
 )
 
-// DBPattern pairs a compiled regex with the event reason.
+// DBPattern pairs a compiled regex with the event reason, the engine whose log
+// format it recognises, and what the line says went wrong. The last two are not
+// recoverable from the line afterwards, so they are recorded here.
 type DBPattern struct {
 	Re     *regexp.Regexp
 	Reason string
+	Engine string
+	Detail string
 }
 
 // dbPatterns contains all database auth detection patterns.
@@ -41,18 +45,64 @@ type DBPattern struct {
 //   - "Unauthorized ... client: X.X.X.X"
 var dbPatterns = []DBPattern{
 	// ── MySQL / MariaDB ───────────────────────────────────────────────
-	{Re: regexp.MustCompile(`Access denied for user '\S+'@'([\d.]+)'`), Reason: "db_brute_force"},
-	{Re: regexp.MustCompile(`Host '([\d.]+)' is blocked because of many connection errors`), Reason: "db_brute_force"},
-	{Re: regexp.MustCompile(`Aborted connection.*host:\s*'([\d.]+)'`), Reason: "db_suspicious"},
+	{Re: regexp.MustCompile(`Access denied for user '\S+'@'([\d.]+)'`), Reason: "db_brute_force", Engine: "mysql", Detail: "access_denied"},
+	{Re: regexp.MustCompile(`Host '([\d.]+)' is blocked because of many connection errors`), Reason: "db_brute_force", Engine: "mysql", Detail: "host_blocked"},
+	{Re: regexp.MustCompile(`Aborted connection.*host:\s*'([\d.]+)'`), Reason: "db_suspicious", Engine: "mysql", Detail: "aborted_connection"},
 
 	// ── PostgreSQL ────────────────────────────────────────────────────
-	{Re: regexp.MustCompile(`FATAL:\s+password authentication failed for user.*host[= ]+"?([\d.]+)`), Reason: "db_brute_force"},
-	{Re: regexp.MustCompile(`FATAL:\s+no pg_hba\.conf entry for host "?([\d.]+)`), Reason: "db_brute_force"},
-	{Re: regexp.MustCompile(`could not receive data from client.*host[= ]+"?([\d.]+)`), Reason: "db_suspicious"},
+	{Re: regexp.MustCompile(`FATAL:\s+password authentication failed for user.*host[= ]+"?([\d.]+)`), Reason: "db_brute_force", Engine: "postgresql", Detail: "password_auth_failed"},
+	{Re: regexp.MustCompile(`FATAL:\s+no pg_hba\.conf entry for host "?([\d.]+)`), Reason: "db_brute_force", Engine: "postgresql", Detail: "no_pg_hba_entry"},
+	{Re: regexp.MustCompile(`could not receive data from client.*host[= ]+"?([\d.]+)`), Reason: "db_suspicious", Engine: "postgresql", Detail: "client_disconnected"},
 
 	// ── MongoDB ───────────────────────────────────────────────────────
-	{Re: regexp.MustCompile(`(?:Failed to authenticate|Authentication failed).*client:\s*([\d.]+)`), Reason: "db_brute_force"},
-	{Re: regexp.MustCompile(`Unauthorized.*client:\s*([\d.]+)`), Reason: "db_brute_force"},
+	{Re: regexp.MustCompile(`(?:Failed to authenticate|Authentication failed).*client:\s*([\d.]+)`), Reason: "db_brute_force", Engine: "mongodb", Detail: "auth_failed"},
+	{Re: regexp.MustCompile(`Unauthorized.*client:\s*([\d.]+)`), Reason: "db_brute_force", Engine: "mongodb", Detail: "unauthorized"},
+}
+
+// dbUserPatterns read the account the client tried, which each engine reports
+// differently. Ordered most specific first.
+var dbUserPatterns = []*regexp.Regexp{
+	// MySQL: Access denied for user 'root'@'1.2.3.4'
+	regexp.MustCompile(`Access denied for user '([^']+)'@`),
+	// PostgreSQL: password authentication failed for user "postgres"
+	regexp.MustCompile(`authentication failed for user "([^"]+)"`),
+	// PostgreSQL: no pg_hba.conf entry for host "1.2.3.4", user "postgres"
+	regexp.MustCompile(`user "([^"]+)"`),
+	// MongoDB: Failed to authenticate admin@admin
+	regexp.MustCompile(`authenticate ([\w.@-]+)`),
+}
+
+// dbObservation is what one matched log line tells us. Everything beyond IP and
+// Reason is optional: database logs vary by engine, and a consumer must treat an
+// absent key as normal rather than as an error.
+type dbObservation struct {
+	IP     string
+	Reason string
+	Engine string
+	Detail string
+	User   string
+}
+
+// details renders the observation as the event payload, omitting what the line
+// did not carry so a consumer can tell "not in this log line" from "empty".
+//
+// These events used to ship an empty map, the same defect that made a db_exposed
+// finding impossible to adjudicate when a customer disputed it.
+func (o dbObservation) details(attempts int) map[string]string {
+	d := map[string]string{
+		"attempts": strconv.Itoa(attempts),
+	}
+	if o.Engine != "" {
+		d["engine"] = o.Engine
+	}
+	if o.Detail != "" {
+		d["reason"] = o.Detail
+	}
+	if o.User != "" {
+		d["target_user"] = o.User
+	}
+
+	return d
 }
 
 // DBLogPath holds a detected database log path and its type.
@@ -447,26 +497,39 @@ func (w *DBWatcher) tail(path string) error {
 	return nil
 }
 
-func (w *DBWatcher) processLine(line string) {
-	var ip, reason string
+// observeDBLine extracts everything one log line carries. Separate from
+// processLine so the pattern table can be tested against real log lines rather
+// than against a re-implementation of this loop.
+func observeDBLine(line string) (dbObservation, bool) {
 	for _, p := range dbPatterns {
 		m := p.Re.FindStringSubmatch(line)
 		if len(m) >= 2 {
-			ip = m[1]
-			reason = p.Reason
-			break
+			return dbObservation{
+				IP:     m[1],
+				Reason: p.Reason,
+				Engine: p.Engine,
+				Detail: p.Detail,
+				User:   firstSubmatch(line, dbUserPatterns),
+			}, true
 		}
 	}
-	if ip == "" {
-		return
-	}
-	if isPrivateIP(ip) {
-		return
-	}
-	w.recordAttempt(ip, reason)
+
+	return dbObservation{}, false
 }
 
-func (w *DBWatcher) recordAttempt(ip, reason string) {
+func (w *DBWatcher) processLine(line string) {
+	obs, ok := observeDBLine(line)
+	if !ok {
+		return
+	}
+	if isPrivateIP(obs.IP) {
+		return
+	}
+	w.recordAttempt(obs)
+}
+
+func (w *DBWatcher) recordAttempt(obs dbObservation) {
+	ip, reason := obs.IP, obs.Reason
 	now := time.Now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -484,7 +547,9 @@ func (w *DBWatcher) recordAttempt(ip, reason string) {
 			w.banned[ip] = true
 			if w.monitorMode {
 				if w.onEvent != nil {
-					go w.onEvent(ip, reason, "critical", map[string]string{"reason": banReason})
+					d := obs.details(1)
+					d["reason"] = banReason
+					go w.onEvent(ip, reason, "critical", d)
 				}
 			} else {
 				go w.onBan(ip, banReason, 1)
@@ -493,16 +558,8 @@ func (w *DBWatcher) recordAttempt(ip, reason string) {
 		}
 	}
 
-	// Report event
-	if w.onEvent != nil {
-		severity := "warning"
-		if reason == "db_brute_force" {
-			severity = "critical"
-		}
-		go w.onEvent(ip, reason, severity, map[string]string{})
-	}
-
-	// Threshold
+	// Count the attempt before reporting it, so the event carries how many times
+	// this IP has tried inside the window rather than a bare "1".
 	var recent []time.Time
 	for _, t := range w.attempts[ip] {
 		if now.Sub(t) <= w.window {
@@ -511,6 +568,15 @@ func (w *DBWatcher) recordAttempt(ip, reason string) {
 	}
 	recent = append(recent, now)
 	w.attempts[ip] = recent
+
+	// Report event
+	if w.onEvent != nil {
+		severity := "warning"
+		if reason == "db_brute_force" {
+			severity = "critical"
+		}
+		go w.onEvent(ip, reason, severity, obs.details(len(recent)))
+	}
 
 	if len(recent) >= w.threshold {
 		w.banned[ip] = true
