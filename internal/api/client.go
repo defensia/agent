@@ -203,6 +203,15 @@ type HeartbeatResponse struct {
 	LatestAgentVersion  *string `json:"latest_agent_version,omitempty"`
 	AgentDownloadBaseURL *string `json:"agent_download_base_url,omitempty"`
 	K8sDomainLimit      int     `json:"k8s_domain_limit,omitempty"`
+
+	// PendingSoftwareAudit carries an audit the panel asked for and we never ran.
+	//
+	// Audit requests used to arrive only as a WebSocket broadcast, so an agent that
+	// was offline at that moment never heard about it and the request sat unanswered
+	// for ever. Across the fleet that left servers whose newest inventory was from
+	// February still being matched against today's advisories. Offering it on the
+	// heartbeat means a request survives being missed.
+	PendingSoftwareAudit *int64 `json:"pending_software_audit,omitempty"`
 }
 
 // BanRequest reports a newly banned IP to the server.

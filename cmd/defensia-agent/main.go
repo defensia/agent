@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -924,6 +925,14 @@ func runAgent() {
 			if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
 				go updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 			}
+
+			// An audit the panel asked for while we were unreachable. The WebSocket
+			// broadcast is fire-and-forget, so without this a request missed once is
+			// missed for ever, and the server keeps being matched against whatever
+			// inventory it last happened to be listening for.
+			if resp.PendingSoftwareAudit != nil {
+				go runSoftwareAudit(apiClient, *resp.PendingSoftwareAudit)
+			}
 		}
 	}()
 
@@ -1496,8 +1505,43 @@ func runScan(client *api.Client, scanID int64) {
 	log.Printf("[scanner] scan %d complete — %d findings submitted", scanID, len(findings))
 }
 
+// startedAudits remembers which audit ids this process has already begun, so an
+// audit offered on the heartbeat is not run a second time when the WebSocket
+// broadcast for the same request arrives, or the other way round. Bounded by
+// trimming the oldest entries, since a long-lived agent would otherwise keep
+// accumulating ids.
+var startedAudits = struct {
+	sync.Mutex
+	seen  map[int64]bool
+	order []int64
+}{seen: make(map[int64]bool)}
+
+// claimAudit reports whether this audit id is ours to run, and records it.
+func claimAudit(auditID int64) bool {
+	startedAudits.Lock()
+	defer startedAudits.Unlock()
+
+	if startedAudits.seen[auditID] {
+		return false
+	}
+
+	startedAudits.seen[auditID] = true
+	startedAudits.order = append(startedAudits.order, auditID)
+	for len(startedAudits.order) > 64 {
+		delete(startedAudits.seen, startedAudits.order[0])
+		startedAudits.order = startedAudits.order[1:]
+	}
+
+	return true
+}
+
 // runSoftwareAudit collects the full software inventory and submits it to the server.
 func runSoftwareAudit(client *api.Client, auditID int64) {
+	if !claimAudit(auditID) {
+		log.Printf("[collector] audit %d already started, ignoring duplicate request", auditID)
+		return
+	}
+
 	log.Printf("[collector] starting software audit %d", auditID)
 
 	result := collector.Collect()
