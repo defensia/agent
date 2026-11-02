@@ -3,6 +3,8 @@ package collector
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -142,6 +144,7 @@ func collectKeySoftware() []KeySoftware {
 	sw = append(sw, detectOpenSSH())
 	sw = append(sw, detectWebServer())
 	sw = append(sw, detectPHP())
+	sw = append(sw, detectServingPHP()...)
 	sw = append(sw, detectMySQL())
 	sw = append(sw, detectNode())
 	sw = append(sw, detectPython())
@@ -225,23 +228,273 @@ func detectWebServer() KeySoftware {
 	return KeySoftware{Name: "Web Server", Version: "-", Status: "not_installed", Category: "webserver"}
 }
 
+// detectPHP reports the PHP command line binary. This is NOT necessarily the PHP
+// that serves the web: a host can run a different build in its PHP-FPM pools or
+// behind LiteSpeed's lsphp, and can serve the web with no CLI binary installed at
+// all. See detectServingPHP for the web facing side.
 func detectPHP() KeySoftware {
 	if _, err := exec.LookPath("php"); err != nil {
 		return KeySoftware{Name: "PHP", Version: "-", Status: "not_installed", Category: "runtime"}
 	}
-	out, err := exec.Command("php", "-r", "echo PHP_VERSION;").Output()
-	if err != nil {
+	version := ""
+	if out, err := exec.Command("php", "-r", "echo PHP_VERSION;").Output(); err == nil {
+		version = phpVersionFromEcho(string(out))
+	}
+	if version == "" {
+		// Startup warnings can swallow the echo output; the banner survives them.
+		if out, err := exec.Command("php", "-v").Output(); err == nil {
+			version = parsePHPBannerVersion(string(out))
+		}
+	}
+	if version == "" {
 		return KeySoftware{Name: "PHP", Version: "-", Status: "not_installed", Category: "runtime"}
 	}
-	version := strings.TrimSpace(string(out))
-	major, minor := parseMajorMinor(version)
-	status := "up_to_date"
-	if major < 8 || (major == 8 && minor < 1) {
-		status = "eol"
-	} else if major == 8 && minor == 1 {
-		status = "outdated"
+	// Name stays "PHP" so existing fleet queries and audit history keep working;
+	// the web facing builds are reported alongside it, one row each.
+	return KeySoftware{Name: "PHP", Version: version, Status: phpBranchStatus(version), Category: "runtime"}
+}
+
+// detectServingPHP reports the PHP builds that actually answer HTTP requests, one
+// entry per distinct version so each branch is version matched on its own instead
+// of hiding behind the CLI reading.
+//
+// Two SAPIs are covered and named apart, because "which PHP is installed" and
+// "which PHP serves" are different questions and conflating them is what made us
+// report a patched CLI as the server's runtime on an OpenLiteSpeed host.
+func detectServingPHP() []KeySoftware {
+	var sw []KeySoftware
+	used := make(map[string]bool)
+	for _, r := range servingPHPRuntimes() {
+		name := r.sapi
+		if major, minor := parseMajorMinor(r.version); major > 0 {
+			name += " " + strconv.Itoa(major) + "." + strconv.Itoa(minor)
+		}
+		if used[name] {
+			// Two builds of the same branch (system plus Remi/Sury, say): keep both
+			// rows distinguishable for the panel, which keys by name.
+			name = r.sapi + " " + r.version
+		}
+		used[name] = true
+		sw = append(sw, KeySoftware{Name: name, Version: r.version, Status: phpBranchStatus(r.version), Category: "runtime"})
 	}
-	return KeySoftware{Name: "PHP", Version: version, Status: status, Category: "runtime"}
+	return sw
+}
+
+// phpBranchStatus is the pre-existing major/minor verdict, kept as-is so this
+// change stays about detection. The whole key_software status rule is replaced by
+// the real package manager signal in a separate change.
+func phpBranchStatus(version string) string {
+	major, minor := parseMajorMinor(version)
+	if major < 8 || (major == 8 && minor < 1) {
+		return "eol"
+	}
+	if major == 8 && minor == 1 {
+		return "outdated"
+	}
+	return "up_to_date"
+}
+
+// ─── Serving PHP Resolution ───
+
+// phpFPMGlobs are the directories distributions and control panels install
+// php-fpm into. Globbed rather than hardcoded so that multi version hosts
+// (Remi, cPanel EA, Plesk, CloudLinux alt-php) report every pool build.
+var phpFPMGlobs = []string{
+	"/usr/sbin/php-fpm*",
+	"/usr/sbin/php*-fpm",
+	"/usr/bin/php-fpm*",
+	"/usr/local/sbin/php-fpm*",
+	"/usr/local/sbin/php*-fpm",
+	"/usr/local/php*/sbin/php-fpm",
+	"/opt/remi/php*/root/usr/sbin/php-fpm",
+	"/opt/cpanel/ea-php*/root/usr/sbin/php-fpm",
+	"/opt/plesk/php/*/sbin/php-fpm",
+	"/opt/alt/php*/usr/sbin/php-fpm",
+}
+
+// phpLSAPIGlobs are LiteSpeed's lsphp locations. OpenLiteSpeed and CyberPanel
+// install one tree per branch and serve through LSAPI, not FPM, so none of the
+// php-fpm patterns above ever match on those hosts — which is why every
+// OpenLiteSpeed server reported only its CLI binary.
+var phpLSAPIGlobs = []string{
+	"/usr/local/lsws/lsphp*/bin/lsphp",
+	"/usr/local/lsws/fcgi-bin/lsphp*",
+}
+
+// maxServingPHPBinaries caps how many binaries get executed, so a host with a
+// pathological number of installed branches cannot stall the audit.
+const maxServingPHPBinaries = 32
+
+// phpRuntime is one serving PHP build: its version and the SAPI that runs it.
+type phpRuntime struct {
+	version string
+	sapi    string
+}
+
+// phpFPMBinaryNames lists the php-fpm command names worth a PATH lookup.
+func phpFPMBinaryNames() []string {
+	names := []string{"php-fpm"}
+	for _, branch := range phpBranchesNewestFirst {
+		compact := strings.ReplaceAll(branch, ".", "")
+		names = append(names,
+			"php-fpm"+branch,
+			"php"+branch+"-fpm",
+			"php-fpm"+compact,
+			"php"+compact+"-fpm",
+		)
+	}
+	return names
+}
+
+// phpLSAPIBinaryNames lists the lsphp command names worth a PATH lookup.
+// LiteSpeed names its binaries with the branch compacted: lsphp84, not lsphp8.4.
+func phpLSAPIBinaryNames() []string {
+	names := []string{"lsphp"}
+	for _, branch := range phpBranchesNewestFirst {
+		names = append(names, "lsphp"+strings.ReplaceAll(branch, ".", ""))
+	}
+	return names
+}
+
+// phpBranchesNewestFirst drives the order in which branch suffixed binaries are
+// probed, so the result is stable across runs.
+var phpBranchesNewestFirst = []string{
+	"8.5", "8.4", "8.3", "8.2", "8.1", "8.0",
+	"7.4", "7.3", "7.2", "7.1", "7.0", "5.6",
+}
+
+// servingPHPBinaries resolves the serving PHP binaries present on the host to
+// absolute paths, deduplicated by symlink target so that php-fpm and php-fpm8.3
+// pointing at the same build are probed once. The SAPI each path belongs to is
+// carried along, since that is not recoverable from the version banner alone.
+func servingPHPBinaries() ([]string, map[string]string) {
+	var bins []string
+	sapiOf := make(map[string]string)
+	seen := make(map[string]bool)
+
+	add := func(path, sapi string) {
+		if len(bins) >= maxServingPHPBinaries {
+			return
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			resolved = path
+		}
+		if seen[resolved] {
+			return
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			return
+		}
+		seen[resolved] = true
+		bins = append(bins, resolved)
+		sapiOf[resolved] = sapi
+	}
+
+	// Binaries on PATH first, including the branch suffixed names the distro
+	// packages install when several branches coexist.
+	for _, name := range phpFPMBinaryNames() {
+		if path, err := exec.LookPath(name); err == nil {
+			add(path, "PHP-FPM")
+		}
+	}
+	for _, name := range phpLSAPIBinaryNames() {
+		if path, err := exec.LookPath(name); err == nil {
+			add(path, "PHP-LSAPI")
+		}
+	}
+	for _, group := range []struct {
+		globs []string
+		sapi  string
+	}{
+		{phpFPMGlobs, "PHP-FPM"},
+		{phpLSAPIGlobs, "PHP-LSAPI"},
+	} {
+		for _, pattern := range group.globs {
+			matches, err := filepath.Glob(pattern)
+			if err != nil {
+				continue
+			}
+			sort.Strings(matches)
+			for _, m := range matches {
+				add(m, group.sapi)
+			}
+		}
+	}
+	return bins, sapiOf
+}
+
+// servingPHPRuntimes runs "<bin> -v" on every serving PHP binary found and
+// returns the distinct versions, newest first. Both php-fpm and lsphp print the
+// standard PHP banner, so one parser covers both.
+func servingPHPRuntimes() []phpRuntime {
+	bins, sapiOf := servingPHPBinaries()
+	var runtimes []phpRuntime
+	seen := make(map[string]bool)
+	for _, bin := range bins {
+		out, err := exec.Command(bin, "-v").Output()
+		if err != nil && len(out) == 0 {
+			continue
+		}
+		version := parsePHPBannerVersion(string(out))
+		if version == "" {
+			continue
+		}
+		key := sapiOf[bin] + " " + version
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		runtimes = append(runtimes, phpRuntime{version: version, sapi: sapiOf[bin]})
+	}
+	sort.Slice(runtimes, func(i, j int) bool {
+		if runtimes[i].sapi != runtimes[j].sapi {
+			return runtimes[i].sapi < runtimes[j].sapi
+		}
+		return runtimes[i].version > runtimes[j].version
+	})
+	return runtimes
+}
+
+// ─── PHP Output Parsing ───
+
+// parsePHPBannerVersion extracts the version from "php -v", "php-fpm -v" or
+// "lsphp -v" output. Startup warnings are printed before the banner and also
+// begin with "PHP ", so only a line whose second field starts with a digit is
+// accepted.
+func parsePHPBannerVersion(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "PHP ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if v := fields[1]; v[0] >= '0' && v[0] <= '9' {
+			return v
+		}
+	}
+	return ""
+}
+
+// phpVersionFromEcho picks the version out of "php -r 'echo PHP_VERSION;'",
+// whose output can be preceded by startup warnings on stdout. The version is the
+// last line starting with a digit; a warning line never does.
+func phpVersionFromEcho(raw string) string {
+	lines := strings.Split(raw, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if line[0] >= '0' && line[0] <= '9' {
+			return line
+		}
+	}
+	return ""
 }
 
 func mariaDBStatus(version string) string {
