@@ -538,6 +538,8 @@ func TestDisabledNoEvents(t *testing.T) {
 	}
 }
 
+// A session that ran commands emits its own ssh_session event on logout, one per
+// PID, carrying that session's own user.
 func TestMultipleSessions(t *testing.T) {
 	var sessionEvents []map[string]string
 
@@ -552,10 +554,13 @@ func TestMultipleSessions(t *testing.T) {
 	tracker.processLine("Aug 18 12:00:00 server sshd[100]: Accepted password for user1 from 1.1.1.1 port 11111 ssh2")
 	tracker.processLine("Aug 18 12:00:05 server sshd[200]: Accepted publickey for user2 from 2.2.2.2 port 22222 ssh2")
 
+	// Each runs a command, so neither is suppressed as deploy-script noise.
+	tracker.processLine("Aug 18 12:00:10 server sudo:   user1 : TTY=pts/0 ; PWD=/home/user1 ; USER=root ; COMMAND=/bin/ls")
+	tracker.processLine("Aug 18 12:00:11 server sudo:   user2 : TTY=pts/1 ; PWD=/home/user2 ; USER=root ; COMMAND=/bin/ps")
+
 	// Logout session 100
 	tracker.processLine("Aug 18 12:01:00 server sshd[100]: pam_unix(sshd:session): session closed for user user1")
 
-	// Only one ssh_session event emitted
 	if len(sessionEvents) != 1 {
 		t.Fatalf("expected 1 ssh_session event, got %d", len(sessionEvents))
 	}
@@ -571,5 +576,27 @@ func TestMultipleSessions(t *testing.T) {
 	}
 	if sessionEvents[1]["user"] != "user2" {
 		t.Errorf("expected user2, got %q", sessionEvents[1]["user"])
+	}
+}
+
+// The contract closeSession documents: a login that runs nothing and closes
+// within five seconds is an sshpass one-liner from a deploy script, not a
+// session worth reporting. This is what the previous version of
+// TestMultipleSessions was unknowingly asserting against.
+func TestEmptyShortSessionIsSuppressed(t *testing.T) {
+	var sessionEvents int
+
+	tracker := New(func(eventType, severity string, details map[string]string) {
+		if eventType == "ssh_session" {
+			sessionEvents++
+		}
+	})
+	tracker.UpdateConfig(Config{Enabled: true})
+
+	tracker.processLine("Aug 18 12:00:00 server sshd[300]: Accepted password for deploy from 3.3.3.3 port 33333 ssh2")
+	tracker.processLine("Aug 18 12:00:01 server sshd[300]: pam_unix(sshd:session): session closed for user deploy")
+
+	if sessionEvents != 0 {
+		t.Errorf("expected the empty short session to be suppressed, got %d ssh_session events", sessionEvents)
 	}
 }
