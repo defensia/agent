@@ -1,0 +1,53 @@
+name: CI
+
+# These suites guard an agent that runs as root on every customer server we
+# protect, so they have to run before a release can carry a regression, not
+# after. Until this workflow existed nothing ran them at all: release.yml fires
+# only on tags and builds without testing, so `main` sat red on a stale session
+# test with nobody the wiser.
+#
+# gofmt is reported but not enforced: the tree predates any formatting gate and
+# reformatting files this job does not own would bury real diffs. Drift stays
+# visible in the log instead.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  test:
+    name: Build, vet & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Vet (report only)
+        continue-on-error: true
+        run: go vet ./...
+
+      - name: gofmt (report only)
+        continue-on-error: true
+        run: |
+          unformatted=$(gofmt -l . || true)
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt'd (pre-existing drift, not enforced):"
+            echo "$unformatted"
+          else
+            echo "gofmt clean"
+          fi

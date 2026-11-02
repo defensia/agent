@@ -39,6 +39,16 @@ jobs:
           bash .github/scripts/test-installer-sync.sh
           bash .github/scripts/check-installer-sync.sh
 
+      # Blocking on purpose, and for the same reason as the installer check above.
+      # A tag is the only moment a regression can still be stopped before it
+      # installs itself as root on every customer server. This repository shipped
+      # releases without ever running its own suites, which made "no release is
+      # tagged without the tests passing" a claim we could not actually back.
+      - name: Tests pass before anything is published
+        run: |
+          go build ./...
+          go test -race ./...
+
       - name: Build binaries
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
