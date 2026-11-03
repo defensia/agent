@@ -295,3 +295,51 @@ func TestWithPackageVerdictLeavesUnmappedEntriesAlone(t *testing.T) {
 		t.Errorf("unmapped entry gained a verdict: %+v", out[0])
 	}
 }
+
+// A dead branch misfiled as merely outdated is silently exempt from every PHP
+// advisory in the catalogue, because only "eol" overrides the package manager's
+// "current" verdict. PHP 8.1 lost security support on 31 December 2025 and sat
+// as "outdated" for ten months after.
+func TestPHPBranchStatus(t *testing.T) {
+	cases := map[string]string{
+		// Supported at the time of writing.
+		"8.5.12": "up_to_date",
+		"8.4.27": "up_to_date",
+		"8.3.36": "up_to_date",
+		"8.2.35": "up_to_date",
+
+		// End of life upstream, whatever a distribution still packages.
+		"8.1.34": "eol",
+		"8.0.30": "eol",
+		"7.4.33": "eol",
+		"7.0.33": "eol",
+		"5.6.40": "eol",
+		"5.3.29": "eol",
+
+		// A branch newer than this build knows about must never be called dead.
+		"8.6.0":   "up_to_date",
+		"9.0.1":   "up_to_date",
+		"":        "unknown",
+		"garbage": "unknown",
+	}
+
+	for version, want := range cases {
+		if got := phpBranchStatus(version); got != want {
+			t.Errorf("phpBranchStatus(%q) = %q, want %q", version, got, want)
+		}
+	}
+}
+
+// Every branch named dead must parse as a branch, or the lookup silently misses.
+func TestPHPEOLBranchesAreWellFormed(t *testing.T) {
+	for branch := range phpEOLBranches {
+		major, minor := parseMajorMinor(branch)
+		if major == 0 {
+			t.Errorf("phpEOLBranches key %q does not parse as major.minor", branch)
+		}
+		if got := branchDotted(branch + ".0"); got != branch {
+			t.Errorf("branchDotted round-trip for %q gave %q", branch, got)
+		}
+		_ = minor
+	}
+}

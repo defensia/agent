@@ -412,14 +412,53 @@ func detectServingPHP() []KeySoftware {
 // phpBranchStatus is the pre-existing major/minor verdict, kept as-is so this
 // change stays about detection. The whole key_software status rule is replaced by
 // the real package manager signal in a separate change.
+// phpEOLBranches are the branches upstream no longer issues security fixes for,
+// newest first. php.net's own schedule, not a guess:
+//
+//	8.1  security support ended 31 Dec 2025
+//	8.0  31 Nov 2023
+//	7.4  28 Nov 2022
+//
+// This is load-bearing rather than cosmetic. The panel exempts a package from
+// CVE matching when the host's package manager calls it current, and a dead
+// branch is exactly where "current" means "the repository has nothing newer",
+// not "this is fine" — Sury still packages PHP 5.6. Only "eol" overrides that
+// exemption, so a dead branch misfiled as merely outdated is silently exempt
+// from every PHP advisory in the catalogue.
+//
+// A branch that falls out of support has to be added here. 8.1 was not, and sat
+// as "outdated" for ten months after upstream stopped patching it.
+var phpEOLBranches = map[string]bool{
+	"8.1": true,
+	"8.0": true,
+	"7.4": true,
+	"7.3": true,
+	"7.2": true,
+	"7.1": true,
+	"7.0": true,
+	"5.6": true,
+	"5.5": true,
+	"5.4": true,
+}
+
+// phpBranchStatus classifies a PHP version for the software inventory.
 func phpBranchStatus(version string) string {
 	major, minor := parseMajorMinor(version)
-	if major < 8 || (major == 8 && minor < 1) {
+	if major == 0 {
+		return "unknown"
+	}
+
+	branch := strconv.Itoa(major) + "." + strconv.Itoa(minor)
+	if phpEOLBranches[branch] {
 		return "eol"
 	}
-	if major == 8 && minor == 1 {
-		return "outdated"
+
+	// Anything older than the oldest branch we name is certainly dead too.
+	if major < 5 || (major == 5 && minor < 4) {
+		return "eol"
 	}
+
+	// A branch newer than this build knows about must not be called dead.
 	return "up_to_date"
 }
 
