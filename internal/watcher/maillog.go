@@ -41,6 +41,14 @@ type MailPattern struct {
 //   - "auth: passwd(user,X.X.X.X): unknown user"
 //   - "imap(user,<X.X.X.X>): Too many invalid commands"
 //   - "auth: passwd(user,X.X.X.X): Password mismatch"
+//   - "auth-worker(1234): passwd-file(user,X.X.X.X,<session>): Password mismatch"
+//
+// The auth-worker form is not cosmetic. Dovecot delegates passdb lookups to a
+// worker process, and that worker is what serves Postfix's SASL requests over
+// the auth socket. Postfix itself never logs the account on an AUTH failure —
+// the base64 it appends is the server's own "Password:" challenge — so on a
+// Postfix + Dovecot-SASL host the auth-worker line is the only one that names
+// the mailbox. Anchoring on a literal "auth:" discarded exactly that line.
 //
 // Roundcube:
 //   - "IMAP Error: Login failed for user against server from X.X.X.X"
@@ -55,9 +63,9 @@ var mailPatterns = []MailPattern{
 
 	// ── Dovecot ───────────────────────────────────────────────────────
 	{Re: regexp.MustCompile(`(?:imap|pop3|submission|managesieve)-login: (?:Disconnected|Aborted login) \((?:auth failed|tried to use (?:disabled|disallowed)).*rip=([\d.]+)`), Reason: "mail_brute_force"},
-	{Re: regexp.MustCompile(`auth:.*\(\S+,([\d.]+)\):\s+unknown user`), Reason: "mail_brute_force"},
+	{Re: regexp.MustCompile(`auth(?:-worker)?(?:\(\d+\))?:.*\(\S+?,([\d.]+)(?:,[^)]*)?\):\s+unknown user`), Reason: "mail_brute_force"},
 	{Re: regexp.MustCompile(`(?:imap|pop3)\(\S+,<?([\d.]+)>?\).*Too many invalid`), Reason: "mail_brute_force"},
-	{Re: regexp.MustCompile(`auth:.*\(\S+,([\d.]+)\):\s+[Pp]assword mismatch`), Reason: "mail_brute_force"},
+	{Re: regexp.MustCompile(`auth(?:-worker)?(?:\(\d+\))?:.*\(\S+?,([\d.]+)(?:,[^)]*)?\):\s+[Pp]assword mismatch`), Reason: "mail_brute_force"},
 
 	// ── Roundcube ─────────────────────────────────────────────────────
 	{Re: regexp.MustCompile(`IMAP Error: Login failed for \S+ against \S+ from ([\d.]+)`), Reason: "mail_brute_force", Protocol: "imap"},
@@ -86,7 +94,7 @@ var mailUserPatterns = []*regexp.Regexp{
 	// Dovecot login: "user=<sales@example.com>, method=PLAIN, rip=1.2.3.4"
 	regexp.MustCompile(`user=<([^>]+)>`),
 	// Dovecot auth / imap: "(sales@example.com,1.2.3.4): Password mismatch"
-	regexp.MustCompile(`\((\S+?),(?:<)?[\d.]+(?:>)?\)`),
+	regexp.MustCompile(`\((\S+?),(?:<)?[\d.]+(?:>)?(?:,[^)]*)?\)`),
 	// Roundcube
 	regexp.MustCompile(`Login failed for (\S+) against`),
 	regexp.MustCompile(`Failed login for (\S+) from`),
@@ -167,11 +175,18 @@ type MailWatcher struct {
 	onEvent EventFunc
 	checkIP CheckIPFunc
 
-	mu          sync.Mutex
-	threshold   int
-	window      time.Duration
-	attempts    map[string][]time.Time
-	banned      map[string]bool
+	mu        sync.Mutex
+	threshold int
+	window    time.Duration
+	attempts  map[string][]time.Time
+	banned    map[string]bool
+
+	// One failed SMTP AUTH writes two log lines when Dovecot is Postfix's SASL
+	// backend: the Dovecot line that names the mailbox, and the Postfix warning
+	// that does not. Both are the same attempt. namedSMTP counts how many
+	// named ones are still waiting to be paired with their Postfix echo, so the
+	// pair is counted once — see pairsWithNamedDovecotLine.
+	namedSMTP   map[string][]time.Time
 	whitelist   map[string]bool
 	wlNets      []*net.IPNet
 	monitorMode bool
@@ -222,6 +237,7 @@ func NewMailWatcher(onBan BanFunc) *MailWatcher {
 		attempts:  make(map[string][]time.Time),
 		banned:    make(map[string]bool),
 		whitelist: make(map[string]bool),
+		namedSMTP: make(map[string][]time.Time),
 	}
 }
 
@@ -472,6 +488,10 @@ func (w *MailWatcher) recordAttempt(obs mailObservation) {
 		return
 	}
 
+	if w.pairsWithNamedDovecotLine(obs, now) {
+		return
+	}
+
 	// Geoblocking — immediate ban
 	if w.checkIP != nil {
 		if banReason := w.checkIP(ip); banReason != "" {
@@ -523,4 +543,66 @@ func (w *MailWatcher) recordAttempt(obs mailObservation) {
 			go w.onBan(ip, reason, count)
 		}
 	}
+}
+
+// smtpPairWindow is how long a Dovecot auth failure waits for the Postfix
+// warning about the same attempt. Postfix emits its line as soon as the auth
+// socket answers, so the gap is sub-second; a few seconds is slack for a loaded
+// box and a log that interleaves, not a guess at a rate.
+const smtpPairWindow = 5 * time.Second
+
+// pairsWithNamedDovecotLine reports whether this observation is the second log
+// line describing one failed SMTP AUTH, and should therefore not be counted
+// again.
+//
+// When Dovecot is Postfix's SASL backend a single failure is written twice: by
+// the Dovecot auth worker, which names the mailbox, and by Postfix, which can
+// not. Until we started reading the auth-worker line only the Postfix half was
+// seen and one attempt counted once. Reading both without pairing them would
+// count every attempt twice, and an IP would reach a 5-attempt ban threshold on
+// its third real try.
+//
+// Pairing is one-for-one rather than time-bucketed, so an attacker making ten
+// attempts a second still has ten attempts counted, not one.
+//
+// Caller must hold w.mu.
+func (w *MailWatcher) pairsWithNamedDovecotLine(obs mailObservation, now time.Time) bool {
+	if obs.Reason != "mail_brute_force" {
+		return false
+	}
+
+	// Drop anything too old to belong to a live attempt.
+	live := w.namedSMTP[obs.IP][:0]
+	for _, t := range w.namedSMTP[obs.IP] {
+		if now.Sub(t) <= smtpPairWindow {
+			live = append(live, t)
+		}
+	}
+
+	switch {
+	// The Dovecot half: counted, and left waiting for its Postfix echo.
+	//
+	// An empty protocol is the condition that matters, not merely "not smtp".
+	// Postfix reaches Dovecot over the auth socket, and lines from that path
+	// carry no service token; an imap-login failure says "imap" and is a
+	// different attempt that must never suppress an SMTP one.
+	case obs.User != "" && obs.Protocol == "":
+		w.namedSMTP[obs.IP] = append(live, now)
+		return false
+
+	// The Postfix half: if a named line is waiting, this is its echo.
+	case obs.Protocol == "smtp" && obs.User == "":
+		if len(live) > 0 {
+			w.namedSMTP[obs.IP] = live[1:]
+			return true
+		}
+	}
+
+	if len(live) == 0 {
+		delete(w.namedSMTP, obs.IP)
+	} else {
+		w.namedSMTP[obs.IP] = live
+	}
+
+	return false
 }
