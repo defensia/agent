@@ -4,3 +4,6 @@ build/
 
 # Ops scripts live in the private monorepo (scripts/release-agent.sh)
 scripts/release.sh
+
+# Planning, summaries and internal docs live in the private monorepo
+.planning/
