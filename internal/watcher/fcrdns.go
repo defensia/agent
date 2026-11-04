@@ -154,6 +154,78 @@ func verifyFcrdns(ip string, expectedSuffixes []string) (bool, string) {
 	return false, hostname
 }
 
+// metaNetworks is the address space announced by Meta's AS32934, collapsed from
+// the RADb route objects (whois -h whois.radb.net -- '-i origin AS32934').
+//
+// rDNS alone cannot verify Facebook's fetchers: over seven days across the fleet,
+// 4,540 of 15,127 facebookexternalhit requests flagged as spoofed came from
+// 2a03:2880::/32 — Meta's own network, on addresses with no PTR record at all.
+var metaNetworks = mustParseCIDRs(
+	"31.13.24.0/21", "31.13.64.0/18", "45.64.40.0/22",
+	"57.141.0.0/20", "57.141.16.0/21", "57.141.24.0/22", "57.141.28.0/23",
+	"57.144.0.0/14", "66.220.144.0/20", "69.63.176.0/20", "69.171.224.0/19",
+	"74.119.76.0/22", "102.132.96.0/20", "103.4.96.0/22", "129.134.0.0/16",
+	"147.75.208.0/20", "157.240.0.0/16", "163.70.128.0/17", "163.77.128.0/17",
+	"173.252.64.0/18", "179.60.192.0/22", "185.60.216.0/22", "185.89.216.0/22",
+	"204.15.20.0/22",
+	"2401:db00::/32", "2620:0:1c00::/40", "2803:6080::/29", "2a03:2880::/31",
+	"2a03:2887:ff2c::/47", "2a03:83e0::/32", "2a10:f781:10:cee0::/64",
+)
+
+// knownBotNetworks maps a bot slug to the address space its operator publishes.
+// A request from inside it is verified outright, before any DNS lookup.
+var knownBotNetworks = map[string][]*net.IPNet{
+	"facebookbot": metaNetworks,
+}
+
+// inKnownBotNetwork reports whether ip lies in the published network of the bot
+// identified by slug. False for bots with no published network.
+func inKnownBotNetwork(ip, slug string) bool {
+	nets, ok := knownBotNetworks[slug]
+	if !ok {
+		return false
+	}
+	parsed := net.ParseIP(strings.TrimPrefix(ip, "::ffff:"))
+	if parsed == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+func mustParseCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("watcher: bad CIDR " + c)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// unverifiedBotEvent decides what a failed verification means for a request whose
+// user agent claims an allow-listed bot.
+//
+// For a search crawler it means impersonation: Googlebot only ever runs from
+// Google's network, so a claim that does not verify is a forgery. Social preview
+// user agents do not carry that premise. Phones and in-app browsers send
+// facebookexternalhit, Twitterbot and the rest themselves when they build a link
+// preview, so a failed check is the normal result for most of the legitimate
+// traffic — a household broadband line sharing a link, not an attacker. Those are
+// reported as an unverified preview, at info, and never as spoofing.
+func unverifiedBotEvent(category string) (eventType, severity, action string) {
+	if category == "social" {
+		return "bot_monitor", "info", "unverified_preview"
+	}
+	return "bot_spoofed", "warning", "spoofed"
+}
+
 // matchAllowBot checks if a UA matches a known bot with action="allow".
 // Returns the matched bot fingerprint or nil. Must be called with w.mu held.
 func (w *WebWatcher) matchAllowBot(uaLower, uaRaw string) *compiledBot {
@@ -178,6 +250,11 @@ func (w *WebWatcher) matchAllowBot(uaLower, uaRaw string) *compiledBot {
 // Returns: verified (true = legitimate), hostname from rDNS.
 // Only verifies bots that have known domain suffixes — returns (true, "") for unknown bots.
 func (w *WebWatcher) checkBotFcrdns(ip, slug string) (bool, string) {
+	// A published network is a stronger answer than rDNS, and needs no lookup.
+	if inKnownBotNetwork(ip, slug) {
+		return true, ""
+	}
+
 	// Only verify bots we have domain data for
 	suffixes, known := knownBotDomains[slug]
 	if !known {
