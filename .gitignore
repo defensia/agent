@@ -1,3 +1,6 @@
 /defensia-agent
 defensia-agent-linux-amd64
 build/
+
+# Ops scripts live in the private monorepo (scripts/release-agent.sh)
+scripts/release.sh
