@@ -1983,18 +1983,18 @@ func (w *WebWatcher) processLine(logPath, line string) {
 				go w.onEvent(ip, "bot_monitor", "info", details)
 			} else {
 				// allow — verify FCrDNS for known bots before trusting
-				go func(ipAddr, slug string, d map[string]string) {
+				go func(ipAddr, slug, category string, d map[string]string) {
 					verified, hostname := w.checkBotFcrdns(ipAddr, slug)
 					if verified {
 						w.onEvent(ipAddr, "bot_crawl", "info", d)
 					} else {
-						// Bot is spoofing — reclassify
+						eventType, severity, action := unverifiedBotEvent(category)
 						d["fcrdns_verified"] = "false"
 						d["fcrdns_hostname"] = hostname
-						d["bot_action"] = "spoofed"
-						w.onEvent(ipAddr, "bot_spoofed", "warning", d)
+						d["bot_action"] = action
+						w.onEvent(ipAddr, eventType, severity, d)
 					}
-				}(ip, bot.Slug, details)
+				}(ip, bot.Slug, bot.Category, details)
 			}
 			return
 		}
