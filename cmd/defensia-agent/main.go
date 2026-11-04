@@ -51,6 +51,39 @@ var modsecEngine      *modsecurity.Engine
 var sessionTracker    *session.SessionTracker
 var fimMonitor        *fim.Monitor
 
+// banDurationSecs holds the panel's bf_ban_duration, in seconds, as of the last
+// sync. Zero means the panel left it unset, which is the case for the large
+// majority of servers.
+var banDurationSecs atomic.Int64
+
+// banExpiry returns the expiry to report for a ban, or nil to let the backend
+// decide it.
+//
+// Nil keeps the behaviour the agent has always had: the backend escalates by
+// ban_count (1st=24h, 2nd=7d, 3rd=30d, 4th+=permanent). A configured duration
+// replaces that escalation outright rather than capping its first step —
+// someone who picks "5 minutes" is asking for short bans, so growing them to 7
+// days on the second offence is the opposite of what they configured.
+//
+// Two reasons never take the configured duration, for two different reasons:
+//   - bot_blocked is forced permanent by the backend, so a crawler the admin
+//     blocked cannot come back. Measured: 17,248 of 17,254 bot bans have no
+//     expiry. Sending an expiry here would fight that policy.
+//   - geoblock_* is excluded to avoid churn, NOT because it is permanent today:
+//     country blocks escalate by ban_count like every other source, and the one
+//     geoblock ban in production does expire. But the country check re-bans on
+//     the next request from that country, so a short duration would cycle the
+//     same IP through ban and expiry indefinitely.
+func banExpiry(reason string) *string {
+	secs := banDurationSecs.Load()
+	if secs <= 0 || reason == "bot_blocked" || strings.HasPrefix(reason, "geoblock_") {
+		return nil
+	}
+
+	expires := time.Now().UTC().Add(time.Duration(secs) * time.Second).Format(time.RFC3339)
+	return &expires
+}
+
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
@@ -268,6 +301,7 @@ func runAgent() {
 			IPAddress: ip,
 			Reason:    reason,
 			BanCount:  count,
+			ExpiresAt: banExpiry(reason),
 		}); err != nil {
 			log.Printf("[api] failed to report ban: %v", err)
 		}
@@ -348,6 +382,7 @@ func runAgent() {
 					IPAddress: ip,
 					Reason:    reason,
 					BanCount:  count,
+					ExpiresAt: banExpiry(reason),
 				}); err != nil {
 					log.Printf("[api] failed to report ban: %v", err)
 				}
@@ -374,12 +409,14 @@ func runAgent() {
 			if err := firewall.BanIP(ip); err != nil {
 				log.Printf("[firewall] error: %v", err)
 			}
-			// Don't send ExpiresAt — let the backend apply escalation logic
-			// (1st=24h, 2nd=7d, 3rd=30d, 4th+=permanent)
+			// banExpiry is nil unless a duration is configured, which leaves the
+			// expiry to the backend's escalation (1st=24h, 2nd=7d, 3rd=30d,
+			// 4th+=permanent)
 			if err := apiClient.ReportBan(api.BanRequest{
 				IPAddress: ip,
 				Reason:    reason,
 				BanCount:  1,
+				ExpiresAt: banExpiry(reason),
 			}); err != nil {
 				log.Printf("[api] failed to report scored ban: %v", err)
 			}
@@ -455,6 +492,7 @@ func runAgent() {
 				IPAddress: ip,
 				Reason:    reason,
 				BanCount:  count,
+				ExpiresAt: banExpiry(reason),
 			}); err != nil {
 				log.Printf("[api] failed to report ban: %v", err)
 			}
@@ -494,6 +532,7 @@ func runAgent() {
 				IPAddress: ip,
 				Reason:    reason,
 				BanCount:  count,
+				ExpiresAt: banExpiry(reason),
 			}); err != nil {
 				log.Printf("[api] failed to report ban: %v", err)
 			}
@@ -533,6 +572,7 @@ func runAgent() {
 				IPAddress: ip,
 				Reason:    reason,
 				BanCount:  count,
+				ExpiresAt: banExpiry(reason),
 			}); err != nil {
 				log.Printf("[api] failed to report ban: %v", err)
 			}
@@ -998,6 +1038,16 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		Threshold: sync.Config.BFThreshold,
 		Window:    time.Duration(sync.Config.BFWindow) * time.Second,
 	})
+
+	// Apply the ban duration picked in the panel. Unset (or a nonsense value)
+	// leaves bans to the backend's escalation, as before.
+	if sync.Config.BFBanDuration != nil && *sync.Config.BFBanDuration > 0 {
+		if banDurationSecs.Swap(int64(*sync.Config.BFBanDuration)) != int64(*sync.Config.BFBanDuration) {
+			log.Printf("[sync] ban duration set to %s", (time.Duration(*sync.Config.BFBanDuration) * time.Second).String())
+		}
+	} else if banDurationSecs.Swap(0) != 0 {
+		log.Printf("[sync] ban duration unset — bans escalate by offence count")
+	}
 
 	// Apply monitor mode
 	w.SetMonitorMode(sync.Config.MonitorMode)
