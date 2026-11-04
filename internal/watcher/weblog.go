@@ -1510,12 +1510,12 @@ func parseAccessLog(line string) (accessLogEntry, bool) {
 			lastField := sub[lastQ1+1:]
 
 			// Check if last quoted field is a forwarded IP (proxy/Cloudflare format).
-			// XFF can be comma-separated: "1.2.3.4, 5.6.7.8" — first IP is the real client.
+			// XFF can be comma-separated: "1.2.3.4, 5.6.7.8". Which entry, if any, is
+			// the client is clientIPFromXFF's decision; the field still shapes parsing.
 			xffIP := strings.TrimSpace(strings.SplitN(lastField, ",", 2)[0])
 			if isIPAddress(xffIP) && xffIP != "" {
-				// Proxy format: last field is XFF IP → use as real client IP
-				e.ip = xffIP
-				e.xffDetected = true
+				// Proxy format: the client comes from XFF only behind a trusted proxy
+				e.ip, e.xffDetected = clientIPFromXFF(e.ip, lastField)
 
 				// User-agent is the second-to-last quoted field
 				sub2 := sub[:lastQ1]
