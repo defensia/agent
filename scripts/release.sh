@@ -24,7 +24,13 @@ if [ -z "$VERSION" ]; then
 fi
 
 REMOTE_HOST="185.7.81.107"
-REMOTE_PASS="REDACTED"
+# Never hardcode the password: this repo is public.
+PASS_FILE="${DEFENSIA_SSH_PASS_FILE:-$HOME/.config/defensia/prod_ssh_pass}"
+REMOTE_PASS="${DEFENSIA_SSH_PASS:-$(cat "$PASS_FILE" 2>/dev/null)}"
+if [ -z "$REMOTE_PASS" ]; then
+    echo "Set DEFENSIA_SSH_PASS or put the server password in $PASS_FILE"
+    exit 1
+fi
 MIRROR_DIR="/var/lib/docker/volumes/defensia_app-public/_data/downloads"
 
 echo "=== Defensia Agent Release v${VERSION} ==="
