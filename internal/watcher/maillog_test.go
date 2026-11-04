@@ -61,9 +61,38 @@ func TestMailObservationFromRealLines(t *testing.T) {
 			user:   "nosuch@example.com",
 		},
 		{
-			// Postfix SASL: the mechanism is there, the mailbox is NOT. This is
-			// the honest limitation to document rather than paper over.
-			name:     "postfix sasl failure has no username",
+			// The line an MSP sent us on 4-nov-2026 to disprove our claim that
+			// Postfix never logs the account. PLAIN reached Dovecot over the
+			// auth socket, so Postfix appended the mailbox to its own warning.
+			// 312 of 341 SMTP AUTH failures on their server looked like this.
+			name:     "postfix sasl plain names the mailbox",
+			line:     `2026-11-03T21:15:54Z mail postfix/submission/smtpd[662212]: warning: unknown[185.201.188.46]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=jsmith@kaburu.cc`,
+			reason:   "mail_brute_force",
+			ip:       "185.201.188.46",
+			user:     "jsmith@kaburu.cc",
+			method:   "PLAIN",
+			protocol: "smtp",
+		},
+		{
+			// Postfix rejected the mechanism before any auth-backend lookup,
+			// so no username exists at source. Correlating with Dovecot cannot
+			// recover one. The literal "(unavailable)" must never be reported
+			// as a mailbox — an alerting pipeline would treat it as an account.
+			name:     "postfix sasl unavailable is not a mailbox",
+			line:     `2026-11-03T04:11:09Z mail postfix/smtpd[2460]: warning: unknown[203.0.113.77]: SASL LOGIN authentication failed: Invalid authentication mechanism, sasl_username=(unavailable)`,
+			reason:   "mail_brute_force",
+			ip:       "203.0.113.77",
+			user:     "",
+			method:   "LOGIN",
+			protocol: "smtp",
+		},
+		{
+			// This FORM of the Postfix line carries no mailbox: the trailing
+			// base64 is the server's "Password:" challenge, not a credential.
+			// Postfix does name the account when the mechanism reached the
+			// auth backend — see the sasl_username cases below. The limitation
+			// is this line shape, not the server.
+			name:     "postfix sasl failure without sasl_username has no mailbox",
 			line:     `Oct 29 07:14:02 mail postfix/smtpd[2048]: warning: unknown[185.220.101.7]: SASL LOGIN authentication failed: UGFzc3dvcmQ6`,
 			reason:   "mail_brute_force",
 			ip:       "185.220.101.7",
