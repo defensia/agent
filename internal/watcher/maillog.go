@@ -45,10 +45,15 @@ type MailPattern struct {
 //
 // The auth-worker form is not cosmetic. Dovecot delegates passdb lookups to a
 // worker process, and that worker is what serves Postfix's SASL requests over
-// the auth socket. Postfix itself never logs the account on an AUTH failure —
-// the base64 it appends is the server's own "Password:" challenge — so on a
-// Postfix + Dovecot-SASL host the auth-worker line is the only one that names
-// the mailbox. Anchoring on a literal "auth:" discarded exactly that line.
+// the auth socket, so anchoring on a literal "auth:" discarded exactly the line
+// that names the mailbox on an IMAP or POP3 failure.
+//
+// It is NOT, however, the only line that names the account on an SMTP AUTH
+// failure, which is what an earlier version of this comment claimed. Postfix
+// appends sasl_username= to its own warning whenever the mechanism reached the
+// auth backend — see mailUserPatterns below. The base64 that Postfix appends
+// after "SASL LOGIN authentication failed" is the server's own "Password:"
+// challenge and is useless, but that is a different field from sasl_username.
 //
 // Roundcube:
 //   - "IMAP Error: Login failed for user against server from X.X.X.X"
@@ -86,11 +91,25 @@ var mailPatterns = []MailPattern{
 
 // mailUserPatterns extract the targeted mailbox, in order of specificity.
 //
-// Note what is NOT here: Postfix SASL authentication failures. Those lines
-// carry the client IP and the mechanism but no username at all, so for SMTP
-// AUTH attacks target_user is legitimately absent rather than missing by
-// oversight. Dovecot and Roundcube do name the account.
+// Postfix comes first, and the reason is worth recording. This list used to
+// carry a note asserting that Postfix SASL failures "carry the client IP and
+// the mechanism but no username at all", so target_user was legitimately
+// absent on SMTP AUTH rather than missing by oversight. That was false, nobody
+// had checked it, and the note is why nobody looked again: Postfix appends
+// sasl_username= to the same warning line we already parse for the IP.
+//
+// An MSP disproved it with four lines of their own mail log (4-nov-2026).
+// Measured on their server over seven days: 341 SMTP AUTH failures, 312 of
+// them carrying a real sasl_username, and we reported the account on none.
+//
+// The exception is "sasl_username=(unavailable)", which Postfix writes when it
+// rejects the mechanism before consulting the auth backend ("Invalid
+// authentication mechanism"). There the name does not exist at source and no
+// amount of correlation recovers it, so the pattern below refuses to capture a
+// value that opens with "(".
 var mailUserPatterns = []*regexp.Regexp{
+	// Postfix: "SASL PLAIN authentication failed: ..., sasl_username=a@b.com"
+	regexp.MustCompile(`sasl_username=([^(\s,][^\s,]*)`),
 	// Dovecot login: "user=<sales@example.com>, method=PLAIN, rip=1.2.3.4"
 	regexp.MustCompile(`user=<([^>]+)>`),
 	// Dovecot auth / imap: "(sales@example.com,1.2.3.4): Password mismatch"

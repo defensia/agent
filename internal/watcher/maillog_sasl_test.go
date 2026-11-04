@@ -7,19 +7,26 @@ import (
 
 // The lines Dovecot writes when it is Postfix's SASL backend.
 //
-// Postfix does not record the username on an SMTP AUTH failure — the base64 it
-// appends to "SASL LOGIN authentication failed" is the server's own challenge
-// ("Password:"), identical on every failure whoever was targeted. The only
-// place the account appears is the Dovecot line emitted for the same attempt.
+// The base64 Postfix appends to "SASL LOGIN authentication failed" is the
+// server's own challenge ("Password:"), identical on every failure whoever was
+// targeted, so it is never a source for the account. This file was originally
+// written believing that made the Dovecot line the ONLY place the account
+// appears. It is not: Postfix adds sasl_username to the same warning whenever
+// the mechanism reached the auth backend, and that is now the first thing we
+// read — see mailUserPatterns. The Dovecot path below still matters for IMAP
+// and POP3, and for SMTP failures that arrive without the field.
 //
-// Dovecot does not write that line from the `auth` process. Password lookups
+// Dovecot does not write its line from the `auth` process. Password lookups
 // are delegated to a worker that identifies itself as `auth-worker(1234)`, and
 // it is that worker which serves Postfix's requests over the auth socket. A
 // pattern anchored on the literal `auth:` therefore discards exactly the line
 // that carries the name.
 //
-// Reported by Kaburu MSP, whose server sees SMTP AUTH brute force and nothing
-// else — 644 mail events in seven days, none of them naming an account.
+// Reported by Kaburu MSP. The figure first recorded here — 644 mail events in
+// seven days, none naming an account — was wrong: it summed mail_brute_force,
+// mail_relay_scan and mail_suspicious, and only the first are authentication
+// attempts. Measured properly on that server: 341 SMTP AUTH failures, 312 of
+// them carrying a sasl_username we were not reading.
 func TestDovecotAuthWorkerLinesNameTheMailbox(t *testing.T) {
 	cases := []struct {
 		name string
@@ -104,10 +111,14 @@ func TestDovecotAuthWorkerChatterIsNotAnAttack(t *testing.T) {
 	}
 }
 
-// Postfix's own line still carries no username, and must not be made to look
-// as though it does. Anything claiming otherwise would be reading the server's
-// base64 prompt back as if it were the client's credentials.
-func TestPostfixSASLFailureStillHasNoUsername(t *testing.T) {
+// A Postfix line whose only trailing token is the base64 challenge carries no
+// username, and must not be made to look as though it does — reporting it
+// would be reading the server's "Password:" prompt back as a credential.
+//
+// This says nothing about Postfix in general: when the mechanism reaches the
+// auth backend the same warning carries sasl_username, and we read it. Scope
+// the claim to the line shape, which is what the old name got wrong.
+func TestPostfixSASLFailureWithoutSaslUsernameHasNoUsername(t *testing.T) {
 	line := `Nov  3 10:15:04 mail postfix/smtpd[2460]: warning: unknown[203.0.113.5]: SASL LOGIN authentication failed: UGFzc3dvcmQ6`
 
 	obs, ok := observeMailLine(line)
@@ -115,7 +126,7 @@ func TestPostfixSASLFailureStillHasNoUsername(t *testing.T) {
 		t.Fatal("Postfix SASL failure should still be detected")
 	}
 	if obs.User != "" {
-		t.Errorf("target_user = %q, want empty: Postfix does not log the account", obs.User)
+		t.Errorf("target_user = %q, want empty: this line shape carries no account", obs.User)
 	}
 	if obs.IP != "203.0.113.5" || obs.Method != "LOGIN" || obs.Protocol != "smtp" {
 		t.Errorf("unexpected observation: %+v", obs)
