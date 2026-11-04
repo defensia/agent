@@ -128,7 +128,7 @@ func checkMySQLConfig() []Finding {
 		} else if strings.Contains(string(out), "YES") {
 			findings = append(findings, Finding{
 				Category: "database", Severity: "info", CheckID: "DB_MYSQL_SSL_OFF",
-				Title: "MySQL SSL enabled", Passed: true,
+				Title: "MySQL SSL enabled", Description: "SSL/TLS encryption for MySQL connections is enabled.", Passed: true,
 			})
 		}
 	}
@@ -181,7 +181,7 @@ func checkPostgreSQLConfig() []Finding {
 			} else {
 				findings = append(findings, Finding{
 					Category: "database", Severity: "info", CheckID: "DB_PG_TRUST_AUTH",
-					Title: "PostgreSQL requires authentication", Passed: true,
+					Title: "PostgreSQL requires authentication", Description: "pg_hba.conf has no trust entries — every connection must authenticate.", Passed: true,
 				})
 			}
 		}
@@ -291,7 +291,7 @@ func checkRedisConfig() []Finding {
 	} else {
 		findings = append(findings, Finding{
 			Category: "database", Severity: "info", CheckID: "DB_REDIS_NO_PASS",
-			Title: "Redis password set", Passed: true,
+			Title: "Redis password set", Description: "Redis requires a password (requirepass is set).", Passed: true,
 		})
 	}
 
@@ -381,7 +381,7 @@ func checkMongoDBConfig() []Finding {
 	} else {
 		findings = append(findings, Finding{
 			Category: "database", Severity: "info", CheckID: "DB_MONGO_NO_AUTH",
-			Title: "MongoDB authentication enabled", Passed: true,
+			Title: "MongoDB authentication enabled", Description: "MongoDB requires authentication (security.authorization is enabled).", Passed: true,
 		})
 	}
 

@@ -47,6 +47,14 @@ func Run() []Finding {
 	findings = append(findings, checkOpenSSHVersion()...)
 	findings = append(findings, checkWebServerVersion()...)
 
+	// The server rejects the whole scan if any finding has no description,
+	// so never let one check's omission cost every other result.
+	for i := range findings {
+		if strings.TrimSpace(findings[i].Description) == "" {
+			findings[i].Description = findings[i].Title
+		}
+	}
+
 	return findings
 }
 

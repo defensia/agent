@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -47,11 +49,35 @@ func New(baseURL, token string) *Client {
 // queue is full, the event is dropped and a counter is incremented. Use this
 // from hot paths (watchers, scorer) instead of calling ReportEvents directly.
 func (c *Client) QueueEvent(e EventRequest) {
+	e.SourceIP = cleanSourceIP(e.Type, e.SourceIP)
 	select {
 	case c.eventCh <- e:
 	default:
 		atomic.AddUint64(&c.eventDropped, 1)
 	}
+}
+
+// badSourceIPs counts events whose source_ip was not an IP and was cleared.
+var badSourceIPs uint64
+
+// cleanSourceIP returns ip if it parses as an IP address (brackets stripped),
+// or "" otherwise. The server rejects the whole batch with a 422 when a single
+// event carries a malformed source_ip, so a bad value must never be sent.
+func cleanSourceIP(eventType, ip string) string {
+	if ip == "" {
+		return ""
+	}
+	trimmed := strings.Trim(strings.TrimSpace(ip), "[]")
+	if net.ParseIP(trimmed) != nil {
+		return trimmed
+	}
+	if n := atomic.AddUint64(&badSourceIPs, 1); n == 1 || n%100 == 0 {
+		if len(ip) > 64 {
+			ip = ip[:64]
+		}
+		log.Printf("[api] cleared invalid source_ip %q on %s event (%d so far)", ip, eventType, n)
+	}
+	return ""
 }
 
 // EventQueueStats returns current queue depth and total dropped count.
