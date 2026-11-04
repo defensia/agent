@@ -1,0 +1,27 @@
+# Default gitleaks rules plus the shapes that leaked the prod root password
+# (scripts/release.sh, Oct 2026), which the defaults do not catch.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "hardcoded-password-assignment"
+description = "Literal password assigned to a PASS/PASSWORD/PWD variable or key"
+regex = '''(?i)\b[A-Z0-9_]*(?:PASS|PASSWORD|PASSWD|PWD)\b["']?\s*[:=]\s*["']([^"'$\s{}<>]{10,})["']'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["pass", "pwd"]
+
+[[rules]]
+id = "hardcoded-password-default"
+description = "Literal password used as a shell default: ${VAR:-secret}"
+regex = '''(?i)\$\{[A-Z0-9_]*(?:PASS|PASSWORD|PWD)[A-Z0-9_]*:-([^}$\s]{10,})\}'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["pass", "pwd"]
+
+[[rules]]
+id = "sshpass-literal"
+description = "sshpass -p with a literal password"
+regex = '''sshpass\s+-p\s*["']?([^"'$\s]{8,})'''
+secretGroup = 1
+keywords = ["sshpass"]
