@@ -343,3 +343,76 @@ func TestPHPEOLBranchesAreWellFormed(t *testing.T) {
 		_ = minor
 	}
 }
+
+// A PHP-LSAPI row asserts that LiteSpeed serves that build. We derived it from
+// the name and location of a binary and never from anything that invokes it, so
+// when the composed package name did not exist we published the detection with
+// a verdict of "unknown" instead of dropping it.
+//
+// The real case, from an MSP's OpenLiteSpeed server on 4-nov-2026: we reported
+// PHP-LSAPI 5.6 and there is no lsphp56 tree or binary on the machine. The row
+// also took the package verification away from the php5.6-fpm that genuinely is
+// installed, labelling 147 advisories "not verified".
+func TestUnbackedLSAPIDetectionIsDropped(t *testing.T) {
+	cases := []struct {
+		name string
+		sw   KeySoftware
+		want bool
+	}{
+		{
+			name: "the phantom: no package, no lsphp tree",
+			sw:   KeySoftware{Name: "PHP-LSAPI 5.6", Version: "5.6.40", BinaryPath: "/usr/local/lsws/fcgi-bin/lsphp5.6"},
+			want: true,
+		},
+		{
+			name: "no package and no path at all is still a phantom",
+			sw:   KeySoftware{Name: "PHP-LSAPI 8.2", Version: "8.2.35"},
+			want: true,
+		},
+		{
+			// The common case: LiteSpeed's own repo provides it.
+			name: "package resolved, keep it",
+			sw:   KeySoftware{Name: "PHP-LSAPI 8.3", Version: "8.3.36", PkgName: "lsphp83", BinaryPath: "/usr/local/lsws/lsphp83/bin/lsphp"},
+			want: false,
+		},
+		{
+			// A hand-built OpenLiteSpeed has the tree and no package. Losing a
+			// runtime we cannot see is worse than one we cannot name, so the
+			// tree layout alone is enough to keep the row.
+			name: "hand-built lsphp tree with no package, keep it",
+			sw:   KeySoftware{Name: "PHP-LSAPI 8.4", Version: "8.4.27", BinaryPath: "/usr/local/lsws/lsphp84/bin/lsphp"},
+			want: false,
+		},
+		{
+			// This rule must never reach another SAPI: an FPM pool or a CLI that
+			// apt does not recognise is a real finding, not noise.
+			name: "unverified PHP-FPM is never dropped",
+			sw:   KeySoftware{Name: "PHP-FPM 5.6", Version: "5.6.40", BinaryPath: "/usr/sbin/php-fpm5.6"},
+			want: false,
+		},
+		{
+			name: "unverified plain PHP is never dropped",
+			sw:   KeySoftware{Name: "PHP", Version: "8.3.36", BinaryPath: "/usr/bin/php"},
+			want: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isUnbackedLSAPI(c.sw); got != c.want {
+				t.Errorf("isUnbackedLSAPI(%+v) = %v, want %v", c.sw, got, c.want)
+			}
+		})
+	}
+}
+
+// The inventory must carry the binary a serving-runtime detection was read
+// from. Without it a disputed row can only be settled by asking the customer to
+// inspect their own filesystem, which is how the phantom above went unnoticed.
+func TestServingRuntimesCarryTheirBinaryPath(t *testing.T) {
+	for _, r := range servingPHPRuntimes() {
+		if r.path == "" {
+			t.Errorf("%s %s has no binary path", r.sapi, r.version)
+		}
+	}
+}

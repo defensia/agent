@@ -1,9 +1,11 @@
 package collector
 
 import (
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +55,12 @@ type KeySoftware struct {
 	PkgVerdict string `json:"pkg_verdict,omitempty"`
 	PkgManager string `json:"pkg_manager,omitempty"` // apt, dnf, yum
 	PkgName    string `json:"pkg_name,omitempty"`    // the package actually consulted
+
+	// BinaryPath is the file a serving-runtime detection was read from. Only set
+	// for entries resolved from a binary on disk, and purely diagnostic: it is
+	// what lets a detection be audited without asking the customer to inspect
+	// their own filesystem.
+	BinaryPath string `json:"binary_path,omitempty"`
 }
 
 // Package represents a single installed package.
@@ -278,7 +286,61 @@ func collectKeySoftware() []KeySoftware {
 		}
 	}
 
-	return withPackageVerdict(result)
+	return dropUnbackedLSAPI(withPackageVerdict(result))
+}
+
+// lsphpTreeBinary matches the layout LiteSpeed uses for a real per-branch
+// runtime: /usr/local/lsws/lsphp84/bin/lsphp. A binary living there is a
+// genuine lsphp install even when no package manager knows about it, which is
+// the case on a hand-built OpenLiteSpeed.
+var lsphpTreeBinary = regexp.MustCompile(`/lsws/lsphp\d+/bin/lsphp$`)
+
+// dropUnbackedLSAPI removes a PHP-LSAPI entry that no package provides and that
+// does not live in a per-branch lsphp tree.
+//
+// The name "PHP-LSAPI" asserts that LiteSpeed serves this build. We were
+// deriving it from where a binary sat and what it was called, never from
+// anything that invokes it, and when the composed package name (lsphp plus the
+// compacted branch) turned out not to exist we published the detection anyway
+// with a verdict of "unknown". The missing package was the signal that the
+// detection had nothing behind it.
+//
+// Reported by an MSP on 4-nov-2026: we told them their OpenLiteSpeed server ran
+// PHP-LSAPI 5.6 and there is no lsphp56 tree or binary on the machine. Across
+// the fleet every LiteSpeed host carried at least one entry of this shape. On
+// that server the phantom row also took the verification away from the real
+// php5.6-fpm package sitting next to it, which is what put a "not verified
+// against your package manager" label on 147 advisories.
+//
+// Deliberately narrow: only PHP-LSAPI, only with no resolved package, and only
+// outside a dedicated lsphp tree. A runtime we cannot see is a worse failure
+// than a runtime we cannot name, so this must not become a general rule that
+// silences anything the package manager does not recognise.
+func dropUnbackedLSAPI(sw []KeySoftware) []KeySoftware {
+	// With no package manager to ask, every entry is unverified and dropping on
+	// that basis would empty the inventory.
+	if pkgmgr.Manager() == "" {
+		return sw
+	}
+
+	var kept []KeySoftware
+	for _, s := range sw {
+		if isUnbackedLSAPI(s) {
+			log.Printf("[collector] dropping %s (%s): no package provides it and %q is not an lsphp tree",
+				s.Name, s.Version, s.BinaryPath)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept
+}
+
+// isUnbackedLSAPI is the decision on its own, free of the package manager
+// lookup so it can be tested on a machine that has no apt.
+func isUnbackedLSAPI(s KeySoftware) bool {
+	return strings.HasPrefix(s.Name, "PHP-LSAPI") &&
+		s.PkgName == "" &&
+		!lsphpTreeBinary.MatchString(s.BinaryPath)
 }
 
 func detectKernel() KeySoftware {
@@ -404,7 +466,7 @@ func detectServingPHP() []KeySoftware {
 			name = r.sapi + " " + r.version
 		}
 		used[name] = true
-		sw = append(sw, KeySoftware{Name: name, Version: r.version, Status: phpBranchStatus(r.version), Category: "runtime"})
+		sw = append(sw, KeySoftware{Name: name, Version: r.version, Status: phpBranchStatus(r.version), Category: "runtime", BinaryPath: r.path})
 	}
 	return sw
 }
@@ -497,6 +559,11 @@ const maxServingPHPBinaries = 32
 type phpRuntime struct {
 	version string
 	sapi    string
+	// path is the resolved binary the version was read from. Carried into the
+	// inventory because without it a disputed detection cannot be settled from
+	// our own data — an MSP had to go and look at their disk to tell us that the
+	// "PHP-LSAPI 5.6" we reported corresponded to no lsphp on the machine.
+	path string
 }
 
 // phpFPMBinaryNames lists the php-fpm command names worth a PATH lookup.
@@ -614,7 +681,7 @@ func servingPHPRuntimes() []phpRuntime {
 			continue
 		}
 		seen[key] = true
-		runtimes = append(runtimes, phpRuntime{version: version, sapi: sapiOf[bin]})
+		runtimes = append(runtimes, phpRuntime{version: version, sapi: sapiOf[bin], path: bin})
 	}
 	sort.Slice(runtimes, func(i, j int) bool {
 		if runtimes[i].sapi != runtimes[j].sapi {
