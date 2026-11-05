@@ -1,0 +1,43 @@
+[
+  {
+    "type": "csf_port_changed",
+    "severity": "info",
+    "details": {
+      "action": "add",
+      "action_id": "6f1c1e2a-0000-4000-8000-000000000001",
+      "direction": "in",
+      "port": "8080",
+      "result": "applied"
+    },
+    "occurred_at": "2026-11-05T10:00:00Z"
+  },
+  {
+    "type": "csf_port_error",
+    "severity": "critical",
+    "details": {
+      "action": "remove",
+      "action_id": "6f1c1e2a-0000-4000-8000-000000000002",
+      "backup": "/etc/csf/csf.conf.bak.20261105100000",
+      "direction": "in",
+      "error": "backup restore: permission denied",
+      "ipv6_mirrored": "false",
+      "port": "2222",
+      "reason": "health check failed and rollback could not restore the backup",
+      "result": "rollback_failed",
+      "rolled_back": "false",
+      "testing_mode": "false"
+    },
+    "occurred_at": "2026-11-05T10:00:00Z"
+  },
+  {
+    "type": "csf_port_error",
+    "severity": "warning",
+    "details": {
+      "action": "add",
+      "direction": "out",
+      "error": "csf -a failed: exit status 1",
+      "port": "9090"
+    },
+    "occurred_at": "2026-11-05T10:00:00Z"
+  }
+]

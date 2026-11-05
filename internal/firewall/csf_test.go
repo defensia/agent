@@ -131,9 +131,9 @@ func TestCSFListEntries(t *testing.T) {
 
 	got := csfListEntries(path)
 	want := []CSFDenyEntry{
-		{IP: "1.2.3.4", Comment: "reason x"},
-		{IP: "5.6.7.0/24", Comment: ""},
-		{IP: "9.9.9.9", Comment: ""},
+		{IP: "1.2.3.4", Kind: "ip", Comment: "reason x"},
+		{IP: "5.6.7.0/24", Kind: "cidr", Comment: ""},
+		{IP: "9.9.9.9", Kind: "ip", Comment: ""},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("csfListEntries() = %#v, want %#v", got, want)

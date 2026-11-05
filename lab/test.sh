@@ -140,6 +140,9 @@ for vm in $vms; do
   testing_expect="$(expect_or_empty "$(vm_testing "$vm")")"
   lfd_expect="$(expect_or_empty "$(vm_lfd "$vm")")"
   fw_mode="$(expect_or_empty "$(vm_fw_mode "$vm")")"
+  csf_fork_expect="$(expect_or_empty "$(vm_csf_fork "$vm")")"
+  dl_configserver_expect="$(expect_or_empty "$(vm_dl_configserver "$vm")")"
+  csf_ipv6_test="$(expect_or_empty "$(vm_csf_ipv6_test "$vm")")"
 
   start=$(date +%s)
   vm_root "$vm" env \
@@ -151,10 +154,13 @@ for vm in $vms; do
     LAB_EXPECT_LFD="$lfd_expect" \
     LAB_EXPECT_FW_MODE="$fw_mode" \
     LAB_EXPECT_AGENT=1 \
+    LAB_EXPECT_CSF_FORK="$csf_fork_expect" \
+    LAB_EXPECT_DL_CONFIGSERVER="$dl_configserver_expect" \
+    LAB_CSF_IPV6_TEST="$csf_ipv6_test" \
     LAB_PANEL_URL="$PANEL_URL_VM" \
     LAB_PANEL_TOKEN="$TOKEN" \
     LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
-    /root/integration.test -test.v -test.count=1 -test.timeout 5m -test.run '^TestLab' >"$RAW" 2>&1
+    /root/integration.test -test.v -test.count=1 -test.timeout 12m -test.run '^TestLab' >"$RAW" 2>&1
   rc=$?
   seconds=$(($(date +%s) - start))
 
@@ -177,6 +183,29 @@ for vm in $vms; do
     "$vm" "$fork" "$csfv" "$pass" "$fail" "$skip" "$seconds" "$result" >>"$REPORT"
   log "$vm: pass=$pass fail=$fail skip=$skip seconds=${seconds}s result=$result"
 done
+
+# --- CSF host-side stages (plan 15-07) ---
+# csf-ingest / csf-killswitch / compat-old-agent: the lab panel's own
+# stored CSF data, the kill switch end to end, and an old agent against
+# this new panel — things the in-VM Go suite above cannot assert, because
+# they live in the panel's database and in a SEPARATE agent binary built
+# from a different git ref. LAB_SKIP_CSF_STAGES=1 exists ONLY for local
+# debugging of the in-VM suite above; the phase gate must always run these
+# three, so skipping them is loudly logged AND marks the whole run FAIL —
+# it must never look like a quieter, still-green run.
+if [ "${LAB_SKIP_CSF_STAGES:-}" = "1" ]; then
+  log "*** LAB_SKIP_CSF_STAGES=1: csf-ingest/csf-killswitch/compat-old-agent SKIPPED — this run counts as FAIL, these stages are required for the phase gate ***"
+  failed_vms="$failed_vms csf-stages-skipped"
+  mkdir -p "$LAB_DIR/reports/raw"
+  printf 'LAB_SKIP_CSF_STAGES=1: csf-ingest/csf-killswitch/compat-old-agent were not run.\nThis is a local-debugging-only escape hatch; the phase gate requires all three.\n' >"$LAB_DIR/reports/raw/$TS-csf-stages-skipped.log"
+  printf '| (skipped) | - | - | csf-stages-skipped | 0 | 1 | 0 | 0 | FAIL |\n' >>"$REPORT"
+else
+  # shellcheck source=lab/csf-stages.sh
+  source "$LAB_DIR/csf-stages.sh"
+  csf_stage_ingest
+  csf_stage_compat_old_agent
+  csf_stage_killswitch
+fi
 
 # --- attack stage (plan 08) ---
 # Runs lab/attack.sh against debian12-nocsf (real SSH/WordPress/IMAP

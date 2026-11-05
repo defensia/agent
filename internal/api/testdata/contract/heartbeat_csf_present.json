@@ -1,0 +1,30 @@
+{
+  "status": "online",
+  "version": "1.4.95-test",
+  "timestamp": "2026-11-05T10:00:00Z",
+  "zombie_count": 0,
+  "csf_installed": true,
+  "csf_version": "15.11",
+  "csf_ports_in": "20,21,22,25,80,443",
+  "csf_ports_out": "20,21,25,80,443,2087",
+  "csf_deny_count": 12,
+  "csf_allow_count": 2,
+  "csf_fork": "sentinel",
+  "csf_fork_evidence": [
+    "downloadservers:sentinel"
+  ],
+  "csf_testing": false,
+  "csf_auto_updates": null,
+  "csf_auto_updates_cron": false,
+  "csf_lf_daemon": true,
+  "csf_lfd_running": true,
+  "csf_ipv6": false,
+  "csf_download_servers": [
+    "raw.githubusercontent.com/example/sentinelfw/refs/heads/main/"
+  ],
+  "csf_deny_ip_limit": 200,
+  "csf_deny_temp_ip_limit": 100,
+  "csf_lists_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "csf_lists_truncated": false,
+  "csf_paused": false
+}

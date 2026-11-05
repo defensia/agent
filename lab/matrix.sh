@@ -123,5 +123,50 @@ vm_has_agent() {
   esac
 }
 
+# vm_csf_fork VM -> the firewall.CSFSnapshot.Fork value the real agent code
+# is expected to detect (internal/firewall/csf_fork.go's Fork* constants:
+# "original-15.00" | "aetherinox" | "sentinel" | "directadmin"), "none" for a
+# VM with no CSF at all, or "-" for a VM with no agent (lab-attacker). This is
+# deliberately distinct from vm_fork (the forks.lock *installer* id, e.g.
+# "aetherinox-15.10") — vm_csf_fork is the evidence-based DETECTION result
+# plan 15-01's detectFork() produces, which never equals the installer id.
+vm_csf_fork() {
+  case "$1" in
+    alma9-csf-orig|alma8-csf-cwp-orphan|alma10-noipset) echo "original-15.00" ;;
+    alma9-csf-aetherinox) echo "aetherinox" ;;
+    debian12-csf-sentinel) echo "sentinel" ;;
+    alma9-csf-da) echo "directadmin" ;;
+    debian12-nocsf) echo "none" ;;
+    lab-attacker) echo "-" ;;
+    *) die "unknown VM $1" ;;
+  esac
+}
+
+# vm_dl_configserver VM -> "1" if /etc/csf/downloadservers is expected to
+# have an active (non-#) configserver.com line, "0" for every other CSF VM,
+# "-" for a VM with no CSF at all. Only alma8-csf-cwp-orphan (the orphan
+# fork, deliberately never re-pointed at a fork's own download servers)
+# keeps the stock configserver.com entries active.
+vm_dl_configserver() {
+  case "$1" in
+    alma8-csf-cwp-orphan) echo "1" ;;
+    alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma10-noipset) echo "0" ;;
+    debian12-nocsf|lab-attacker) echo "-" ;;
+    *) die "unknown VM $1" ;;
+  esac
+}
+
+# vm_csf_ipv6_test VM -> "1" if TestLabCSFPortIPv6Mirror should actually
+# exercise the IPv6 mirroring path on this VM, else "0". Limited to two VMs
+# (one per distro family) rather than all CSF VMs: the test edits csf.conf's
+# IPV6 flag directly and runs a real `csf -r`, so running it everywhere adds
+# wall-clock without adding coverage once both families are proven.
+vm_csf_ipv6_test() {
+  case "$1" in
+    alma9-csf-orig|debian12-csf-sentinel) echo "1" ;;
+    *) echo "0" ;;
+  esac
+}
+
 # vm_golden VM -> golden machine name used for clone-based reset
 vm_golden() { echo "$1-golden"; }

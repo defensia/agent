@@ -1,11 +1,12 @@
 package firewall
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -28,8 +29,18 @@ var (
 // Test seams (Phase 14, LAB-04). Production values never change at runtime;
 // unit tests point csfDir at internal/firewall/testdata/<fork>/ and stub csfExec.
 var (
-	csfDir  = "/etc/csf"
-	csfExec = func(args ...string) ([]byte, error) { return exec.Command("csf", args...).CombinedOutput() }
+	csfDir = "/etc/csf"
+	// csfExec runs every CSF command through the timeout-bounded run() choke
+	// point (phase 15, COL-01) instead of a bare, unbounded exec.Command: the
+	// original version had no timeout and ran inside the heartbeat goroutine,
+	// so a hung `csf -v` stalled every heartbeat.
+	csfExec = func(args ...string) ([]byte, error) {
+		bin := csfBinaryPath()
+		if bin == "" {
+			bin = "csf"
+		}
+		return run(context.Background(), csfExecTimeout, bin, args...)
+	}
 )
 
 // csfPath returns the absolute path of a file inside the CSF config dir.
@@ -53,36 +64,29 @@ func HasCSF() bool {
 	return csfAvailable
 }
 
-// CSFInfo gathers CSF status: version, open ports, deny/allow counts.
+// CSFInfo gathers CSF status: version, open ports, deny/allow counts. This
+// is the synchronous compatibility path (Phase 14's lab integration tests
+// call it directly inside real VMs) — everything else, including the
+// heartbeat, reads CurrentCSFSnapshot() instead so it is never blocked by
+// a slow csf/rpm/systemctl (phase 15, COL-03).
 func CSFInfo() CSFStatus {
-	if !HasCSF() {
-		return CSFStatus{}
-	}
-
-	var out []byte
-	if o, err := csfExec("-v"); err == nil {
-		out = o
-	}
-	return csfInfoFrom(out)
+	return csfStatusFromSnapshot(CollectCSF(context.Background()))
 }
 
 // parseCSFVersion extracts the version number reported by `csf -v` across
 // every known fork's output format (single-line "csf: vX.YY (...)", the
-// multi-line Aetherinox banner, and outputs preceded by a warning line).
+// multi-line Aetherinox banner, ANSI-coloured TTY banners, outputs preceded
+// by a warning line, and RPM-style "-N" release suffixes like "16.34-1").
+// Strips ANSI escapes first, then keeps the LAST matching line's version —
+// tolerant rather than clever: an unrecognized line is simply ignored instead
+// of causing an error.
 func parseCSFVersion(out []byte) string {
 	version := ""
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
+	stripped := ansiRe.ReplaceAllString(string(out), "")
+	for _, line := range strings.Split(stripped, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "csf:") || strings.HasPrefix(line, "v") {
-			// Extract version number from lines like "csf: v14.20" or "v14.20"
-			parts := strings.Fields(line)
-			for _, p := range parts {
-				if strings.HasPrefix(p, "v") && len(p) > 1 {
-					version = strings.TrimPrefix(p, "v")
-					break
-				}
-			}
+		if m := verRe.FindStringSubmatch(line); m != nil {
+			version = m[1]
 		}
 	}
 	return version
@@ -101,26 +105,14 @@ func csfInfoFrom(versionOut []byte) CSFStatus {
 	}
 }
 
-// csfConfigValue reads a value from csf.conf.
+// csfConfigValue reads a value from csf.conf via the tolerant parser
+// (csf_conf.go). Returns "" when csf.conf is unreadable or the key is absent.
 func csfConfigValue(key string) string {
-	data, err := os.ReadFile(csfPath("csf.conf"))
+	vals, _, err := readCSFConf()
 	if err != nil {
 		return ""
 	}
-	prefix := key + " = \""
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, prefix) {
-			// Extract value between quotes: TCP_IN = "22,80,443"
-			val := strings.TrimPrefix(line, prefix)
-			val = strings.TrimSuffix(val, "\"")
-			return val
-		}
-	}
-	return ""
+	return vals[key]
 }
 
 // csfFileLineCount counts non-empty, non-comment lines in a CSF list file.
@@ -141,8 +133,13 @@ func csfFileLineCount(path string) int {
 }
 
 // CSFDenyList returns the IPs/CIDRs in CSF's deny list with their comments.
+// Kind classifies the line (ip, cidr, advanced, include, other); IP is only
+// ever populated for kind "ip"/"cidr" — an advanced filter line or an
+// Include directive is never presented as an IP (see classifyCSFLine in
+// csf_lists.go, phase 15 COL-03, for the misparse this fixes).
 type CSFDenyEntry struct {
 	IP      string `json:"ip"`
+	Kind    string `json:"kind,omitempty"`
 	Comment string `json:"comment,omitempty"`
 }
 
@@ -155,9 +152,10 @@ func CSFAllowList() []CSFDenyEntry {
 	return csfListEntries(csfPath("csf.allow"))
 }
 
-// csfListEntries parses a CSF deny/allow list file (one IP/CIDR per line,
-// optional trailing "# comment", blank lines and full-line comments
-// skipped) into entries, preserving file order.
+// csfListEntries parses a CSF deny/allow list file through classifyCSFLine
+// (csf_lists.go), preserving file order. IP is only set for kind "ip"/
+// "cidr" — an advanced filter line (e.g. "tcp|in|d=22|s=1.2.3.4") or an
+// Include directive is classified but never reported as an IP.
 func csfListEntries(path string) []CSFDenyEntry {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -165,68 +163,34 @@ func csfListEntries(path string) []CSFDenyEntry {
 	}
 	var entries []CSFDenyEntry
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		entry, ok := classifyCSFLine(line)
+		if !ok {
 			continue
 		}
-		parts := strings.SplitN(line, "#", 2)
-		ip := strings.TrimSpace(parts[0])
-		comment := ""
-		if len(parts) > 1 {
-			comment = strings.TrimSpace(parts[1])
+		ip := ""
+		if entry.Kind == "ip" || entry.Kind == "cidr" {
+			ip = entry.Value
 		}
-		if ip != "" {
-			entries = append(entries, CSFDenyEntry{IP: ip, Comment: comment})
-		}
+		entries = append(entries, CSFDenyEntry{IP: ip, Kind: entry.Kind, Comment: entry.Comment})
 	}
 	return entries
 }
 
-// CSFPortAction adds or removes a port from CSF configuration.
-// direction: "in" or "out", action: "add" or "remove"
+// CSFPortAction adds or removes a port from CSF configuration. This is now
+// a thin wrapper around SafePortChange (csf_ports.go, phase 15 COL-05),
+// which replaced the old string-edited-in-place + unguarded csf -r implementation with a
+// backed-up, Go-validated, atomically-written, health-checked and
+// automatically-rolled-back change. direction: "in" or "out", action: "add"
+// or "remove".
 func CSFPortAction(port int, direction string, action string) error {
-	key := "TCP_IN"
-	if direction == "out" {
-		key = "TCP_OUT"
+	r := SafePortChange(context.Background(), PortChangeRequest{
+		Port:      port,
+		Direction: direction,
+		Action:    action,
+	}, PortChangeOptions{})
+
+	if r.Result == "applied" || r.Result == "unchanged" {
+		return nil
 	}
-
-	current := csfConfigValue(key)
-	portStr := strconv.Itoa(port)
-	ports := strings.Split(current, ",")
-
-	if action == "add" {
-		// Check if already present
-		for _, p := range ports {
-			if strings.TrimSpace(p) == portStr {
-				return nil // already open
-			}
-		}
-		ports = append(ports, portStr)
-	} else if action == "remove" {
-		var filtered []string
-		for _, p := range ports {
-			if strings.TrimSpace(p) != portStr {
-				filtered = append(filtered, p)
-			}
-		}
-		ports = filtered
-	}
-
-	newValue := strings.Join(ports, ",")
-
-	// Use csf --profile to apply changes safely
-	// First update the config, then restart CSF
-	if err := csfSetConfigValue(key, newValue); err != nil {
-		return err
-	}
-
-	// Restart CSF to apply
-	return exec.Command("csf", "-r").Run()
-}
-
-// csfSetConfigValue updates a value in csf.conf using sed.
-func csfSetConfigValue(key, value string) error {
-	// Use sed to replace the line in-place
-	pattern := `s/^` + key + ` = ".*"/` + key + ` = "` + value + `"/`
-	return exec.Command("sed", "-i", pattern, csfPath("csf.conf")).Run()
+	return fmt.Errorf("csf port %s %d %s: %s: %v", action, port, direction, r.Reason, r.Err)
 }

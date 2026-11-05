@@ -188,12 +188,18 @@ type HeartbeatRequest struct {
 	RequestsAnalyzed   uint64            `json:"requests_analyzed,omitempty"`
 	ListeningServices  []ListeningService `json:"listening_services,omitempty"`
 	Runtime            *RuntimeStats     `json:"runtime,omitempty"`
-	CSFInstalled       bool           `json:"csf_installed,omitempty"`
-	CSFVersion         string         `json:"csf_version,omitempty"`
-	CSFPortsIn         string         `json:"csf_ports_in,omitempty"`
-	CSFPortsOut        string         `json:"csf_ports_out,omitempty"`
-	CSFDenyCount       int            `json:"csf_deny_count,omitempty"`
-	CSFAllowCount      int            `json:"csf_allow_count,omitempty"`
+	// CSFHeartbeatFields is embedded as a pointer (not tagged) so
+	// encoding/json promotes its fields to the top level. A nil pointer
+	// means "nothing to report"
+	// and drops every csf_* key entirely (COL-06) — see csf.go for why this
+	// replaces the old flat CSF* fields with `omitempty` on bool/int, which
+	// could never distinguish "false" from "absent".
+	*CSFHeartbeatFields
+	// CSFPaused reports the kill-switch state independently of CSF being
+	// installed: a non-nil pointer is always sent (so csf_paused:false is a
+	// real signal, not noise), while nil (integration never touched) omits
+	// the key entirely.
+	CSFPaused           *bool          `json:"csf_paused,omitempty"`
 	ControlPanel        string         `json:"control_panel,omitempty"`
 	ControlPanelVersion string         `json:"control_panel_version,omitempty"`
 	PanelDomains        []string       `json:"panel_domains,omitempty"`
@@ -309,10 +315,23 @@ type SyncResponse struct {
 	MalwareScanRequested   bool                   `json:"malware_scan_requested"`
 	QuarantinePending      []string               `json:"quarantine_pending"`
 	CSFPortActions         []CSFPortAction        `json:"csf_port_actions"`
+
+	// CSFIntegrationDisabled is the org-level kill switch (plan 15-04): the
+	// panel always serializes this field (default false), never omits it, so
+	// an old agent never has to guess that an absent key means false. The
+	// agent echoes no field back for it; it only gates whether the agent
+	// applies sync.CSFPortActions (runtime wiring is plan 15-11).
+	CSFIntegrationDisabled *bool `json:"csf_integration_disabled,omitempty"`
 }
 
 // CSFPortAction is a pending CSF port management command from the panel.
 type CSFPortAction struct {
+	// ID correlates this action with the panel's pending-action queue
+	// (plan 15-04). The agent echoes it back as action_id on the resulting
+	// csf_port_changed/csf_port_error event so the panel can match the exact
+	// action instead of falling back to an ambiguous FIFO guess. Absent on
+	// an old (pre-15-04) panel, in which case ID decodes to "".
+	ID        string `json:"id,omitempty"`
 	Port      int    `json:"port"`
 	Direction string `json:"direction"` // "in" or "out"
 	Action    string `json:"action"`    // "add" or "remove"

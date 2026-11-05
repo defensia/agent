@@ -62,8 +62,12 @@ jobs:
   # diagnostic step is non-blocking: GitHub-hosted runner kernel support
   # for those modules inside a container is unverified, so
   # LAB_EXPECT_FW_MODE is left empty and that one check is allowed to
-  # skip — the 5 CSF assertions in lab/ci/run-csf-container.sh's own hard
-  # gate must PASS, never SKIP or FAIL.
+  # skip — the 11 CSF assertions in lab/ci/run-csf-container.sh's own hard
+  # gate (TestLabCSFDetection, TestLabCSFVersion, TestLabCSFTestingFlag,
+  # TestLabLFDState, TestLabCSFListsReadable, TestLabCSFCollectorFork,
+  # TestLabCSFCollectorState, TestLabCSFPortAddRemove, TestLabCSFPortSSHGuard,
+  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..06) must
+  # PASS, never SKIP or FAIL.
   integration-csf:
     name: Integration (CSF v15.00, systemd container)
     runs-on: ubuntu-latest
@@ -99,3 +103,30 @@ jobs:
           name: ci-integration-log
           path: build/ci-integration.log
           if-no-files-found: ignore
+
+  release-script:
+    name: Release mode script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Release mode tests (stubbed)
+        run: bash .github/scripts/test-release-mode.sh
+
+      - name: Release promote tests (stubbed)
+        run: bash .github/scripts/test-release-promote.sh
+
+      - name: Release build-dispatch tests (stubbed)
+        run: bash .github/scripts/test-release-build.sh
+
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/release.yml .github/workflows/ci.yml
