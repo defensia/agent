@@ -42,8 +42,13 @@ if [ ! -f "$MARKER" ]; then
   mkdir -p /root/csf-src
   tar xzf "$ARCHIVE" -C /root/csf-src
 
-  SRC="$(dirname "$(find /root/csf-src -maxdepth 3 -type f -name csf.pl | head -1)")"
-  [ -n "$SRC" ] && [ -d "$SRC" ] || { echo "ERROR: csf.pl not found after extracting $ARCHIVE" >&2; exit 1; }
+  # Search for install.sh, not csf.pl: several forks' archives bundle
+  # extra copies of csf.pl under control-panel-specific subdirectories
+  # (e.g. original-15.00 ships csf/cwp/csf.pl and csf/vestacp/csf.pl
+  # alongside the real csf/csf.pl) so `find -name csf.pl | head -1` can
+  # pick a subtree with no install.sh in it. install.sh is unique.
+  SRC="$(dirname "$(find /root/csf-src -maxdepth 3 -type f -name install.sh | head -1)")"
+  [ -n "$SRC" ] && [ -d "$SRC" ] || { echo "ERROR: install.sh not found after extracting $ARCHIVE" >&2; exit 1; }
 
   case "$fork_id" in
     directadmin-*)
