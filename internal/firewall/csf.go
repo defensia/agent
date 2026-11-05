@@ -2,11 +2,11 @@ package firewall
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -78,7 +78,7 @@ func CSFInfo() CSFStatus {
 // multi-line Aetherinox banner, ANSI-coloured TTY banners, outputs preceded
 // by a warning line, and RPM-style "-N" release suffixes like "16.34-1").
 // Strips ANSI escapes first, then keeps the LAST matching line's version —
-// tolerant rather than clever: an unrecognised line is simply ignored instead
+// tolerant rather than clever: an unrecognized line is simply ignored instead
 // of causing an error.
 func parseCSFVersion(out []byte) string {
 	version := ""
@@ -176,51 +176,21 @@ func csfListEntries(path string) []CSFDenyEntry {
 	return entries
 }
 
-// CSFPortAction adds or removes a port from CSF configuration.
-// direction: "in" or "out", action: "add" or "remove"
+// CSFPortAction adds or removes a port from CSF configuration. This is now
+// a thin wrapper around SafePortChange (csf_ports.go, phase 15 COL-05),
+// which replaced the old string-edited-in-place + unguarded csf -r implementation with a
+// backed-up, Go-validated, atomically-written, health-checked and
+// automatically-rolled-back change. direction: "in" or "out", action: "add"
+// or "remove".
 func CSFPortAction(port int, direction string, action string) error {
-	key := "TCP_IN"
-	if direction == "out" {
-		key = "TCP_OUT"
+	r := SafePortChange(context.Background(), PortChangeRequest{
+		Port:      port,
+		Direction: direction,
+		Action:    action,
+	}, PortChangeOptions{})
+
+	if r.Result == "applied" || r.Result == "unchanged" {
+		return nil
 	}
-
-	current := csfConfigValue(key)
-	portStr := strconv.Itoa(port)
-	ports := strings.Split(current, ",")
-
-	if action == "add" {
-		// Check if already present
-		for _, p := range ports {
-			if strings.TrimSpace(p) == portStr {
-				return nil // already open
-			}
-		}
-		ports = append(ports, portStr)
-	} else if action == "remove" {
-		var filtered []string
-		for _, p := range ports {
-			if strings.TrimSpace(p) != portStr {
-				filtered = append(filtered, p)
-			}
-		}
-		ports = filtered
-	}
-
-	newValue := strings.Join(ports, ",")
-
-	// Use csf --profile to apply changes safely
-	// First update the config, then restart CSF
-	if err := csfSetConfigValue(key, newValue); err != nil {
-		return err
-	}
-
-	// Restart CSF to apply
-	return exec.Command("csf", "-r").Run()
-}
-
-// csfSetConfigValue updates a value in csf.conf using sed.
-func csfSetConfigValue(key, value string) error {
-	// Use sed to replace the line in-place
-	pattern := `s/^` + key + ` = ".*"/` + key + ` = "` + value + `"/`
-	return exec.Command("sed", "-i", pattern, csfPath("csf.conf")).Run()
+	return fmt.Errorf("csf port %s %d %s: %s: %v", action, port, direction, r.Reason, r.Err)
 }
