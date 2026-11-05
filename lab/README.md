@@ -234,19 +234,30 @@ licensed DirectAdmin are deliberately absent from this matrix (see §8).
     gone for good; only `lab-up`'s own `panel-up.sh` → `lab:bootstrap` call
     can mint a valid one again. Never hand-carry a token across a
     `--all --panel` reset.
-  - **Never run a manual `lab:bootstrap` (or `make lab-verify`) while a
-    `make lab-test` is in flight, especially during its attack stage.**
-    `lab/test.sh` captures the token once near the top of its own run;
-    `attack.sh`'s traffic-generation phase takes real wall-clock time, and a
-    concurrent `lab:bootstrap` call from another terminal invalidates that
+  - **Known design limitation, not a fixed bug: two concurrent lab
+    operations are mutually destructive.** `lab/test.sh` captures the token
+    once near the top of its own run; `attack.sh`'s traffic-generation
+    phase takes real wall-clock time, and ANY other `lab:bootstrap` call in
+    that window (direct, or via a concurrently-run `make lab-verify`/
+    `make lab-test` from a second terminal/session) invalidates the
     captured token mid-run, producing a `401 Unauthenticated` on
     `TestAttackEventsReachPanel` that has nothing to do with the attack
-    traffic itself (`2026-11-05-1434.md`). Fixed in `lab/test.sh` by
-    re-reading the token immediately before the attack-stage run instead of
-    reusing the one captured minutes earlier — this narrows, but does not
-    eliminate, the race; still run lab commands one at a time, never two
-    `make lab-verify`/`make lab-test`/manual-bootstrap invocations
-    concurrently.
+    traffic itself (`2026-11-05-1434.md`; the observed trigger that day was
+    a second, independent `make lab-verify`/`make lab-test` run executed by
+    another session verifying the lab concurrently — not a defect in the
+    attack traffic or the harness's own sequential logic). `lab/test.sh`
+    now re-reads the token immediately before the attack-stage run instead
+    of reusing the one captured minutes earlier, which **narrows the
+    window but does not cure the design**: the lab still has exactly one
+    shared Sanctum token, and any two lab operations running at the same
+    time can still race each other out from under themselves. **Phases
+    15-21 should treat "never run two lab-* commands concurrently" as a
+    hard operating rule, not a suggestion** — with multiple agents
+    potentially driving the same lab, this will bite harder than it did
+    here. The real fix is structural (out of scope for this plan): either
+    a token per caller/purpose instead of one named `lab` token for
+    everything, or a `lab:bootstrap` mode that mints an additional token
+    without revoking ones already in use.
   - A failure report must never ship with an empty diagnostic section
     (`2026-11-05-1447.md` did, before this fix): `lab/test.sh`'s
     `## Failures` block now falls back to the raw log's own tail when the
