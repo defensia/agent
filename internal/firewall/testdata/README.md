@@ -130,7 +130,7 @@ Each directory contains:
 Licensed cPanel and DirectAdmin installations (the real commercial panels,
 as opposed to the `poralix/da-csf` DirectAdmin-compatible fork captured
 here) are **not** represented in this fixture set — they require a paid
-license and are validated later, on real ZENWEB test servers (Phase 21), not
+license and are validated later, on licensed pilot servers (Phase 21), not
 in this local lab.
 
 ## Known parser gaps for Phase 15
