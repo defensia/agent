@@ -120,6 +120,9 @@ jobs:
       - name: Release mode tests (stubbed)
         run: bash .github/scripts/test-release-mode.sh
 
+      - name: Release promote tests (stubbed)
+        run: bash .github/scripts/test-release-promote.sh
+
       - name: actionlint
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7

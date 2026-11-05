@@ -239,6 +239,99 @@ test_downgrade() {
     echo "  ok: downgrade"
 }
 
+# ---------------------------------------------------------------------------
+# Static wiring checks on release.yml itself: workflow_dispatch inputs,
+# build/docker dispatch guard, the promote job, the helm job's needs/if/
+# checkout, and an injection check (YAML-parsed, not grep) that no `run:`
+# body anywhere in the file references a workflow input directly or an
+# input-derived `steps.version.outputs` — those must reach shell only via
+# `env:`.
+test_dispatch_wiring() {
+    [ -f "$RELEASE_YML" ] || { fail "dispatch_wiring: $RELEASE_YML missing"; return; }
+
+    if ! python3 - "$RELEASE_YML" <<'PYEOF'
+import sys, yaml
+path = sys.argv[1]
+text = open(path).read()
+w = yaml.safe_load(text)
+errors = []
+
+# PyYAML's YAML-1.1 resolver parses a bare `on:` key as the boolean True.
+on = w.get(True, w.get('on')) or {}
+wd = on.get('workflow_dispatch') or {}
+inputs = wd.get('inputs') or {}
+tag_in = inputs.get('tag') or {}
+promote_in = inputs.get('promote') or {}
+build_in = inputs.get('build') or {}
+if tag_in.get('type') != 'string' or tag_in.get('required') is not True:
+    errors.append(f'tag input wrong: {tag_in!r}')
+if promote_in.get('type') != 'boolean' or promote_in.get('default') is not False:
+    errors.append(f'promote input wrong: {promote_in!r}')
+if build_in.get('type') != 'boolean' or build_in.get('default') is not False:
+    errors.append(f'build input wrong: {build_in!r}')
+
+jobs = w.get('jobs') or {}
+for name in ('build', 'docker'):
+    j = jobs.get(name) or {}
+    cond = str(j.get('if', ''))
+    if "github.event_name == 'push'" not in cond or 'inputs.build' not in cond:
+        errors.append(f'{name} job missing dispatch guard if: {cond!r}')
+
+promote_job = jobs.get('promote') or {}
+pcond = str(promote_job.get('if', ''))
+if 'workflow_dispatch' not in pcond or '!inputs.build' not in pcond:
+    errors.append(f'promote job if wrong: {pcond!r}')
+found_script = False
+for s in (promote_job.get('steps') or []):
+    run = str(s.get('run') or '')
+    if 'release-promote.sh' in run:
+        found_script = True
+        env = s.get('env') or {}
+        if env.get('TAG') != "${{ inputs.tag }}":
+            errors.append(f'promote step env TAG wrong: {env.get("TAG")!r}')
+        if env.get('PROMOTE') != "${{ inputs.promote }}":
+            errors.append(f'promote step env PROMOTE wrong: {env.get("PROMOTE")!r}')
+if not found_script:
+    errors.append('promote job does not run release-promote.sh')
+
+helm_job = jobs.get('helm') or {}
+needs = helm_job.get('needs')
+if not needs or set(needs) != {'build', 'promote'}:
+    errors.append(f'helm needs wrong: {needs!r}')
+hcond = str(helm_job.get('if') or '')
+if 'needs.build.outputs.promoted' not in hcond or 'needs.promote.result' not in hcond:
+    errors.append(f'helm if wrong: {hcond!r}')
+checkout = next((s for s in (helm_job.get('steps') or []) if 'checkout' in str(s.get('uses', ''))), None)
+if not checkout or 'inputs.tag' not in str((checkout.get('with') or {}).get('ref', '')):
+    errors.append('helm checkout ref does not reference inputs.tag')
+
+forbidden = ['${{ inputs.', '${{ github.event.inputs.', 'steps.version.outputs']
+for jname, j in jobs.items():
+    for s in (j.get('steps') or []):
+        run = s.get('run')
+        if run is None:
+            continue
+        for pat in forbidden:
+            if pat in str(run):
+                errors.append(f'run body in job={jname} step={s.get("name")!r} contains {pat!r}')
+
+if 'agent:latest' in text:
+    errors.append('agent:latest literal present')
+
+if errors:
+    for e in errors:
+        print('WIRING FAIL:', e, file=sys.stderr)
+    sys.exit(1)
+print('wiring OK')
+PYEOF
+    then
+        fail "dispatch_wiring: see stderr above"
+        return
+    fi
+
+    echo "  ok: dispatch_wiring"
+}
+
 echo "== release-promote tests =="
 test_promote_ok
 test_preflight_only
@@ -248,6 +341,7 @@ test_not_found
 test_missing_assets
 test_missing_image
 test_downgrade
+test_dispatch_wiring
 
 if [ "$FAILED" != "0" ]; then
     echo "release-promote tests: FAILED" >&2

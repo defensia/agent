@@ -4,6 +4,20 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v1.4.95"
+        type: string
+        required: true
+      promote:
+        description: "true = promote; false = read-only preflight (ignored when build=true)"
+        type: boolean
+        default: false
+      build:
+        description: "true = build/sign/publish version-only artifacts for an existing STAGED (prerelease) tag whose tag event did not trigger this workflow; mutually exclusive with promote"
+        type: boolean
+        default: false
 
 permissions: read-all
 
@@ -11,6 +25,9 @@ jobs:
   build:
     name: Build & Release
     runs-on: ubuntu-latest
+    # A promote dispatch never rebuilds or re-releases; only a tag push or an
+    # explicit build dispatch reaches this job (Phase 15 COL-04).
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     permissions:
       contents: write
       id-token: write
@@ -191,6 +208,8 @@ jobs:
     name: Docker Image
     runs-on: ubuntu-latest
     needs: build
+    # Same guard as the build job: a promote dispatch never rebuilds.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     permissions:
       packages: write
       id-token: write
@@ -261,14 +280,63 @@ jobs:
             --yes \
             ghcr.io/defensia/agent@${{ steps.docker-build.outputs.digest }}
 
+  promote:
+    name: Promote staged release
+    runs-on: ubuntu-latest
+    # A build dispatch (or a tag push) never promotes in the same run —
+    # promoting an already-staged release is a separate, deliberate run
+    # (Phase 15 COL-04). `!inputs.build` also excludes tag pushes, which
+    # never reach this job: `github.event_name == 'workflow_dispatch'`
+    # already requires a dispatch.
+    if: github.event_name == 'workflow_dispatch' && !inputs.build
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Deliberately NOT continue-on-error, unlike the docker job's Docker
+      # Hub login: a failed Docker Hub login here must stop the promotion
+      # before the script's preflight (and the ghcr retag) ever starts —
+      # promoting only one of the two registries would leave :latest
+      # inconsistent between them.
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Promote (or preflight) staged release
+        id: promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          PROMOTE: ${{ inputs.promote }}
+        run: bash .github/scripts/release-promote.sh
+
   helm:
     name: Helm Chart
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, promote]
     # An unpromoted (staged) release must not overwrite the chart's
-    # appVersion — Phase 15 COL-04. Plan 15-13 widens this condition for
-    # the workflow_dispatch promote path.
-    if: needs.build.outputs.promoted == 'true'
+    # appVersion — Phase 15 COL-04. Runs after either a promoted tag push
+    # (needs.build.outputs.promoted) or a successful promote dispatch
+    # (needs.promote.result); !cancelled() && !failure() keeps a skipped
+    # build/promote job (the "other" path on a given run) from blocking it.
+    if: ${{ !cancelled() && !failure() && (needs.build.outputs.promoted == 'true' || (github.event_name == 'workflow_dispatch' && inputs.promote && needs.promote.result == 'success')) }}
     permissions:
       packages: write
       id-token: write
@@ -276,14 +344,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag"; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Update Chart appVersion
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.VERSION }}\"/" charts/defensia-agent/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/defensia-agent/Chart.yaml
 
       - name: Login to GHCR (Helm)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
