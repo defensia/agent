@@ -64,17 +64,13 @@ func HasCSF() bool {
 	return csfAvailable
 }
 
-// CSFInfo gathers CSF status: version, open ports, deny/allow counts.
+// CSFInfo gathers CSF status: version, open ports, deny/allow counts. This
+// is the synchronous compatibility path (Phase 14's lab integration tests
+// call it directly inside real VMs) — everything else, including the
+// heartbeat, reads CurrentCSFSnapshot() instead so it is never blocked by
+// a slow csf/rpm/systemctl (phase 15, COL-03).
 func CSFInfo() CSFStatus {
-	if !HasCSF() {
-		return CSFStatus{}
-	}
-
-	var out []byte
-	if o, err := csfExec("-v"); err == nil {
-		out = o
-	}
-	return csfInfoFrom(out)
+	return csfStatusFromSnapshot(CollectCSF(context.Background()))
 }
 
 // parseCSFVersion extracts the version number reported by `csf -v` across
