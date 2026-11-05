@@ -16,12 +16,21 @@
 #   GITHUB_OUTPUT    path to the step output file (required)
 #   GH_TOKEN         used implicitly by `gh`
 #   RELEASE_MODE_SLEEP  seconds between retries (default 5; tests override to 0)
+#   BUILD_DISPATCH   "true" when called from release.yml's `-f build=true`
+#                    workflow_dispatch path (Phase 15 COL-04, plan 15-13):
+#                    builds/signs/publishes version-only artifacts for an
+#                    EXISTING staged (prerelease) tag whose tag event did
+#                    not trigger this workflow. Fails closed before any
+#                    output is written if the release does not exist, is
+#                    not a prerelease, or was already built (checksums.txt
+#                    already present) — never a path to Docker :latest.
 #
 set -euo pipefail
 
 TAG="${TAG:-}"
 REPO="${REPO:-}"
 SLEEP_SECS="${RELEASE_MODE_SLEEP:-5}"
+BUILD_DISPATCH="${BUILD_DISPATCH:-}"
 
 if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "::error::invalid TAG '${TAG}' (expected vX.Y.Z)" >&2
@@ -38,11 +47,56 @@ fi
 
 V="${TAG#v}"
 
-PROMOTED=""
-ATTEMPT=1
 MAX_ATTEMPTS=3
 ERR_FILE="$(mktemp)"
 trap 'rm -f "$ERR_FILE"' EXIT
+
+if [ "$BUILD_DISPATCH" = "true" ]; then
+    ATTEMPT=1
+    RELEASE_JSON=""
+    while :; do
+        if RELEASE_JSON="$(gh release view "$TAG" --repo "$REPO" --json isPrerelease,assets 2>"$ERR_FILE")"; then
+            break
+        fi
+        ERR="$(cat "$ERR_FILE" 2>/dev/null || true)"
+        if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+            if echo "$ERR" | grep -qi 'release not found'; then
+                echo "::error::build dispatch: release ${TAG} does not exist (create it with scripts/release-agent.sh --no-promote first)" >&2
+            else
+                echo "::error::cannot read release ${TAG} for build dispatch after ${MAX_ATTEMPTS} attempts: ${ERR}" >&2
+            fi
+            exit 1
+        fi
+        ATTEMPT=$((ATTEMPT + 1))
+        sleep "$SLEEP_SECS"
+    done
+
+    IS_PRERELEASE="$(echo "$RELEASE_JSON" | jq -r '.isPrerelease')"
+    if [ "$IS_PRERELEASE" != "true" ]; then
+        echo "::error::build dispatch is only for staged (prerelease) releases" >&2
+        exit 1
+    fi
+
+    if echo "$RELEASE_JSON" | jq -r '.assets[].name' | grep -qxF 'checksums.txt'; then
+        echo "::error::${TAG} already built (checksums.txt present): nothing to do" >&2
+        exit 1
+    fi
+
+    {
+        echo "promoted=false"
+        echo "make_latest=false"
+        echo "prerelease=true"
+        echo "docker_tags<<EOF"
+        echo "ghcr.io/defensia/agent:${V}"
+        echo "defensiacloud/agent:${V}"
+        echo "EOF"
+    } >> "$GITHUB_OUTPUT"
+    echo "release mode: staged (build dispatch)"
+    exit 0
+fi
+
+PROMOTED=""
+ATTEMPT=1
 
 while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
     if OUT="$(gh release view "$TAG" --repo "$REPO" --json isPrerelease -q .isPrerelease 2>"$ERR_FILE")"; then

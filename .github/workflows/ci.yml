@@ -123,6 +123,9 @@ jobs:
       - name: Release promote tests (stubbed)
         run: bash .github/scripts/test-release-promote.sh
 
+      - name: Release build-dispatch tests (stubbed)
+        run: bash .github/scripts/test-release-build.sh
+
       - name: actionlint
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7

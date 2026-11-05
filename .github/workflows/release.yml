@@ -1,5 +1,7 @@
 name: Release
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release {0} build={1} promote={2}', inputs.tag, inputs.build, inputs.promote) || format('Release {0}', github.ref_name) }}
+
 on:
   push:
     tags:
@@ -28,6 +30,13 @@ jobs:
     # A promote dispatch never rebuilds or re-releases; only a tag push or an
     # explicit build dispatch reaches this job (Phase 15 COL-04).
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
+    # A dispatch queued behind a late tag-event run for the SAME tag then
+    # hits release-mode.sh's already-built guard instead of double-publishing
+    # (cancel-in-progress: false — the tag-event run must finish, not be
+    # cancelled by a dispatch that arrived later for the same tag).
+    concurrency:
+      group: release-build-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
@@ -37,8 +46,25 @@ jobs:
       docker_tags: ${{ steps.mode.outputs.docker_tags }}
 
     steps:
+      # Runs before checkout, so a bad tag or build+promote both true never
+      # reaches the repository at all.
+      - name: Dispatch guard
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.tag }}
+          BUILD: ${{ inputs.build }}
+          PROMOTE: ${{ inputs.promote }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          if [ "$PROMOTE" = true ]; then
+            echo "::error::build and promote are mutually exclusive: build first, promote in a separate run" >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -48,7 +74,12 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
 
       # Decides promoted vs staged BEFORE anything builds or publishes, so a
       # staged (prerelease) release never reaches Docker :latest, the
@@ -58,8 +89,9 @@ jobs:
         id: mode
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           REPO: ${{ github.repository }}
+          BUILD_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
         run: bash .github/scripts/release-mode.sh
 
       # Blocking on purpose. install.sh ships as a release asset, and an asset
@@ -158,6 +190,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.version.outputs.TAG }}
           name: ${{ steps.version.outputs.VERSION }}
           fail_on_unmatched_files: true
           make_latest: ${{ steps.mode.outputs.make_latest }}
@@ -218,10 +251,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -352,7 +392,7 @@ jobs:
         env:
           TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
           echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Update Chart appVersion
