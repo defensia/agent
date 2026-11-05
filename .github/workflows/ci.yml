@@ -103,3 +103,24 @@ jobs:
           name: ci-integration-log
           path: build/ci-integration.log
           if-no-files-found: ignore
+
+  release-script:
+    name: Release mode script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Release mode tests (stubbed)
+        run: bash .github/scripts/test-release-mode.sh
+
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/release.yml .github/workflows/ci.yml
