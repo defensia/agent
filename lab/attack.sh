@@ -134,11 +134,26 @@ do_prepare() {
   # Connectivity check: an alias that doesn't actually route would make
   # every later leg fail with "connection refused/timeout" that looks
   # identical to "the agent isn't detecting this" — catch it here instead.
+  #
+  # One retry, not a silent pass: target-services.sh just (synchronously,
+  # above in this same prepare()) restarted nginx on $target, and a
+  # `systemctl restart` can return before the new process has actually
+  # bound its listening socket — observed live (2026-11-05): the first
+  # curl got '000' immediately after a restart, a manual re-run moments
+  # later succeeded with no code change. Re-check once after a short pause
+  # before declaring real alias/routing brokenness.
   local code
   code="$(vm_root "$ATTACKER_VM" curl -s -o /dev/null -w '%{http_code}' --interface "$web_ip" --max-time 5 "http://$target_ip/" 2>/dev/null)"
   case "$code" in
     200|301|302|403|404) ;;
-    *) die "attack.sh: alias routing broken (curl --interface $web_ip http://$target_ip/ -> '$code', expected 2xx/3xx/4xx)" ;;
+    *)
+      sleep 2
+      code="$(vm_root "$ATTACKER_VM" curl -s -o /dev/null -w '%{http_code}' --interface "$web_ip" --max-time 5 "http://$target_ip/" 2>/dev/null)"
+      case "$code" in
+        200|301|302|403|404) ;;
+        *) die "attack.sh: alias routing broken (curl --interface $web_ip http://$target_ip/ -> '$code', expected 2xx/3xx/4xx, retried once)" ;;
+      esac
+      ;;
   esac
 
   log "attack: prepared (ssh=$ssh_ip web=$web_ip mail=$mail_ip -> $target_ip)"
