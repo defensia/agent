@@ -29,7 +29,6 @@ vms="$*"
 preflight_orb
 
 TS="$(date +%Y-%m-%d-%H%M)"
-mkdir -p "$LAB_DIR/reports/raw"
 REPORT="$LAB_DIR/reports/$TS.md"
 REPORT_REL="lab/reports/$TS.md"
 
@@ -44,14 +43,23 @@ repo_sha() {
   printf '%s' "$sha"
 }
 
-# Captured BEFORE the report file is created, not inside write_header:
-# the report lands inside $REPO_DIR itself (lab/reports/$TS.md), so
-# computing `git status --porcelain` for $REPO_DIR AFTER that file
-# exists would make the agent worktree look "-dirty" purely because of
-# this run's own output — a self-inflicted false positive that would
-# make a clean worktree impossible to ever report as clean.
+# Captured BEFORE the report file is created below, not inside
+# write_header: the report lands inside $REPO_DIR itself (as
+# lab/reports/$TS.md), so computing `git status --porcelain` for
+# $REPO_DIR AFTER that file exists would make the agent worktree look
+# "-dirty" purely because of this run's own output — a self-inflicted
+# false positive that would make a clean worktree impossible to ever
+# report as clean.
 AGENT_SHA="$(repo_sha "$REPO_DIR")"
 PANEL_SHA="$(repo_sha "$PANEL_DIR")"
+
+mkdir -p "$LAB_DIR/reports/raw"
+# TS has minute granularity: two runs started in the same clock-minute
+# would otherwise both >> onto the same path. Truncate up front (both
+# the success and the verify-gate-fail path only ever append from here
+# on) so a same-minute rerun overwrites cleanly instead of concatenating
+# a second header/table onto the first run's content.
+: >"$REPORT"
 
 # expect_or_empty VALUE — lab/matrix.sh's "-" sentinel ("not applicable")
 # must cross the env boundary as an empty string per the env contract
@@ -102,7 +110,6 @@ write_header() {
 verify_out="$("$LAB_DIR/verify.sh" "$@" 2>&1)"
 verify_rc=$?
 if [ "$verify_rc" -ne 0 ]; then
-  : >"$REPORT"
   write_header "$REPORT"
   {
     printf '**Overall: FAIL (lab broken: verify.sh)**\n\n'
