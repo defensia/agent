@@ -52,30 +52,45 @@ vm_root() {
   orb -m "$vm" -u root "$@"
 }
 
-# Copy a single file to a VM. If the source is a directory, fall back to a
-# tar-based copy (orbctl push directory support is unverified — see 14-03
-# Task 2 action notes).
+# Copy a file or directory into a VM.
+#
+# `orbctl push -m VM src dest` requires a Linux user matching the macOS
+# username to already exist inside the VM; on a freshly created machine
+# in this environment that account is not guaranteed to exist yet
+# ("[-32098] lookup user: unknown user <name>", observed empirically on
+# a fresh alma:9 machine whose `orbctl info` record stayed stuck at
+# state "provisioning" even though systemd itself was fully booted and
+# usable via `vm_root`). Non-isolated OrbStack machines (the lab default
+# — nothing in lab/ sets --isolated) bind-mount the ENTIRE host root
+# filesystem into the VM at identical absolute paths (verified: reading
+# a file from inside the VM at its macOS path returns the same bytes),
+# so the most reliable "push" is simply a root-owned `cp -a` from that
+# passthrough path — it needs no OrbStack-side user bookkeeping at all.
+# Fall back to `orbctl push` only if the passthrough path is not visible
+# inside the VM (e.g. a future --isolated machine).
 vm_push() {
-  local vm=$1 src=$2 dest=${3:-}
+  local vm=$1 src=$2 dest=${3:-} abs_src
   if [ -d "$src" ]; then
-    vm_push_dir "$vm" "$src" "$dest"
+    abs_src="$(cd "$src" && pwd)"
+  else
+    abs_src="$(cd "$(dirname "$src")" && pwd)/$(basename "$src")"
+  fi
+  dest="${dest:-/root/$(basename "$src")}"
+  if vm_root "$vm" test -e "$abs_src" >/dev/null 2>&1; then
+    if [ -d "$src" ]; then
+      vm_root "$vm" bash -c "mkdir -p '$dest' && cp -a '$abs_src'/. '$dest'/"
+    else
+      vm_root "$vm" bash -c "mkdir -p \"\$(dirname '$dest')\" && cp -a '$abs_src' '$dest'"
+    fi
   else
     orbctl push -m "$vm" "$src" "$dest"
   fi
 }
 
-# Push a directory to a VM via tar (works regardless of whether `orbctl
-# push` supports directories natively).
-vm_push_dir() {
-  local vm=$1 src=$2 dest=${3:-} tmp base
-  base="$(basename "$src")"
-  dest="${dest:-/root/$base}"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/lab-push-XXXXXX").tar.gz"
-  tar czf "$tmp" -C "$(dirname "$src")" "$base"
-  orbctl push -m "$vm" "$tmp" "/root/$(basename "$tmp")"
-  vm_root "$vm" bash -c "mkdir -p '$dest' && tar xzf '/root/$(basename "$tmp")' -C '$dest' --strip-components=1 && rm -f '/root/$(basename "$tmp")'"
-  rm -f "$tmp"
-}
+# Push a directory to a VM. Same strategy as vm_push (host-filesystem
+# passthrough first, orbctl push fallback) — kept as a distinct name for
+# call-site clarity when the source is known to be a directory.
+vm_push_dir() { vm_push "$@"; }
 
 # wait_vm_ready VM [timeout=180]
 wait_vm_ready() {
