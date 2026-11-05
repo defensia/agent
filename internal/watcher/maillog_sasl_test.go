@@ -170,6 +170,84 @@ func TestOneSMTPAuthFailureCountsOnce(t *testing.T) {
 	}
 }
 
+// The same pair, with the Postfix half carrying sasl_username — which is what
+// it does on 312 of 341 failures on the reporting MSP's server, so this is the
+// common shape and the one above is the exception.
+//
+// This is a regression test for the fix itself. Reading sasl_username broke the
+// pairing it was added alongside: the echo was recognised by having no user, so
+// the moment it had one, both halves counted and the ban threshold halved.
+// TestOneSMTPAuthFailureCountsOnce passed throughout, because its Postfix line
+// is the challenge-only shape that still carries no name.
+func TestOneSMTPAuthFailureCountsOnceWhenPostfixNamesTheAccount(t *testing.T) {
+	got := make(chan map[string]string, 8)
+	w := testWatcher(func(ip, reason, sev string, d map[string]string) {
+		got <- d
+	})
+
+	w.processLine(`Nov  5 06:33:23 mail dovecot: auth-worker(2451): passwd-file(sales@example.com,203.0.113.5): Password mismatch`)
+	w.processLine(`Nov  5 06:33:23 mail postfix/smtpd[2460]: warning: unknown[203.0.113.5]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=sales@example.com`)
+
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event reported for a failed login")
+	}
+	select {
+	case extra := <-got:
+		t.Errorf("one failed login produced a second event: %v", extra)
+	case <-time.After(250 * time.Millisecond):
+	}
+	if n := len(w.attempts["203.0.113.5"]); n != 1 {
+		t.Errorf("attempts counted = %d, want 1 — the ban threshold depends on this", n)
+	}
+}
+
+// Pairing is per-IP, so one account attacked from two hosts is two attempts
+// however each log line happens to spell it.
+//
+// The MSP saw this shape and asked whether the bare spelling meant we had cut
+// the domain off: john.magill.uk from one IP, john.magill.uk@rainbowvapes.co.uk
+// from another, a second apart. Neither value is trimmed — each is what its own
+// log line carried — and the two must never collapse into one attempt.
+func TestSameAccountFromTwoIPsIsTwoAttempts(t *testing.T) {
+	w := testWatcher(func(ip, reason, sev string, d map[string]string) {})
+
+	w.processLine(`Nov  5 06:33:09 mail postfix/smtpd[2460]: warning: unknown[72.205.174.51]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=john.magill.uk@rainbowvapes.co.uk`)
+	w.processLine(`Nov  5 06:33:23 mail postfix/smtpd[2461]: warning: unknown[203.128.10.90]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=john.magill.uk`)
+
+	if n := len(w.attempts["72.205.174.51"]); n != 1 {
+		t.Errorf("qualified-spelling IP attempts = %d, want 1", n)
+	}
+	if n := len(w.attempts["203.128.10.90"]); n != 1 {
+		t.Errorf("bare-spelling IP attempts = %d, want 1", n)
+	}
+}
+
+// A bare local part is read out whole, not produced by trimming a domain. The
+// MSP hosts eleven mail domains, so if we were cutting at the "@" the value
+// would silently merge distinct mailboxes.
+func TestBareSaslUsernameIsNotATrimmedDomain(t *testing.T) {
+	qualified := `Nov  5 06:33:09 mail postfix/smtpd[2460]: warning: unknown[203.0.113.5]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=john.magill.uk@rainbowvapes.co.uk`
+	bare := `Nov  5 06:33:23 mail postfix/smtpd[2461]: warning: unknown[203.0.113.5]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=john.magill.uk`
+
+	obs, ok := observeMailLine(qualified)
+	if !ok {
+		t.Fatal("qualified line not detected")
+	}
+	if obs.User != "john.magill.uk@rainbowvapes.co.uk" {
+		t.Errorf("target_user = %q, want the domain kept intact", obs.User)
+	}
+
+	obs, ok = observeMailLine(bare)
+	if !ok {
+		t.Fatal("bare line not detected")
+	}
+	if obs.User != "john.magill.uk" {
+		t.Errorf("target_user = %q, want the line's own value verbatim", obs.User)
+	}
+}
+
 // Pairing is one-for-one, not a time bucket: a fast attacker must still have
 // every attempt counted.
 func TestFastAttackerKeepsEveryAttempt(t *testing.T) {
