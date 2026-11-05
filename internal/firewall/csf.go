@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/exec"
@@ -28,8 +29,18 @@ var (
 // Test seams (Phase 14, LAB-04). Production values never change at runtime;
 // unit tests point csfDir at internal/firewall/testdata/<fork>/ and stub csfExec.
 var (
-	csfDir  = "/etc/csf"
-	csfExec = func(args ...string) ([]byte, error) { return exec.Command("csf", args...).CombinedOutput() }
+	csfDir = "/etc/csf"
+	// csfExec runs every CSF command through the timeout-bounded run() choke
+	// point (phase 15, COL-01) instead of a bare, unbounded exec.Command: the
+	// original version had no timeout and ran inside the heartbeat goroutine,
+	// so a hung `csf -v` stalled every heartbeat.
+	csfExec = func(args ...string) ([]byte, error) {
+		bin := csfBinaryPath()
+		if bin == "" {
+			bin = "csf"
+		}
+		return run(context.Background(), csfExecTimeout, bin, args...)
+	}
 )
 
 // csfPath returns the absolute path of a file inside the CSF config dir.
@@ -68,21 +79,18 @@ func CSFInfo() CSFStatus {
 
 // parseCSFVersion extracts the version number reported by `csf -v` across
 // every known fork's output format (single-line "csf: vX.YY (...)", the
-// multi-line Aetherinox banner, and outputs preceded by a warning line).
+// multi-line Aetherinox banner, ANSI-coloured TTY banners, outputs preceded
+// by a warning line, and RPM-style "-N" release suffixes like "16.34-1").
+// Strips ANSI escapes first, then keeps the LAST matching line's version —
+// tolerant rather than clever: an unrecognised line is simply ignored instead
+// of causing an error.
 func parseCSFVersion(out []byte) string {
 	version := ""
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
+	stripped := ansiRe.ReplaceAllString(string(out), "")
+	for _, line := range strings.Split(stripped, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "csf:") || strings.HasPrefix(line, "v") {
-			// Extract version number from lines like "csf: v14.20" or "v14.20"
-			parts := strings.Fields(line)
-			for _, p := range parts {
-				if strings.HasPrefix(p, "v") && len(p) > 1 {
-					version = strings.TrimPrefix(p, "v")
-					break
-				}
-			}
+		if m := verRe.FindStringSubmatch(line); m != nil {
+			version = m[1]
 		}
 	}
 	return version
@@ -101,26 +109,14 @@ func csfInfoFrom(versionOut []byte) CSFStatus {
 	}
 }
 
-// csfConfigValue reads a value from csf.conf.
+// csfConfigValue reads a value from csf.conf via the tolerant parser
+// (csf_conf.go). Returns "" when csf.conf is unreadable or the key is absent.
 func csfConfigValue(key string) string {
-	data, err := os.ReadFile(csfPath("csf.conf"))
+	vals, _, err := readCSFConf()
 	if err != nil {
 		return ""
 	}
-	prefix := key + " = \""
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, prefix) {
-			// Extract value between quotes: TCP_IN = "22,80,443"
-			val := strings.TrimPrefix(line, prefix)
-			val = strings.TrimSuffix(val, "\"")
-			return val
-		}
-	}
-	return ""
+	return vals[key]
 }
 
 // csfFileLineCount counts non-empty, non-comment lines in a CSF list file.
