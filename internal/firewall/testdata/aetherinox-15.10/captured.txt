@@ -1,0 +1,1 @@
+vm=alma9-csf-aetherinox distro=alma:9 fork=aetherinox-15.10 date=2026-11-05T10:18:23Z forks.lock-pin=4260bc811dfbf25dc200a527ae64c89361404086

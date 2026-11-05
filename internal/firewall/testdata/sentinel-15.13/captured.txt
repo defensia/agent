@@ -1,0 +1,1 @@
+vm=debian12-csf-sentinel distro=debian:bookworm fork=sentinel-15.13 date=2026-11-05T10:18:25Z forks.lock-pin=8278b57bbe55b8b73cd25fc4faeaa5de65220e9c
