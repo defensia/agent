@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# lab/test.sh [vm...]
+#
+# Integration test runner for the Phase 14 CSF test lab: pushes the
+# `integration`-tagged Go suite (test/integration, built by `make
+# lab-build`) into every requested VM, runs it as root, and writes a
+# markdown report to lab/reports/<YYYY-MM-DD-HHMM>.md — the VM x suite
+# evidence table phases 15-21 must attach. Default VMs: $LAB_AGENT_VMS
+# (lab-attacker is never a suite target: no agent, no CSF to assert on).
+#
+# NOT `set -e`: one VM's test failure must not abort the loop before
+# every VM has been tried and the report reflects the whole matrix.
+set -uo pipefail
+
+LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lab/lib.sh
+source "$LAB_DIR/lib.sh"
+# shellcheck source=lab/matrix.sh
+source "$LAB_DIR/matrix.sh"
+# lib.sh/matrix.sh each `set -euo pipefail` when sourced, and `source`
+# runs in this same shell — silently re-enabling `-e` here. Explicitly
+# turn it back off: a single VM's non-zero test exit must not abort the
+# loop before every VM has been tried (see the file header comment).
+set +e
+
+vms="$*"
+[ -n "$vms" ] || vms="$LAB_AGENT_VMS"
+
+preflight_orb
+
+TS="$(date +%Y-%m-%d-%H%M)"
+mkdir -p "$LAB_DIR/reports/raw"
+REPORT="$LAB_DIR/reports/$TS.md"
+REPORT_REL="lab/reports/$TS.md"
+
+# repo_sha DIR -> short sha, suffixed "-dirty" iff `git status --porcelain`
+# is non-empty for DIR at run time — never hard-coded or assumed clean.
+repo_sha() {
+  local dir=$1 sha
+  sha="$(git -C "$dir" rev-parse --short HEAD)"
+  if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+    sha="$sha-dirty"
+  fi
+  printf '%s' "$sha"
+}
+
+# expect_or_empty VALUE — lab/matrix.sh's "-" sentinel ("not applicable")
+# must cross the env boundary as an empty string per the env contract
+# (LAB_EXPECT_* empty means "this assertion does not apply here").
+expect_or_empty() {
+  if [ "$1" = "-" ]; then
+    printf ''
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# csf_expect VM -> 1 if the VM's role has CSF installed at all, else 0.
+csf_expect() {
+  case "$(vm_role "$1")" in
+    csf | csf-orphan) printf '1' ;;
+    *) printf '0' ;;
+  esac
+}
+
+# csfv_col VM -> the raw `csf -v` version line (CSF VMs only), or "-".
+csfv_col() {
+  local vm=$1 out
+  case "$(vm_role "$vm")" in
+    csf | csf-orphan)
+      out="$(vm_root "$vm" sh -c 'csf -v 2>&1 | grep -E "v1[0-9]" | head -1' 2>/dev/null || true)"
+      if [ -n "$out" ]; then printf '%s' "$out"; else printf -- '-'; fi
+      ;;
+    *) printf -- '-' ;;
+  esac
+}
+
+write_header() {
+  {
+    printf '# CSF Lab report %s\n\n' "$TS"
+    printf -- '- agent: %s\n' "$(repo_sha "$REPO_DIR")"
+    printf -- '- forks.lock: %s\n' "$(sha256_of "$LAB_DIR/forks.lock")"
+    printf -- '- orbstack: %s\n' "$(orb version 2>&1 | head -1)"
+    printf -- '- panel: %s\n' "$(repo_sha "$PANEL_DIR")"
+    printf -- '- host arch: %s\n' "$(uname -m)"
+    printf '\n'
+  } >>"$1"
+}
+
+# --- Gate: a broken lab must never be blamed on the agent --------------
+# verify.sh also rotates the lab panel's Sanctum token, so the api_token
+# read below (via panel_api_token) always reflects the latest.
+verify_out="$("$LAB_DIR/verify.sh" "$@" 2>&1)"
+verify_rc=$?
+if [ "$verify_rc" -ne 0 ]; then
+  : >"$REPORT"
+  write_header "$REPORT"
+  {
+    printf '**Overall: FAIL (lab broken: verify.sh)**\n\n'
+    printf '```\n%s\n```\n' "$verify_out"
+  } >>"$REPORT"
+  log "lab is broken (verify.sh exit $verify_rc) - see $REPORT_REL"
+  printf '%s\n' "$REPORT_REL"
+  exit 1
+fi
+
+TOKEN="$(panel_api_token)"
+BINARY="$REPO_DIR/build/integration-linux-$LAB_ARCH.test"
+[ -f "$BINARY" ] || die "integration test binary missing: $BINARY (run 'make lab-build' first)"
+
+write_header "$REPORT"
+printf '| VM | fork | csf -v | suite | pass | fail | skip | seconds | result |\n' >>"$REPORT"
+printf '|----|------|--------|-------|------|------|------|---------|--------|\n' >>"$REPORT"
+
+failed_vms=""
+
+for vm in $vms; do
+  RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
+  vm_push "$vm" "$BINARY" /root/integration.test
+
+  fork="$(vm_fork "$vm")"
+  expect_csf="$(csf_expect "$vm")"
+  csf_version="$(expect_or_empty "$(vm_csf_version "$vm")")"
+  testing_expect="$(expect_or_empty "$(vm_testing "$vm")")"
+  lfd_expect="$(expect_or_empty "$(vm_lfd "$vm")")"
+  fw_mode="$(expect_or_empty "$(vm_fw_mode "$vm")")"
+
+  start=$(date +%s)
+  vm_root "$vm" env \
+    LAB_VM="$vm" \
+    LAB_FORK="$fork" \
+    LAB_EXPECT_CSF="$expect_csf" \
+    LAB_EXPECT_CSF_VERSION="$csf_version" \
+    LAB_EXPECT_TESTING="$testing_expect" \
+    LAB_EXPECT_LFD="$lfd_expect" \
+    LAB_EXPECT_FW_MODE="$fw_mode" \
+    LAB_EXPECT_AGENT=1 \
+    LAB_PANEL_URL="$PANEL_URL_VM" \
+    LAB_PANEL_TOKEN="$TOKEN" \
+    LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
+    /root/integration.test -test.v -test.count=1 -test.timeout 5m -test.run '^TestLab' >"$RAW" 2>&1
+  rc=$?
+  seconds=$(($(date +%s) - start))
+
+  pass=$(grep -c '^--- PASS' "$RAW" || true)
+  fail=$(grep -c '^--- FAIL' "$RAW" || true)
+  skip=$(grep -c -- '--- SKIP' "$RAW" || true)
+
+  # A VM-level SKIP is only legal in CI (LAB_ALLOW_SKIP=1, no lab here) —
+  # inside the lab every assertion must apply, so any SKIP counts as a
+  # failed row, same as rc!=0 or fail>0.
+  if [ "$rc" -eq 0 ] && [ "$fail" -eq 0 ] && [ "$skip" -eq 0 ] && [ "$pass" -gt 0 ]; then
+    result="PASS"
+  else
+    result="FAIL"
+    failed_vms="$failed_vms $vm"
+  fi
+
+  csfv="$(csfv_col "$vm")"
+  printf '| %s | %s | %s | lab | %s | %s | %s | %s | %s |\n' \
+    "$vm" "$fork" "$csfv" "$pass" "$fail" "$skip" "$seconds" "$result" >>"$REPORT"
+  log "$vm: pass=$pass fail=$fail skip=$skip seconds=${seconds}s result=$result"
+done
+
+# --- attack stage (plan 08) ---
+# Plan 08 appends the SSH/WordPress/mail bruteforce attack-simulation
+# results to this same report (new rows and/or a new section), inserted
+# here, BEFORE the Overall/Failures lines below are written.
+
+if [ -z "${failed_vms// /}" ]; then
+  printf '\n**Overall: PASS**\n' >>"$REPORT"
+  overall_rc=0
+else
+  printf '\n**Overall: FAIL**\n' >>"$REPORT"
+  overall_rc=1
+fi
+
+if [ "$overall_rc" -ne 0 ]; then
+  printf '\n## Failures\n' >>"$REPORT"
+  for vm in $failed_vms; do
+    RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
+    printf '\n### %s\n\n```\n' "$vm" >>"$REPORT"
+    grep -n -B5 -A20 -- '--- FAIL' "$RAW" 2>/dev/null | head -30 >>"$REPORT"
+    printf '```\n' >>"$REPORT"
+  done
+fi
+
+log "report: $REPORT_REL"
+printf '%s\n' "$REPORT_REL"
+exit "$overall_rc"
