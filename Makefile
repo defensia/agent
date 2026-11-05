@@ -4,13 +4,19 @@ CMD_PATH   = ./cmd/defensia-agent
 VERSION    = 0.1.0
 LDFLAGS    = -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: all build build-linux tidy test clean lab-build lab-up lab-down lab-reset lab-verify lab-test
+.PHONY: all build build-linux tidy test clean lab-build lab-up lab-down lab-reset lab-verify lab-test lab-attack
 
 # LAB_VMS: VM name(s) for the lab-* targets; empty = all 8 fixed lab VMs
 # (lab/matrix.sh). LAB_DOWN_ARGS: extra flags for lab-down (--all also
 # deletes goldens, --panel also tears down the lab panel compose project).
 LAB_VMS =
 LAB_DOWN_ARGS =
+
+# TARGET/LEG: target VM + leg for lab-attack (lab/attack.sh <target>
+# <leg>). Defaults match the lab's one fixed attack target and the full
+# ssh+web+mail run.
+TARGET ?= debian12-nocsf
+LEG ?= all
 
 # LAB_ARCH: target arch for lab-build, derived from the host (OrbStack VMs
 # follow the Mac's architecture; CI cross-compiles amd64 the same way).
@@ -75,3 +81,7 @@ lab-verify:
 ## lab-test: run integration suites in every lab VM; report in lab/reports/; non-zero on any failure
 lab-test: lab-build
 	lab/test.sh $(LAB_VMS)
+
+## lab-attack: send real SSH/WordPress/IMAP brute-force traffic from lab-attacker against TARGET (default debian12-nocsf), leg LEG (default all)
+lab-attack:
+	lab/attack.sh $(TARGET) $(LEG)
