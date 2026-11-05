@@ -132,9 +132,10 @@ const csfListsBodyCapBytes = 512 * 1024
 // it means "this panel has never heard of this route", which will still be
 // true on the very next cycle, so there is no point spending even one
 // request per heartbeat cycle re-discovering it. These are the durations
-// this plan's own <behavior> spec calls for; note this intentionally
-// supersedes api.CSFListsOldPanelBackoff (1h, defined in 15-06) — see the
-// SUMMARY's Deviations section.
+// this plan's own <behavior> spec calls for. The backoff policy is owned
+// here, by the runtime that actually retries — internal/api only exposes
+// the predicate (IsOldPanelCSFListsResponse) that classifies the error;
+// it does not also publish a competing duration.
 const (
 	csfListsOldPanelBackoff  = 6 * time.Hour
 	csfListsRateLimitBackoff = 60 * time.Second

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 )
 
 // CSFHeartbeatFields is embedded as an anonymous pointer in HeartbeatRequest:
@@ -78,19 +77,15 @@ const (
 // making any HTTP request.
 var ErrCSFListsTooLarge = errors.New("csf lists payload exceeds panel caps (1000 entries/list, 1 MiB body)")
 
-// CSFListsOldPanelBackoff is how long plan 15-11's runtime wiring should wait
-// before retrying POST /api/v1/agent/csf/lists after an old panel (one that
-// predates this route, pre-15-10) answers 404 — long enough that a fleet
-// still running an old panel version doesn't spend its 4/min throttle budget
-// re-discovering the same 404 every heartbeat cycle.
-const CSFListsOldPanelBackoff = 1 * time.Hour
-
 // IsOldPanelCSFListsResponse reports whether err is the 404 an old panel (one
 // that has never heard of POST /api/v1/agent/csf/lists) returns for this
 // route, as opposed to any other failure (network error, 422, 429, 5xx).
 // Plan 15-11's runtime wiring uses this to switch from per-cycle retries to
-// CSFListsOldPanelBackoff instead of treating every old-panel 404 as a
-// transient error worth hammering.
+// a backoff instead of treating every old-panel 404 as a transient error
+// worth hammering. The backoff duration itself is owned by the runtime
+// (cmd/defensia-agent/csf_runtime.go), not by this wire-contract package —
+// this predicate is the only piece of the old-panel-404 contract that
+// belongs here.
 func IsOldPanelCSFListsResponse(err error) bool {
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
