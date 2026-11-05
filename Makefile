@@ -4,13 +4,17 @@ CMD_PATH   = ./cmd/defensia-agent
 VERSION    = 0.1.0
 LDFLAGS    = -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: all build build-linux tidy test clean lab-up lab-down lab-reset lab-verify
+.PHONY: all build build-linux tidy test clean lab-build lab-up lab-down lab-reset lab-verify
 
 # LAB_VMS: VM name(s) for the lab-* targets; empty = all 8 fixed lab VMs
 # (lab/matrix.sh). LAB_DOWN_ARGS: extra flags for lab-down (--all also
 # deletes goldens, --panel also tears down the lab panel compose project).
 LAB_VMS =
 LAB_DOWN_ARGS =
+
+# LAB_ARCH: target arch for lab-build, derived from the host (OrbStack VMs
+# follow the Mac's architecture; CI cross-compiles amd64 the same way).
+LAB_ARCH ?= $(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 
 all: build
 
@@ -47,8 +51,12 @@ install: build-linux
 help:
 	@grep -E '^## ' Makefile | sed 's/## //'
 
+## lab-build: build agent + integration test binaries for the lab VMs (linux/$(LAB_ARCH))
+lab-build:
+	GOOS=linux GOARCH=$(LAB_ARCH) CGO_ENABLED=0 go build -o $(BUILD_DIR)/defensia-agent-linux-$(LAB_ARCH) $(CMD_PATH)
+
 ## lab-up: create/start the CSF test lab (OrbStack); idempotent
-lab-up:
+lab-up: lab-build
 	lab/up.sh $(LAB_VMS)
 
 ## lab-down: delete lab VMs (LAB_DOWN_ARGS=--all also goldens, --panel stops lab panel)
@@ -56,7 +64,7 @@ lab-down:
 	lab/down.sh $(LAB_DOWN_ARGS) $(LAB_VMS)
 
 ## lab-reset: restore lab VMs from their golden clones
-lab-reset:
+lab-reset: lab-build
 	lab/reset.sh $(LAB_VMS)
 
 ## lab-verify: health gate for the lab; non-zero if the lab is broken

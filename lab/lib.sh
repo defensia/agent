@@ -116,6 +116,26 @@ panel_compose() {
   docker compose -f "$PANEL_DIR/docker-compose.lab.yml" "$@"
 }
 
+# panel_bootstrap ARGS... — runs `php artisan lab:bootstrap "$@"` inside the
+# lab panel container, writes the single JSON output line to
+# $STATE_DIR/panel.json (each call rotates the 'lab' Sanctum token, so the
+# state file always reflects the latest) and echoes it.
+panel_bootstrap() {
+  mkdir -p "$STATE_DIR"
+  local out
+  out="$(panel_compose exec -T app php artisan lab:bootstrap "$@" | tail -1)"
+  printf '%s\n' "$out" >"$STATE_DIR/panel.json"
+  printf '%s\n' "$out"
+}
+
+# panel_api_token — the current lab Sanctum token from $STATE_DIR/panel.json.
+panel_api_token() { json_get "$STATE_DIR/panel.json" api_token; }
+
+# panel_get PATH — authenticated GET against the lab panel (host-side URL).
+panel_get() {
+  curl -fsS -H "Authorization: Bearer $(panel_api_token)" -H 'Accept: application/json' "$PANEL_URL_HOST$1"
+}
+
 # --- JSON ------------------------------------------------------------------
 # json_get FILE KEY — dotted path (a.b.0.c; numeric segments index lists).
 json_get() {
@@ -153,4 +173,90 @@ PYEOF
 # forks_field ID FIELDNUM — field 1=id 2=kind 3=url 4=sha256 5=pin
 forks_field() {
   awk -F'|' -v id="$1" -v f="$2" '$1==id{print $f}' "$LAB_DIR/forks.lock"
+}
+
+# --- Agent install/register (plan 05, LAB-02) -------------------------------
+
+# config_agent_id VM — reads agent_id back out of the VM's
+# /etc/defensia/config.json. `defensia-agent register` pretty-prints the
+# config (`"agent_id": 1`, with a space after the colon), so the extraction
+# must not assume a bare "key":value with no space.
+config_agent_id() {
+  vm_root "$1" grep -oE '"agent_id": *[0-9]+' /etc/defensia/config.json 2>/dev/null \
+    | grep -oE '[0-9]+$' | head -1 || true
+}
+
+# install_agent VM — idempotent agent install+register against the lab
+# panel. No-op for VMs without an agent (lab-attacker, vm_has_agent=no).
+# Callers must have sourced lab/matrix.sh (vm_has_agent/vm_ip) in addition
+# to this file.
+#
+# Skips re-registration when the agent is already active, has an
+# /etc/defensia/config.json with an agent_id, and that agent_id is present
+# in the panel's /api/v1/servers list — but still reinstalls (and restarts,
+# never re-registers) the binary when its sha256 differs from the locally
+# built one, so `make lab-up`/`make lab-reset` after a code change ships
+# the new build without spending a fresh install token.
+install_agent() {
+  local vm=$1
+  [ "$(vm_has_agent "$vm")" = "yes" ] || return 0
+
+  local binary="$REPO_DIR/build/defensia-agent-linux-$LAB_ARCH"
+  [ -f "$binary" ] || die "agent binary missing: $binary (run 'make lab-build' first)"
+  local local_sha
+  local_sha="$(sha256_of "$binary")"
+
+  local agent_id=""
+  if vm_root "$vm" systemctl is-active defensia-agent >/dev/null 2>&1 \
+    && vm_root "$vm" test -s /etc/defensia/config.json >/dev/null 2>&1; then
+    agent_id="$(config_agent_id "$vm")"
+  fi
+
+  if [ -n "$agent_id" ]; then
+    local ids registered=0 remote_sha
+    ids="$(panel_get /api/v1/servers 2>/dev/null | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(" ".join(str(a["id"]) for a in d["data"]))
+except Exception:
+    print("")
+' || true)"
+    case " $ids " in
+      *" $agent_id "*) registered=1 ;;
+    esac
+
+    if [ "$registered" -eq 1 ]; then
+      remote_sha="$(vm_root "$vm" sha256sum /usr/local/bin/defensia-agent 2>/dev/null | awk '{print $1}' || true)"
+      if [ "$remote_sha" != "$local_sha" ]; then
+        log "$vm: agent binary changed (local=$local_sha remote=${remote_sha:-missing}) - reinstalling, not re-registering"
+        vm_push "$vm" "$binary" /root/defensia-agent
+        vm_root "$vm" install -m0755 /root/defensia-agent /usr/local/bin/defensia-agent
+        vm_root "$vm" systemctl restart defensia-agent
+      else
+        log "$vm: agent ok (id=$agent_id)"
+      fi
+      return 0
+    fi
+  fi
+
+  log "$vm: (re)registering agent against the lab panel"
+  panel_bootstrap --forget-agent="$vm" --install-tokens=1 >/dev/null
+  local token ip
+  token="$(json_get "$STATE_DIR/panel.json" install_tokens.0)"
+  [ -n "$token" ] || die "$vm: lab:bootstrap returned no install token"
+  ip="$(vm_ip "$vm")"
+
+  vm_push "$vm" "$binary" /root/defensia-agent
+  vm_push "$vm" "$REPO_DIR/defensia-agent.service" /root/defensia-agent.service
+  vm_push "$vm" "$LAB_DIR/provision/agent.sh" /root/lab-provision/agent.sh
+
+  vm_root "$vm" bash /root/lab-provision/agent.sh "$PANEL_URL_VM" "$vm" "$token" "$ip"
+
+  agent_id="$(config_agent_id "$vm")"
+  [ -n "$agent_id" ] || die "$vm: agent.sh completed but agent_id could not be read back from /etc/defensia/config.json"
+
+  mkdir -p "$STATE_DIR/agents"
+  printf '{"vm":"%s","agent_id":%s}\n' "$vm" "$agent_id" >"$STATE_DIR/agents/$vm.json"
+  log "$vm: agent registered (id=$agent_id)"
 }

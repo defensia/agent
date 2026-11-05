@@ -18,12 +18,6 @@ vms="$*"
 
 preflight_orb
 
-# post_vm_hook VM — no-op placeholder. Plan 14-05 replaces this with
-# re-registration against the lab panel (clone keeps /etc/defensia/config.json
-# but the IP/hostname change, so the simplest correct behaviour later is to
-# always re-run register here).
-post_vm_hook() { :; }
-
 wait_csf_active() {
   local vm=$1 waited=0
   while [ "$waited" -lt 60 ]; do
@@ -51,7 +45,7 @@ for vm in $vms; do
     csf|csf-orphan) wait_csf_active "$vm" ;;
   esac
 
-  post_vm_hook "$vm"
+  install_agent "$vm"
   log "RESET $vm ip=$(vm_ip "$vm")"
   count=$((count + 1))
 done

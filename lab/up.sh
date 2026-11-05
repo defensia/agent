@@ -31,6 +31,7 @@ vms="${vms# }"
 
 preflight_orb
 "$LAB_DIR/fetch-forks.sh"
+"$LAB_DIR/panel/panel-up.sh"
 
 # Plain string, not an array: macOS ships bash 3.2, where "${arr[@]}" on an
 # empty array under `set -u` throws "unbound variable" (fixed only in bash
@@ -53,10 +54,6 @@ check_disk() {
     die "disk free ${avail_gb}GiB < 8GiB safety threshold — stopping before creating more VMs (see critical_environment_facts)"
   fi
 }
-
-# post_vm_hook VM — no-op placeholder. Plan 14-05 replaces this with the
-# agent install/register step against the lab panel.
-post_vm_hook() { :; }
 
 # build_golden VM — create+provision "<vm>-golden" once, then stop it.
 build_golden() {
@@ -151,8 +148,7 @@ count=0
 for vm in $vms; do
   build_golden "$vm"
   ensure_vm "$vm"
-  # --- agent install/register (plan 05) ---
-  post_vm_hook "$vm"
+  install_agent "$vm"
   log "UP $vm ip=$(vm_ip "$vm")"
   count=$((count + 1))
 done
