@@ -99,12 +99,17 @@ docker exec \
   -e LAB_EXPECT_TESTING=0 \
   -e LAB_EXPECT_LFD=active \
   -e LAB_EXPECT_FW_MODE= \
+  -e LAB_EXPECT_CSF_FORK=original-15.00 \
+  -e LAB_EXPECT_DL_CONFIGSERVER=0 \
+  -e LAB_CSF_IPV6_TEST=0 \
   "$NAME" /root/it.test -test.v -test.count=1 -test.run '^TestLab' | tee "$LOG"
 test_rc=${PIPESTATUS[0]}
 set -e
 
 echo "[run-csf-container] hard gate: these tests must PASS, not SKIP or FAIL"
-for t in TestLabCSFDetection TestLabCSFVersion TestLabCSFTestingFlag TestLabLFDState TestLabCSFListsReadable; do
+for t in TestLabCSFDetection TestLabCSFVersion TestLabCSFTestingFlag TestLabLFDState TestLabCSFListsReadable \
+  TestLabCSFCollectorFork TestLabCSFCollectorState TestLabCSFPortAddRemove TestLabCSFPortSSHGuard \
+  TestLabCSFPortRollback TestLabNoCSFNoExec; do
   if ! grep -q -- "--- PASS: $t " "$LOG"; then
     echo "ERROR: $t did not PASS (missing, skipped or failed) — see $LOG" >&2
     exit 1

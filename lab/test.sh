@@ -140,6 +140,9 @@ for vm in $vms; do
   testing_expect="$(expect_or_empty "$(vm_testing "$vm")")"
   lfd_expect="$(expect_or_empty "$(vm_lfd "$vm")")"
   fw_mode="$(expect_or_empty "$(vm_fw_mode "$vm")")"
+  csf_fork_expect="$(expect_or_empty "$(vm_csf_fork "$vm")")"
+  dl_configserver_expect="$(expect_or_empty "$(vm_dl_configserver "$vm")")"
+  csf_ipv6_test="$(expect_or_empty "$(vm_csf_ipv6_test "$vm")")"
 
   start=$(date +%s)
   vm_root "$vm" env \
@@ -151,10 +154,13 @@ for vm in $vms; do
     LAB_EXPECT_LFD="$lfd_expect" \
     LAB_EXPECT_FW_MODE="$fw_mode" \
     LAB_EXPECT_AGENT=1 \
+    LAB_EXPECT_CSF_FORK="$csf_fork_expect" \
+    LAB_EXPECT_DL_CONFIGSERVER="$dl_configserver_expect" \
+    LAB_CSF_IPV6_TEST="$csf_ipv6_test" \
     LAB_PANEL_URL="$PANEL_URL_VM" \
     LAB_PANEL_TOKEN="$TOKEN" \
     LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
-    /root/integration.test -test.v -test.count=1 -test.timeout 5m -test.run '^TestLab' >"$RAW" 2>&1
+    /root/integration.test -test.v -test.count=1 -test.timeout 12m -test.run '^TestLab' >"$RAW" 2>&1
   rc=$?
   seconds=$(($(date +%s) - start))
 

@@ -62,8 +62,12 @@ jobs:
   # diagnostic step is non-blocking: GitHub-hosted runner kernel support
   # for those modules inside a container is unverified, so
   # LAB_EXPECT_FW_MODE is left empty and that one check is allowed to
-  # skip — the 5 CSF assertions in lab/ci/run-csf-container.sh's own hard
-  # gate must PASS, never SKIP or FAIL.
+  # skip — the 11 CSF assertions in lab/ci/run-csf-container.sh's own hard
+  # gate (TestLabCSFDetection, TestLabCSFVersion, TestLabCSFTestingFlag,
+  # TestLabLFDState, TestLabCSFListsReadable, TestLabCSFCollectorFork,
+  # TestLabCSFCollectorState, TestLabCSFPortAddRemove, TestLabCSFPortSSHGuard,
+  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..06) must
+  # PASS, never SKIP or FAIL.
   integration-csf:
     name: Integration (CSF v15.00, systemd container)
     runs-on: ubuntu-latest
