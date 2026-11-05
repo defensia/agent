@@ -190,6 +190,23 @@ done
 # extra flags (docker compose exec -e KEY=VAL ...).
 AUDIT_CMD="${LAB_ENV_AUDIT_CMD:-panel_compose exec -T app php docker/lab/env-audit.php}"
 
+# lookup_last_seen AGENT_ID SERVERS_FILE — last_seen_at for AGENT_ID from an
+# already-fetched /api/v1/servers response, or "" if absent/empty/unparsable.
+lookup_last_seen() {
+  python3 -c "
+import json
+try:
+    with open('$2') as f:
+        data = json.load(f)
+    for a in data.get('data', []):
+        if str(a.get('id')) == '$1':
+            print(a.get('last_seen_at') or '')
+            break
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 # check_agent_heartbeat VM SERVERS_FILE — agent-active, VM-reaches-panel,
 # heartbeat freshness (<=180s, from the already-fetched /api/v1/servers
 # response) and no panic: in the agent's last 15 min of journal.
@@ -220,21 +237,25 @@ check_agent_heartbeat() {
   if [ -z "$agent_id" ]; then
     fail "$vm" "heartbeat" "no agent_id in /etc/defensia/config.json"
   else
-    last_seen="$(python3 -c "
-import json
-try:
-    with open('$servers_file') as f:
-        data = json.load(f)
-    for a in data.get('data', []):
-        if str(a.get('id')) == '$agent_id':
-            print(a.get('last_seen_at') or '')
-            break
-except Exception:
-    pass
-" 2>/dev/null || true)"
+    last_seen="$(lookup_last_seen "$agent_id" "$servers_file")"
+
+    # One retry, not a silent pass: a single-shot GET /api/v1/servers can
+    # race a concurrent heartbeat write for this exact agent (observed live
+    # on 2026-11-05: agent heartbeats landed every ~60s with 200 OK and zero
+    # errors throughout the surrounding window, yet one verify.sh snapshot
+    # still saw an empty last_seen_at for that one agent) — re-fetching
+    # once after a short pause tells a genuine one-off race apart from a
+    # truly stale/dead agent, which must still fail. This is a gate
+    # robustness fix, not a product behavior change (see phase 14 plan 10
+    # SUMMARY for the live evidence).
+    if [ -z "$last_seen" ]; then
+      sleep 3
+      panel_get /api/v1/servers >"$servers_file" 2>/dev/null || true
+      last_seen="$(lookup_last_seen "$agent_id" "$servers_file")"
+    fi
 
     if [ -z "$last_seen" ]; then
-      fail "$vm" "heartbeat" "agent id $agent_id not found in /api/v1/servers, or last_seen_at empty"
+      fail "$vm" "heartbeat" "agent id $agent_id not found in /api/v1/servers, or last_seen_at empty (retried once)"
     else
       age="$(python3 -c "
 from datetime import datetime, timezone
