@@ -137,8 +137,13 @@ func csfFileLineCount(path string) int {
 }
 
 // CSFDenyList returns the IPs/CIDRs in CSF's deny list with their comments.
+// Kind classifies the line (ip, cidr, advanced, include, other); IP is only
+// ever populated for kind "ip"/"cidr" — an advanced filter line or an
+// Include directive is never presented as an IP (see classifyCSFLine in
+// csf_lists.go, phase 15 COL-03, for the misparse this fixes).
 type CSFDenyEntry struct {
 	IP      string `json:"ip"`
+	Kind    string `json:"kind,omitempty"`
 	Comment string `json:"comment,omitempty"`
 }
 
@@ -151,9 +156,10 @@ func CSFAllowList() []CSFDenyEntry {
 	return csfListEntries(csfPath("csf.allow"))
 }
 
-// csfListEntries parses a CSF deny/allow list file (one IP/CIDR per line,
-// optional trailing "# comment", blank lines and full-line comments
-// skipped) into entries, preserving file order.
+// csfListEntries parses a CSF deny/allow list file through classifyCSFLine
+// (csf_lists.go), preserving file order. IP is only set for kind "ip"/
+// "cidr" — an advanced filter line (e.g. "tcp|in|d=22|s=1.2.3.4") or an
+// Include directive is classified but never reported as an IP.
 func csfListEntries(path string) []CSFDenyEntry {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -161,19 +167,15 @@ func csfListEntries(path string) []CSFDenyEntry {
 	}
 	var entries []CSFDenyEntry
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		entry, ok := classifyCSFLine(line)
+		if !ok {
 			continue
 		}
-		parts := strings.SplitN(line, "#", 2)
-		ip := strings.TrimSpace(parts[0])
-		comment := ""
-		if len(parts) > 1 {
-			comment = strings.TrimSpace(parts[1])
+		ip := ""
+		if entry.Kind == "ip" || entry.Kind == "cidr" {
+			ip = entry.Value
 		}
-		if ip != "" {
-			entries = append(entries, CSFDenyEntry{IP: ip, Comment: comment})
-		}
+		entries = append(entries, CSFDenyEntry{IP: ip, Kind: entry.Kind, Comment: entry.Comment})
 	}
 	return entries
 }
