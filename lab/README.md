@@ -218,10 +218,18 @@ licensed DirectAdmin are deliberately absent from this matrix (see §8).
   heartbeat write (plan 10).** Live evidence on 2026-11-05: an agent
   heartbeated every ~60s with 200 OK and zero errors throughout the
   surrounding window, yet one `verify.sh` run still saw an empty
-  `last_seen_at` for that exact agent in its one-shot GET. `verify.sh` now
-  retries the lookup once (re-fetch + re-check after a 3s pause) before
-  failing — a gate-robustness fix, not a product change. If this still
-  shows up after the retry, treat it as a real finding, not a flake.
+  `last_seen_at` for that exact agent in its one-shot GET.
+- **`make lab-reset && make lab-verify`, run back to back, can fail on the
+  last VM reset (plan 10) — a second, slower variant of the same check.**
+  The agent's heartbeat goroutine uses `time.NewTicker(60s)`, which only
+  fires AFTER the interval elapses; a VM `lab-reset` just restarted has no
+  heartbeat at all for its first ~60s. Observed live: running the plan's
+  own literal gate sequence failed on exactly the last VM the reset loop
+  touched, whose agent had been running for ~56s. `verify.sh`'s heartbeat
+  check now polls up to ~75s (not a single 3s retry) before failing, which
+  covers both this and the sub-second DB-write race above — a
+  gate-robustness fix, not a product change. If a check still fails after
+  that window, treat it as a real finding, not a flake.
 - **The lab's single shared Sanctum `lab` token does not survive being
   rotated — by anything.** Every `lab:bootstrap` call (direct, or via any
   `verify.sh`/`panel-up.sh` run) unconditionally revokes and reissues that
