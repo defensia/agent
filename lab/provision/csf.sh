@@ -101,7 +101,13 @@ fi
 
 panel_ip="$panel_ip_arg"
 if [ -z "$panel_ip" ]; then
-  panel_ip="$(getent ahostsv4 host.orb.internal 2>/dev/null | awk 'NR==1{print $1}')"
+  # getent exits 2 ("not found") when host.orb.internal can't be resolved
+  # (e.g. CI, which has no OrbStack) — under set -e/pipefail that silently
+  # killed the whole script with no error message before this fix (found
+  # running this exact script in a plain Docker container, LAB-05). The
+  # `|| true` only tolerates lookup failure; a real csf.sh bug would still
+  # surface via the csf -v gate above.
+  panel_ip="$(getent ahostsv4 host.orb.internal 2>/dev/null | awk 'NR==1{print $1}')" || true
 fi
 if [ -n "$panel_ip" ]; then
   # CSF's default outbound filter silently blocks the agent -> panel
