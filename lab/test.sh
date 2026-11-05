@@ -44,6 +44,15 @@ repo_sha() {
   printf '%s' "$sha"
 }
 
+# Captured BEFORE the report file is created, not inside write_header:
+# the report lands inside $REPO_DIR itself (lab/reports/$TS.md), so
+# computing `git status --porcelain` for $REPO_DIR AFTER that file
+# exists would make the agent worktree look "-dirty" purely because of
+# this run's own output — a self-inflicted false positive that would
+# make a clean worktree impossible to ever report as clean.
+AGENT_SHA="$(repo_sha "$REPO_DIR")"
+PANEL_SHA="$(repo_sha "$PANEL_DIR")"
+
 # expect_or_empty VALUE — lab/matrix.sh's "-" sentinel ("not applicable")
 # must cross the env boundary as an empty string per the env contract
 # (LAB_EXPECT_* empty means "this assertion does not apply here").
@@ -78,10 +87,10 @@ csfv_col() {
 write_header() {
   {
     printf '# CSF Lab report %s\n\n' "$TS"
-    printf -- '- agent: %s\n' "$(repo_sha "$REPO_DIR")"
+    printf -- '- agent: %s\n' "$AGENT_SHA"
     printf -- '- forks.lock: %s\n' "$(sha256_of "$LAB_DIR/forks.lock")"
     printf -- '- orbstack: %s\n' "$(orb version 2>&1 | head -1)"
-    printf -- '- panel: %s\n' "$(repo_sha "$PANEL_DIR")"
+    printf -- '- panel: %s\n' "$PANEL_SHA"
     printf -- '- host arch: %s\n' "$(uname -m)"
     printf '\n'
   } >>"$1"
