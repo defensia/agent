@@ -217,7 +217,7 @@ except Exception:
 # 14-05-PLAN.md interfaces) and are never part of this grep or any other
 # check below; only a literal "panic:" counts as a failure.
 check_agent_heartbeat() {
-  local vm=$1 servers_file=$2 agent_active vm_panel_code agent_id last_seen age panics
+  local vm=$1 servers_file=$2 agent_active vm_panel_code agent_id last_seen age panics tries
 
   agent_active="$(vm_root_out "$vm" systemctl is-active defensia-agent || true)"
   if [ "$agent_active" = "active" ]; then
@@ -239,23 +239,30 @@ check_agent_heartbeat() {
   else
     last_seen="$(lookup_last_seen "$agent_id" "$servers_file")"
 
-    # One retry, not a silent pass: a single-shot GET /api/v1/servers can
-    # race a concurrent heartbeat write for this exact agent (observed live
-    # on 2026-11-05: agent heartbeats landed every ~60s with 200 OK and zero
-    # errors throughout the surrounding window, yet one verify.sh snapshot
-    # still saw an empty last_seen_at for that one agent) — re-fetching
-    # once after a short pause tells a genuine one-off race apart from a
-    # truly stale/dead agent, which must still fail. This is a gate
-    # robustness fix, not a product behavior change (see phase 14 plan 10
-    # SUMMARY for the live evidence).
-    if [ -z "$last_seen" ]; then
-      sleep 3
+    # Bounded retry loop, not a silent pass: a single-shot GET
+    # /api/v1/servers can race a concurrent heartbeat write for this exact
+    # agent (observed live on 2026-11-05: agent heartbeats landed every
+    # ~60s with 200 OK and zero errors throughout the surrounding window,
+    # yet one verify.sh snapshot still saw an empty last_seen_at for that
+    # one agent). A freshly-(re)started agent is a second, slower case:
+    # the heartbeat goroutine uses time.NewTicker(60s), which fires only
+    # AFTER the interval elapses, so a VM that `make lab-reset` just
+    # restarted has no heartbeat at all for its first ~60s — also observed
+    # live, immediately after `make lab-reset` on the last VM it restored.
+    # Poll up to ~75s (covers the 60s ticker plus margin) before failing,
+    # so neither race is mistaken for a truly stale/dead agent, which
+    # must still fail. This is a gate robustness fix, not a product
+    # behavior change (see phase 14 plan 10 SUMMARY for the live evidence).
+    tries=0
+    while [ -z "$last_seen" ] && [ "$tries" -lt 15 ]; do
+      sleep 5
+      tries=$((tries + 1))
       panel_get /api/v1/servers >"$servers_file" 2>/dev/null || true
       last_seen="$(lookup_last_seen "$agent_id" "$servers_file")"
-    fi
+    done
 
     if [ -z "$last_seen" ]; then
-      fail "$vm" "heartbeat" "agent id $agent_id not found in /api/v1/servers, or last_seen_at empty (retried once)"
+      fail "$vm" "heartbeat" "agent id $agent_id not found in /api/v1/servers, or last_seen_at empty (retried ${tries}x over ~$((tries * 5))s)"
     else
       age="$(python3 -c "
 from datetime import datetime, timezone
