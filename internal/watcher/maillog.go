@@ -610,7 +610,20 @@ func (w *MailWatcher) pairsWithNamedDovecotLine(obs mailObservation, now time.Ti
 		return false
 
 	// The Postfix half: if a named line is waiting, this is its echo.
-	case obs.Protocol == "smtp" && obs.User == "":
+	//
+	// Keyed on the protocol alone. It used to also require obs.User == "", on
+	// the assumption that the Postfix warning never names the account — the
+	// same false assumption that kept us from reading sasl_username in the
+	// first place. Once we started reading it, the echo arrived carrying a user
+	// and stopped matching this case, so both halves of one failure were
+	// counted: a single SMTP AUTH failure became two attempts, and a threshold
+	// of five banned on the third real try.
+	//
+	// Measured on the reporting MSP's server: 312 of 341 SMTP AUTH failures in
+	// seven days carry sasl_username, so this was the common path, not an edge
+	// case. The pre-v1.4.97 behaviour was correct only because the field we
+	// now read was being thrown away.
+	case obs.Protocol == "smtp":
 		if len(live) > 0 {
 			w.namedSMTP[obs.IP] = live[1:]
 			return true
