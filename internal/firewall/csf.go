@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,18 +12,28 @@ import (
 
 // CSFStatus holds the current state of ConfigServer Firewall.
 type CSFStatus struct {
-	Installed bool   `json:"installed"`
-	Version   string `json:"version,omitempty"`
-	PortsIn   string `json:"ports_in,omitempty"`
-	PortsOut  string `json:"ports_out,omitempty"`
-	DenyCount int    `json:"deny_count"`
-	AllowCount int   `json:"allow_count"`
+	Installed  bool   `json:"installed"`
+	Version    string `json:"version,omitempty"`
+	PortsIn    string `json:"ports_in,omitempty"`
+	PortsOut   string `json:"ports_out,omitempty"`
+	DenyCount  int    `json:"deny_count"`
+	AllowCount int    `json:"allow_count"`
 }
 
 var (
 	csfAvailable bool
 	csfOnce      sync.Once
 )
+
+// Test seams (Phase 14, LAB-04). Production values never change at runtime;
+// unit tests point csfDir at internal/firewall/testdata/<fork>/ and stub csfExec.
+var (
+	csfDir  = "/etc/csf"
+	csfExec = func(args ...string) ([]byte, error) { return exec.Command("csf", args...).CombinedOutput() }
+)
+
+// csfPath returns the absolute path of a file inside the CSF config dir.
+func csfPath(name string) string { return filepath.Join(csfDir, name) }
 
 // HasCSF returns true if CSF is installed on the system.
 func HasCSF() bool {
@@ -48,42 +59,51 @@ func CSFInfo() CSFStatus {
 		return CSFStatus{}
 	}
 
-	status := CSFStatus{Installed: true}
+	var out []byte
+	if o, err := csfExec("-v"); err == nil {
+		out = o
+	}
+	return csfInfoFrom(out)
+}
 
-	// Version
-	if out, err := exec.Command("csf", "-v").CombinedOutput(); err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "csf:") || strings.HasPrefix(line, "v") {
-				// Extract version number from lines like "csf: v14.20" or "v14.20"
-				parts := strings.Fields(line)
-				for _, p := range parts {
-					if strings.HasPrefix(p, "v") && len(p) > 1 {
-						status.Version = strings.TrimPrefix(p, "v")
-						break
-					}
+// parseCSFVersion extracts the version number reported by `csf -v` across
+// every known fork's output format (single-line "csf: vX.YY (...)", the
+// multi-line Aetherinox banner, and outputs preceded by a warning line).
+func parseCSFVersion(out []byte) string {
+	version := ""
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "csf:") || strings.HasPrefix(line, "v") {
+			// Extract version number from lines like "csf: v14.20" or "v14.20"
+			parts := strings.Fields(line)
+			for _, p := range parts {
+				if strings.HasPrefix(p, "v") && len(p) > 1 {
+					version = strings.TrimPrefix(p, "v")
+					break
 				}
 			}
 		}
 	}
-
-	// Open ports from csf.conf
-	status.PortsIn = csfConfigValue("TCP_IN")
-	status.PortsOut = csfConfigValue("TCP_OUT")
-
-	// Deny list count
-	status.DenyCount = csfFileLineCount("/etc/csf/csf.deny")
-
-	// Allow list count
-	status.AllowCount = csfFileLineCount("/etc/csf/csf.allow")
-
-	return status
+	return version
 }
 
-// csfConfigValue reads a value from /etc/csf/csf.conf.
+// csfInfoFrom builds a CSFStatus from the raw `csf -v` output, reading the
+// remaining fields (ports, deny/allow counts) from csfDir.
+func csfInfoFrom(versionOut []byte) CSFStatus {
+	return CSFStatus{
+		Installed:  true,
+		Version:    parseCSFVersion(versionOut),
+		PortsIn:    csfConfigValue("TCP_IN"),
+		PortsOut:   csfConfigValue("TCP_OUT"),
+		DenyCount:  csfFileLineCount(csfPath("csf.deny")),
+		AllowCount: csfFileLineCount(csfPath("csf.allow")),
+	}
+}
+
+// csfConfigValue reads a value from csf.conf.
 func csfConfigValue(key string) string {
-	data, err := os.ReadFile("/etc/csf/csf.conf")
+	data, err := os.ReadFile(csfPath("csf.conf"))
 	if err != nil {
 		return ""
 	}
@@ -127,32 +147,19 @@ type CSFDenyEntry struct {
 }
 
 func CSFDenyList() []CSFDenyEntry {
-	data, err := os.ReadFile("/etc/csf/csf.deny")
-	if err != nil {
-		return nil
-	}
-	var entries []CSFDenyEntry
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "#", 2)
-		ip := strings.TrimSpace(parts[0])
-		comment := ""
-		if len(parts) > 1 {
-			comment = strings.TrimSpace(parts[1])
-		}
-		if ip != "" {
-			entries = append(entries, CSFDenyEntry{IP: ip, Comment: comment})
-		}
-	}
-	return entries
+	return csfListEntries(csfPath("csf.deny"))
 }
 
 // CSFAllowList returns the IPs/CIDRs in CSF's allow list.
 func CSFAllowList() []CSFDenyEntry {
-	data, err := os.ReadFile("/etc/csf/csf.allow")
+	return csfListEntries(csfPath("csf.allow"))
+}
+
+// csfListEntries parses a CSF deny/allow list file (one IP/CIDR per line,
+// optional trailing "# comment", blank lines and full-line comments
+// skipped) into entries, preserving file order.
+func csfListEntries(path string) []CSFDenyEntry {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -217,9 +224,9 @@ func CSFPortAction(port int, direction string, action string) error {
 	return exec.Command("csf", "-r").Run()
 }
 
-// csfSetConfigValue updates a value in /etc/csf/csf.conf using sed.
+// csfSetConfigValue updates a value in csf.conf using sed.
 func csfSetConfigValue(key, value string) error {
 	// Use sed to replace the line in-place
 	pattern := `s/^` + key + ` = ".*"/` + key + ` = "` + value + `"/`
-	return exec.Command("sed", "-i", pattern, "/etc/csf/csf.conf").Run()
+	return exec.Command("sed", "-i", pattern, csfPath("csf.conf")).Run()
 }
