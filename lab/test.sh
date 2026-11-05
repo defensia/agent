@@ -218,10 +218,20 @@ case " $vms " in
         # exactly what was actually attacked this run (never hard-coded).
         # shellcheck disable=SC1091
         source "$LAB_DIR/.state/attack.env"
+        # Re-read the token fresh here rather than reusing the $TOKEN
+        # captured near the top of this script: the attack.sh run above
+        # (traffic generation) takes real wall-clock time, and the lab's
+        # single shared 'lab' Sanctum token is revoked+reissued by EVERY
+        # lab:bootstrap call (direct, or via any concurrently-run
+        # verify.sh/panel-up.sh) — observed live (2026-11-05): a token
+        # captured at the top of this script 401'd by the time this stage
+        # ran, after a concurrent lab:bootstrap elsewhere rotated it. This
+        # narrows the staleness window to just the attack-stage test run
+        # instead of this whole script's wall-clock.
         vm_root debian12-nocsf env \
           LAB_VM=debian12-nocsf \
           LAB_PANEL_URL="$PANEL_URL_VM" \
-          LAB_PANEL_TOKEN="$TOKEN" \
+          LAB_PANEL_TOKEN="$(panel_api_token)" \
           LAB_ATTACK_SSH_IP="$LAB_ATTACK_SSH_IP" \
           LAB_ATTACK_WEB_IP="$LAB_ATTACK_WEB_IP" \
           LAB_ATTACK_MAIL_IP="$LAB_ATTACK_MAIL_IP" \
@@ -258,7 +268,20 @@ if [ "$overall_rc" -ne 0 ]; then
   for vm in $failed_vms; do
     RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
     printf '\n### %s\n\n```\n' "$vm" >>"$REPORT"
-    grep -n -B5 -A20 -- '--- FAIL' "$RAW" 2>/dev/null | head -30 >>"$REPORT"
+    # A failure doesn't always come from the Go integration binary (which
+    # prints the '--- FAIL' marker this grep targets): attack.sh itself
+    # can die() before the binary ever runs (e.g. a provisioning or
+    # connectivity-check failure), leaving a raw log with no such marker
+    # at all — observed live (2026-11-05): that case produced a report
+    # with a correctly-identified FAIL row but a completely empty
+    # Failures section, no diagnostic output whatsoever. Fall back to the
+    # raw log's own tail so a failure NEVER ships with zero evidence.
+    snippet="$(grep -n -B5 -A20 -- '--- FAIL' "$RAW" 2>/dev/null | head -30)"
+    if [ -n "$snippet" ]; then
+      printf '%s\n' "$snippet" >>"$REPORT"
+    else
+      tail -30 "$RAW" 2>/dev/null >>"$REPORT"
+    fi
     printf '```\n' >>"$REPORT"
   done
 fi
