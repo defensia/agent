@@ -200,14 +200,36 @@ licensed DirectAdmin are deliberately absent from this matrix (see §8).
   `poralix/da-csf` fork (DirectAdmin-*compatible*, GPL), not a real licensed
   DirectAdmin install — licensed DirectAdmin and cPanel are out of scope for
   this lab and are validated later on real test servers in a separate phase.
-- **Shared-IP heartbeat rate-limiter contention (plans 05/06/08)**: all 7
-  agent VMs' panel traffic arrives at the lab panel's Apache container under
-  one shared `REMOTE_ADDR` (OrbStack/Docker NAT). The `agent-heartbeat` (and
-  likely `agent-events`/`agent-sync`/`agent-bans`/`agent-scan`) rate limiter
-  is meant to key per-agent-id but appears to fall back to per-IP, which
-  collapses 7 independent budgets into one — see
-  `deferred-items.md` in the phase's planning directory for the full
-  investigation and the threat flag raised in `14-05-SUMMARY.md`. Not fixed
-  in this lab (the owning file, `app/Providers/AppServiceProvider.php`, is
-  out of scope); `lab/verify.sh`'s 180s heartbeat tolerance is a load-bearing
-  mitigation, not just a courtesy margin, under this topology.
+- **Shared-IP heartbeat rate-limiter contention (plans 05/06/08) — FIXED
+  upstream, confirmed in plan 10.** All 7 agent VMs' panel traffic arrives at
+  the lab panel's Apache container under one shared `REMOTE_ADDR`
+  (OrbStack/Docker NAT); the `agent-heartbeat` (and sibling `agent-*`) rate
+  limiters used to fall back to per-IP keying instead of per-agent-id,
+  collapsing 7 independent budgets into one (see `deferred-items.md` and the
+  threat flag in `14-05-SUMMARY.md`). The panel's `fix/agent-rate-limit-keyed-per-agent`
+  PR (merged to `origin/main` before plan 10) keys the limiter on
+  `sha1($request->bearerToken())` with an IP fallback instead. Plan 10's
+  clean-slate run rebased the panel worktree onto that fix and confirmed, via
+  the lab panel's own access/app logs, **zero 429s** across a full cold
+  `make lab-up` + `make lab-test` run — `lab/verify.sh`'s 180s heartbeat
+  tolerance is still a sensible safety margin, but is no longer load-bearing
+  against this specific contention.
+- **A single `/api/v1/servers` snapshot in `verify.sh` can race a concurrent
+  heartbeat write (plan 10).** Live evidence on 2026-11-05: an agent
+  heartbeated every ~60s with 200 OK and zero errors throughout the
+  surrounding window, yet one `verify.sh` run still saw an empty
+  `last_seen_at` for that exact agent in its one-shot GET. `verify.sh` now
+  retries the lookup once (re-fetch + re-check after a 3s pause) before
+  failing — a gate-robustness fix, not a product change. If this still
+  shows up after the retry, treat it as a real finding, not a flake.
+- **Never run a manual `lab:bootstrap` (or `make lab-verify`) while a
+  `make lab-test` is in flight, especially during its attack stage.** Every
+  `lab:bootstrap` call (direct, or via any `verify.sh`/`panel-up.sh` run)
+  revokes and reissues the lab's single shared Sanctum `lab` token
+  server-side. `lab/test.sh` captures that token once near the top of its
+  own run and reuses it for the ~3 minute attack stage; a concurrent
+  `lab:bootstrap` call from another terminal invalidates the captured token
+  mid-run, producing a `401 Unauthenticated` on `TestAttackEventsReachPanel`
+  that has nothing to do with the attack traffic itself (reproduced live in
+  plan 10 by running a manual diagnostic `lab:bootstrap` call during an
+  in-flight `make lab-test`). Run lab commands one at a time.
