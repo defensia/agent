@@ -222,14 +222,33 @@ licensed DirectAdmin are deliberately absent from this matrix (see §8).
   retries the lookup once (re-fetch + re-check after a 3s pause) before
   failing — a gate-robustness fix, not a product change. If this still
   shows up after the retry, treat it as a real finding, not a flake.
-- **Never run a manual `lab:bootstrap` (or `make lab-verify`) while a
-  `make lab-test` is in flight, especially during its attack stage.** Every
-  `lab:bootstrap` call (direct, or via any `verify.sh`/`panel-up.sh` run)
-  revokes and reissues the lab's single shared Sanctum `lab` token
-  server-side. `lab/test.sh` captures that token once near the top of its
-  own run and reuses it for the ~3 minute attack stage; a concurrent
-  `lab:bootstrap` call from another terminal invalidates the captured token
-  mid-run, producing a `401 Unauthenticated` on `TestAttackEventsReachPanel`
-  that has nothing to do with the attack traffic itself (reproduced live in
-  plan 10 by running a manual diagnostic `lab:bootstrap` call during an
-  in-flight `make lab-test`). Run lab commands one at a time.
+- **The lab's single shared Sanctum `lab` token does not survive being
+  rotated — by anything.** Every `lab:bootstrap` call (direct, or via any
+  `verify.sh`/`panel-up.sh` run) unconditionally revokes and reissues that
+  one token server-side (`LabBootstrap.php`: `tokens()->where('name',
+  'lab')->delete()` then `createToken('lab')`). Two consequences, both
+  observed live on 2026-11-05:
+  - `make lab-down LAB_DOWN_ARGS="--all --panel"` drops the panel's whole
+    MySQL volume — any token value cached anywhere outside the lab's own
+    `$STATE_DIR/panel.json` (a shell variable, a note, a browser tab) is
+    gone for good; only `lab-up`'s own `panel-up.sh` → `lab:bootstrap` call
+    can mint a valid one again. Never hand-carry a token across a
+    `--all --panel` reset.
+  - **Never run a manual `lab:bootstrap` (or `make lab-verify`) while a
+    `make lab-test` is in flight, especially during its attack stage.**
+    `lab/test.sh` captures the token once near the top of its own run;
+    `attack.sh`'s traffic-generation phase takes real wall-clock time, and a
+    concurrent `lab:bootstrap` call from another terminal invalidates that
+    captured token mid-run, producing a `401 Unauthenticated` on
+    `TestAttackEventsReachPanel` that has nothing to do with the attack
+    traffic itself (`2026-11-05-1434.md`). Fixed in `lab/test.sh` by
+    re-reading the token immediately before the attack-stage run instead of
+    reusing the one captured minutes earlier — this narrows, but does not
+    eliminate, the race; still run lab commands one at a time, never two
+    `make lab-verify`/`make lab-test`/manual-bootstrap invocations
+    concurrently.
+  - A failure report must never ship with an empty diagnostic section
+    (`2026-11-05-1447.md` did, before this fix): `lab/test.sh`'s
+    `## Failures` block now falls back to the raw log's own tail when the
+    failure has no Go-test `--- FAIL` marker to extract context around
+    (e.g. `attack.sh` dying before the test binary ever runs).
