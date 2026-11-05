@@ -179,9 +179,71 @@ for vm in $vms; do
 done
 
 # --- attack stage (plan 08) ---
-# Plan 08 appends the SSH/WordPress/mail bruteforce attack-simulation
-# results to this same report (new rows and/or a new section), inserted
-# here, BEFORE the Overall/Failures lines below are written.
+# Runs lab/attack.sh against debian12-nocsf (real SSH/WordPress/IMAP
+# brute force from lab-attacker) and asserts the resulting events/bans
+# are observed in the local panel via TestAttackEventsReachPanel — not a
+# fixture, not a simulated call. Only runs when debian12-nocsf is in this
+# run's VM list (it is the lab's one fixed attack target); skippable via
+# LAB_SKIP_ATTACK=1 (saves ~3min on a quick CSF-only run). Any failure
+# here counts toward the same overall FAIL as the per-VM loop above.
+attack_pass=0 attack_fail=0 attack_skip=0 attack_seconds=0 attack_result="SKIP"
+case " $vms " in
+  *" debian12-nocsf "*)
+    if [ "${LAB_SKIP_ATTACK:-}" = "1" ]; then
+      log "attack: skipped (LAB_SKIP_ATTACK=1)"
+    else
+      ATTACK_RAW="$LAB_DIR/reports/raw/$TS-attack.log"
+      attack_start=$(date +%s)
+      # attack.sh's own `all` leg only re-prepares when .state/attack.env
+      # is missing or names a different target (lab/attack.sh
+      # do_prepare_if_needed) — across repeated `make lab-test` runs the
+      # target is always debian12-nocsf, so without this, a second run
+      # would silently reuse the FIRST run's already-banned IPs and the
+      # integration test would "pass" against stale panel events instead
+      # of this run's own traffic. Forcing a fresh prepare every time is
+      # what actually proves "fresh source IPs per run, stays green on
+      # repeated runs" rather than just replaying the first run's result.
+      rm -f "$LAB_DIR/.state/attack.env"
+      "$LAB_DIR/attack.sh" debian12-nocsf all >"$ATTACK_RAW" 2>&1
+      attack_rc=$?
+      if [ "$attack_rc" -ne 0 ]; then
+        attack_fail=1
+        attack_result="FAIL"
+        attack_seconds=$(($(date +%s) - attack_start))
+        failed_vms="$failed_vms attack"
+        log "attack: lab/attack.sh itself failed (rc=$attack_rc) - see reports/raw/$TS-attack.log"
+      else
+        # attack.sh wrote lab/.state/attack.env with the three run-specific
+        # TEST-NET-3 IPs — source it so the integration test's env matches
+        # exactly what was actually attacked this run (never hard-coded).
+        # shellcheck disable=SC1091
+        source "$LAB_DIR/.state/attack.env"
+        vm_root debian12-nocsf env \
+          LAB_VM=debian12-nocsf \
+          LAB_PANEL_URL="$PANEL_URL_VM" \
+          LAB_PANEL_TOKEN="$TOKEN" \
+          LAB_ATTACK_SSH_IP="$LAB_ATTACK_SSH_IP" \
+          LAB_ATTACK_WEB_IP="$LAB_ATTACK_WEB_IP" \
+          LAB_ATTACK_MAIL_IP="$LAB_ATTACK_MAIL_IP" \
+          /root/integration.test -test.v -test.count=1 -test.timeout 6m -test.run '^TestAttack' >>"$ATTACK_RAW" 2>&1
+        attack_test_rc=$?
+        attack_seconds=$(($(date +%s) - attack_start))
+        attack_pass=$(grep -c '^--- PASS' "$ATTACK_RAW" || true)
+        attack_fail=$(grep -c '^--- FAIL' "$ATTACK_RAW" || true)
+        attack_skip=$(grep -c -- '--- SKIP' "$ATTACK_RAW" || true)
+        if [ "$attack_test_rc" -eq 0 ] && [ "$attack_fail" -eq 0 ] && [ "$attack_skip" -eq 0 ] && [ "$attack_pass" -gt 0 ]; then
+          attack_result="PASS"
+        else
+          attack_result="FAIL"
+          failed_vms="$failed_vms attack"
+        fi
+      fi
+      printf '| debian12-nocsf | none | - | attack(ssh,web,mail) | %s | %s | %s | %s | %s |\n' \
+        "$attack_pass" "$attack_fail" "$attack_skip" "$attack_seconds" "$attack_result" >>"$REPORT"
+      log "attack: pass=$attack_pass fail=$attack_fail skip=$attack_skip seconds=${attack_seconds}s result=$attack_result"
+    fi
+    ;;
+esac
 
 if [ -z "${failed_vms// /}" ]; then
   printf '\n**Overall: PASS**\n' >>"$REPORT"
