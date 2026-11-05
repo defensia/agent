@@ -112,13 +112,19 @@ else
   echo "NOTE: no panel IP resolved/provided — skipping csf -a allow (expected in CI)"
 fi
 
-systemctl enable csf lfd || true
+systemctl enable csf || true
 systemctl restart csf
 if [ "$orphan" -eq 1 ]; then
-  # TESTING=1: lfd must not daemonise.
-  systemctl stop lfd || true
+  # TESTING=1: lfd must never daemonise, AND must stay disabled — merely
+  # stopping it (while leaving it enabled) is not enough: on the next boot
+  # (lab/up.sh clones the golden and starts it, lab/reset.sh does the same)
+  # systemd auto-starts every enabled unit, lfd tries to run under
+  # TESTING=1, gets killed (signal 9) almost immediately, and lands in
+  # "failed" instead of the expected "inactive". Found via a real golden
+  # build + clone + boot cycle, not a dry read of this script.
+  systemctl disable --now lfd || true
 else
-  systemctl restart lfd
+  systemctl enable --now lfd || true
 fi
 
 systemctl is-active --quiet csf || { echo "ERROR: csf not active after restart" >&2; exit 1; }

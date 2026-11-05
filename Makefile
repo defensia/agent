@@ -4,7 +4,13 @@ CMD_PATH   = ./cmd/defensia-agent
 VERSION    = 0.1.0
 LDFLAGS    = -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: all build build-linux tidy test clean
+.PHONY: all build build-linux tidy test clean lab-up lab-down lab-reset lab-verify
+
+# LAB_VMS: VM name(s) for the lab-* targets; empty = all 8 fixed lab VMs
+# (lab/matrix.sh). LAB_DOWN_ARGS: extra flags for lab-down (--all also
+# deletes goldens, --panel also tears down the lab panel compose project).
+LAB_VMS =
+LAB_DOWN_ARGS =
 
 all: build
 
@@ -40,3 +46,19 @@ install: build-linux
 
 help:
 	@grep -E '^## ' Makefile | sed 's/## //'
+
+## lab-up: create/start the CSF test lab (OrbStack); idempotent
+lab-up:
+	lab/up.sh $(LAB_VMS)
+
+## lab-down: delete lab VMs (LAB_DOWN_ARGS=--all also goldens, --panel stops lab panel)
+lab-down:
+	lab/down.sh $(LAB_DOWN_ARGS) $(LAB_VMS)
+
+## lab-reset: restore lab VMs from their golden clones
+lab-reset:
+	lab/reset.sh $(LAB_VMS)
+
+## lab-verify: health gate for the lab; non-zero if the lab is broken
+lab-verify:
+	lab/verify.sh $(LAB_VMS)
