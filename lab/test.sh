@@ -184,6 +184,29 @@ for vm in $vms; do
   log "$vm: pass=$pass fail=$fail skip=$skip seconds=${seconds}s result=$result"
 done
 
+# --- CSF host-side stages (plan 15-07) ---
+# csf-ingest / csf-killswitch / compat-old-agent: the lab panel's own
+# stored CSF data, the kill switch end to end, and an old agent against
+# this new panel — things the in-VM Go suite above cannot assert, because
+# they live in the panel's database and in a SEPARATE agent binary built
+# from a different git ref. LAB_SKIP_CSF_STAGES=1 exists ONLY for local
+# debugging of the in-VM suite above; the phase gate must always run these
+# three, so skipping them is loudly logged AND marks the whole run FAIL —
+# it must never look like a quieter, still-green run.
+if [ "${LAB_SKIP_CSF_STAGES:-}" = "1" ]; then
+  log "*** LAB_SKIP_CSF_STAGES=1: csf-ingest/csf-killswitch/compat-old-agent SKIPPED — this run counts as FAIL, these stages are required for the phase gate ***"
+  failed_vms="$failed_vms csf-stages-skipped"
+  mkdir -p "$LAB_DIR/reports/raw"
+  printf 'LAB_SKIP_CSF_STAGES=1: csf-ingest/csf-killswitch/compat-old-agent were not run.\nThis is a local-debugging-only escape hatch; the phase gate requires all three.\n' >"$LAB_DIR/reports/raw/$TS-csf-stages-skipped.log"
+  printf '| (skipped) | - | - | csf-stages-skipped | 0 | 1 | 0 | 0 | FAIL |\n' >>"$REPORT"
+else
+  # shellcheck source=lab/csf-stages.sh
+  source "$LAB_DIR/csf-stages.sh"
+  csf_stage_ingest
+  csf_stage_compat_old_agent
+  csf_stage_killswitch
+fi
+
 # --- attack stage (plan 08) ---
 # Runs lab/attack.sh against debian12-nocsf (real SSH/WordPress/IMAP
 # brute force from lab-attacker) and asserts the resulting events/bans
