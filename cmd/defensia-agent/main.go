@@ -926,12 +926,10 @@ func runAgent() {
 				YaraInstalled:    func() bool { if yaraScanner != nil { yaraScanner.Recheck() }; return yaraScanner != nil && yaraScanner.IsAvailable() }(),
 				ModsecActive:     modsecEngine.IsActive(),
 				RequestsAnalyzed: reqAnalyzed,
-				CSFInstalled:     fwStatus.CSF.Installed,
-				CSFVersion:       fwStatus.CSF.Version,
-				CSFPortsIn:       fwStatus.CSF.PortsIn,
-				CSFPortsOut:      fwStatus.CSF.PortsOut,
-				CSFDenyCount:     fwStatus.CSF.DenyCount,
-				CSFAllowCount:    fwStatus.CSF.AllowCount,
+				// CSFHeartbeatFields / CSFPaused intentionally left nil here:
+				// the typed wire contract (phase 15 plan 15-06) replaces the
+				// old flat CSF* fields, but wiring fwStatus.CSF into it is
+				// plan 15-11's job, not this compile-only edit's.
 				ControlPanel:        cpName,
 				ControlPanelVersion: cpVersion,
 				PanelDomains:        panelDomains,

@@ -1,0 +1,30 @@
+{
+  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "collected_at": "2026-11-05T10:00:00Z",
+  "deny": {
+    "total": 2,
+    "truncated": false,
+    "entries": [
+      {
+        "value": "198.51.100.7",
+        "kind": "ip",
+        "comment": "Repeat SSH brute force"
+      },
+      {
+        "value": "tcp|in|d=22|s=198.51.100.7",
+        "kind": "advanced"
+      }
+    ]
+  },
+  "allow": {
+    "total": 1,
+    "truncated": false,
+    "entries": [
+      {
+        "value": "192.0.2.10",
+        "kind": "ip",
+        "comment": "lab-panel"
+      }
+    ]
+  }
+}
