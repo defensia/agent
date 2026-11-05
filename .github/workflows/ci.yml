@@ -53,3 +53,49 @@ jobs:
           else
             echo "gofmt clean"
           fi
+
+  # Real CSF (not a mock) in CI: installs the pinned, sha256-verified
+  # original-15.00 fork inside a privileged almalinux/9-init systemd
+  # container with the SAME lab/provision/{base,csf}.sh scripts the local
+  # OrbStack lab uses (Phase 14 LAB-05), then runs the CSF-only slice of
+  # the integration suite there. No secrets required. The ipset/xt_set
+  # diagnostic step is non-blocking: GitHub-hosted runner kernel support
+  # for those modules inside a container is unverified, so
+  # LAB_EXPECT_FW_MODE is left empty and that one check is allowed to
+  # skip — the 5 CSF assertions in lab/ci/run-csf-container.sh's own hard
+  # gate must PASS, never SKIP or FAIL.
+  integration-csf:
+    name: Integration (CSF v15.00, systemd container)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Host kernel netfilter diagnostics (non-blocking)
+        continue-on-error: true
+        run: |
+          uname -r
+          sudo modprobe ip_set ip_set_hash_ip ip_set_hash_net xt_set 2>&1 || true
+          lsmod | grep -E 'ip_set|xt_set' || echo "ip_set modules not listed"
+
+      - name: Build integration test binary
+        run: |
+          mkdir -p build
+          CGO_ENABLED=0 go test -c -tags integration -o build/it.test ./test/integration
+
+      - name: CSF v15.00 in privileged systemd container
+        run: lab/ci/run-csf-container.sh build/it.test
+
+      - name: Upload integration log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-integration-log
+          path: build/ci-integration.log
+          if-no-files-found: ignore

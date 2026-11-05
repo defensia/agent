@@ -1,0 +1,9 @@
+{
+  "csf_version": "15.00",
+  "variant": "generic",
+  "testing": "1",
+  "lfd_active": false,
+  "configserver_com_source": true,
+  "deny_contains": "203.0.113.9",
+  "allow_comment_contains": "lab-panel"
+}

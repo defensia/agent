@@ -1,0 +1,28 @@
+# lab/forks.lock — pinned CSF fork sources for the Phase 14 test lab.
+#
+# Format (pipe-delimited, 5 fields): id|kind|url|sha256|pin
+#   id      stable identifier used by lab/matrix.sh and lab/fetch-forks.sh
+#   kind    "tgz" (single downloaded tarball, integrity = sha256 of the file)
+#           or "git" (clone + checkout, integrity = exact commit sha; sha256
+#           field is "-" because git provides its own content addressing)
+#   url     public mirror/release URL (tgz) or git remote URL (git)
+#   sha256  sha256sum of the downloaded tgz; "-" for kind=git
+#   pin     git commit sha the tag/release/branch must resolve to (also used
+#           as the git checkout target for kind=git)
+#
+# NEVER configserver.com — mirrors only. ConfigServer (configserver.com)
+# shut down distribution 2025-08-31; download.configserver.com is dead/at
+# risk of domain-takeover squatting. Every row below is a public GitHub
+# mirror or fork, pinned by content hash or exact commit so the lab is
+# reproducible even if an upstream release asset is replaced.
+#
+# Refresh procedure: re-download the artefact (or re-clone/re-checkout for
+# git), re-hash with `shasum -a 256` (macOS) / `sha256sum` (Linux/CI),
+# confirm the new pin against the fork's own release notes/signature if
+# available, then update this file in a dedicated commit.
+#
+# id|kind|url|sha256|pin
+original-15.00|tgz|https://raw.githubusercontent.com/centminmod/configserver-scripts/2923c43f8f8790b1fcdd6b1a4fe269f78044f3e5/csf.tgz|99ef3f6e63c0f8b4509b1e72a21c93326efd97c21de1840ee9e32ee923f30ea4|2923c43f8f8790b1fcdd6b1a4fe269f78044f3e5
+aetherinox-15.10|tgz|https://github.com/Aetherinox/csf-firewall/releases/download/15.10/csf-firewall-v15.10.tgz|788317da71d31a338da4cff3bdae9471137efc3978436692fe9d005eb70f54b3|4260bc811dfbf25dc200a527ae64c89361404086
+sentinel-15.13|tgz|https://github.com/sentinelfirewall/sentinel/releases/download/15.13/csf.tgz|84abcbe1352393bf79b095bd011b3d0b91cd10cf9c472272f14f0834f8f657a6|8278b57bbe55b8b73cd25fc4faeaa5de65220e9c
+directadmin-15.12|git|https://github.com/poralix/da-csf.git|-|444d6dace14b7f483eb93f54f5d15143ce30fe14
