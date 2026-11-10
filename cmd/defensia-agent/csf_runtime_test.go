@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -543,5 +545,47 @@ func TestPanelPortFromServerURL(t *testing.T) {
 		if got := panelPortFromServerURL(tc.in); got != tc.want {
 			t.Errorf("panelPortFromServerURL(%q) = %d, want %d", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A 0 from panelPortFromServerURL disables SafePortChange's panel-port guard —
+// the guard that stops the agent closing its own route to the panel. Silence
+// there means the operator never learns the protection is off, so the log line
+// is part of the contract, not decoration.
+func TestPanelPortFromServerURLLogsWhenGuardDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"unparsable", "://nope", "cannot parse server_url"},
+		{"no host", "", "cannot parse server_url"},
+		// url.Parse rejects a non-numeric port itself, so the strconv branch is only
+		// reachable with digits that overflow an int.
+		{"bad port", "https://panel.example:not-a-port", "cannot parse server_url"},
+		{"overflowing port", "https://panel.example:99999999999999999999", "unparsable port"},
+		{"unknown scheme", "ftp://panel.example", "unknown scheme"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prevOut, prevFlags := log.Writer(), log.Flags()
+			log.SetOutput(&buf)
+			log.SetFlags(0)
+			defer func() {
+				log.SetOutput(prevOut)
+				log.SetFlags(prevFlags)
+			}()
+
+			if got := panelPortFromServerURL(tc.in); got != 0 {
+				t.Fatalf("panelPortFromServerURL(%q) = %d, want 0", tc.in, got)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "panel-port guard DISABLED") {
+				t.Errorf("guard was disabled silently for %q; log = %q", tc.in, out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("log for %q = %q, want it to say %q", tc.in, out, tc.want)
+			}
+		})
 	}
 }

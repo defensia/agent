@@ -132,10 +132,13 @@ const csfListsBodyCapBytes = 512 * 1024
 // it means "this panel has never heard of this route", which will still be
 // true on the very next cycle, so there is no point spending even one
 // request per heartbeat cycle re-discovering it. These are the durations
-// this plan's own <behavior> spec calls for. The backoff policy is owned
-// here, by the runtime that actually retries — internal/api only exposes
-// the predicate (IsOldPanelCSFListsResponse) that classifies the error;
-// it does not also publish a competing duration.
+// this plan's own <behavior> spec calls for. Both the policy and the
+// classification live here, in the runtime that actually retries:
+// csfListsBackoffFor treats 404 and 405 alike as "this panel has never heard
+// of this route". internal/api deliberately publishes neither a competing
+// duration nor a competing predicate — an earlier draft had both, and the
+// predicate recognised only 404, so it silently disagreed with this function
+// while never being called at all.
 const (
 	csfListsOldPanelBackoff  = 6 * time.Hour
 	csfListsRateLimitBackoff = 60 * time.Second
@@ -409,12 +412,17 @@ func applyCSFIntegrationFlag(disabled *bool) {
 func panelPortFromServerURL(u string) int {
 	parsed, err := url.Parse(u)
 	if err != nil || parsed.Host == "" {
+		// Returning 0 disables SafePortChange's panel-port guard, which is the
+		// one that stops the agent closing its own route to the panel. That is
+		// too consequential to happen quietly.
+		log.Printf("[csf] panel-port guard DISABLED: cannot parse server_url %q: %v", u, err)
 		return 0
 	}
 	if p := parsed.Port(); p != "" {
 		if n, err := strconv.Atoi(p); err == nil {
 			return n
 		}
+		log.Printf("[csf] panel-port guard DISABLED: unparsable port %q in server_url %q", p, u)
 		return 0
 	}
 	switch parsed.Scheme {
@@ -423,6 +431,7 @@ func panelPortFromServerURL(u string) int {
 	case "http":
 		return 80
 	default:
+		log.Printf("[csf] panel-port guard DISABLED: unknown scheme %q in server_url %q", parsed.Scheme, u)
 		return 0
 	}
 }

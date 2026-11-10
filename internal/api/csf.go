@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"net/http"
 )
 
 // CSFHeartbeatFields is embedded as an anonymous pointer in HeartbeatRequest:
@@ -77,28 +76,12 @@ const (
 // making any HTTP request.
 var ErrCSFListsTooLarge = errors.New("csf lists payload exceeds panel caps (1000 entries/list, 1 MiB body)")
 
-// IsOldPanelCSFListsResponse reports whether err is the 404 an old panel (one
-// that has never heard of POST /api/v1/agent/csf/lists) returns for this
-// route, as opposed to any other failure (network error, 422, 429, 5xx).
-// Plan 15-11's runtime wiring uses this to switch from per-cycle retries to
-// a backoff instead of treating every old-panel 404 as a transient error
-// worth hammering. The backoff duration itself is owned by the runtime
-// (cmd/defensia-agent/csf_runtime.go), not by this wire-contract package —
-// this predicate is the only piece of the old-panel-404 contract that
-// belongs here.
-func IsOldPanelCSFListsResponse(err error) bool {
-	var httpErr *HTTPError
-	if errors.As(err, &httpErr) {
-		return httpErr.Status == http.StatusNotFound
-	}
-	return false
-}
-
 // UploadCSFLists POSTs the agent's classified deny/allow CSF lists to the
 // panel. Returns ErrCSFListsTooLarge (no request sent) if req exceeds the
 // panel's own caps, or the *HTTPError the panel/old-panel returned otherwise
-// — notably Status 404 for a panel that predates this route (see
-// IsOldPanelCSFListsResponse) and Status 429 for throttle exhaustion.
+// — notably Status 404 (or 405) for a panel that predates this route, and
+// Status 429 for throttle exhaustion. Classifying those is the runtime's job:
+// see csfListsBackoffFor in cmd/defensia-agent/csf_runtime.go.
 func (c *Client) UploadCSFLists(req CSFListsRequest) error {
 	if len(req.Deny.Entries) > csfListsMaxEntries || len(req.Allow.Entries) > csfListsMaxEntries {
 		return ErrCSFListsTooLarge

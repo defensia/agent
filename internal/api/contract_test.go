@@ -408,9 +408,6 @@ func TestUploadCSFListsOldPanel404(t *testing.T) {
 	if httpErr.Status != http.StatusNotFound {
 		t.Errorf("Status = %d, want 404", httpErr.Status)
 	}
-	if !IsOldPanelCSFListsResponse(err) {
-		t.Errorf("IsOldPanelCSFListsResponse(err) = false, want true for a 404")
-	}
 }
 
 func TestUploadCSFListsSendsBearerAndBody(t *testing.T) {
