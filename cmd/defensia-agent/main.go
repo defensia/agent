@@ -2248,6 +2248,30 @@ func runMalwareScan(client *api.Client, intensityStr string) {
 		}})
 	}
 
+	// YARA over temp dirs, where droppers, miners and privesc kits are staged
+	if yaraScanner != nil && yaraScanner.IsAvailable() && !malwareScanCancel.Load() {
+		if tmpFindings := yaraScanner.ScanTempDirs(); len(tmpFindings) > 0 {
+			var chunkFindings []api.MalwareScanFinding
+			for _, f := range tmpFindings {
+				chunkFindings = append(chunkFindings, api.MalwareScanFinding{
+					FilePath: f.FilePath, SignatureID: f.SignatureID, Name: f.Name,
+					Severity: f.Severity, Type: f.Type,
+				})
+			}
+			resp, err := client.SubmitMalwareScanChunk(api.MalwareScanChunkRequest{
+				WebRoot:  api.MalwareScanWebRoot{Path: strings.Join(malware.YaraTempDirs(), ", ")},
+				Findings: chunkFindings,
+			})
+			if err != nil {
+				log.Printf("[malware] failed to submit temp dir yara findings: %v", err)
+			} else {
+				scanID = resp.ScanID
+				log.Printf("[malware] temp dir yara scan: %d findings submitted", len(tmpFindings))
+			}
+			allFindings = append(allFindings, tmpFindings...)
+		}
+	}
+
 	// System-wide checks (not per-root)
 	procFindings := malware.CheckMaliciousProcesses()
 	allFindings = append(allFindings, procFindings...)
