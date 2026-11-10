@@ -8,6 +8,35 @@ LAB_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da 
 LAB_AGENT_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf"
 LAB_CSF_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset"
 
+# The three lists above are consumed, never checked — so dropping a VM from
+# LAB_AGENT_VMS used to be invisible: test.sh simply never visits it, prints no
+# row for it, and still ends with "Overall: PASS". A fork would then go
+# unexercised in VM while the report claimed the matrix was green, which is
+# exactly the evidence LAB-01/LAB-03 and the "integration per VM" half of
+# COL-01/COL-02 rest on. internal/firewall's TestFixtureSetComplete pins the 5
+# fixture directories for the same reason; this is that guard for the matrix.
+#
+# Membership is fixed by REQUIREMENTS.md LAB-01 (orig, aetherinox, sentinel,
+# da, cwp-orphan, alma10-noipset, no-CSF) plus the attacker. Changing the
+# matrix means changing the requirement, so it must be a deliberate edit here.
+# The unquoted $1 is the point: it splits the space-separated list into one
+# VM per line so sort can order it. Quoting it would compare the raw strings
+# and make the guard order-sensitive.
+# shellcheck disable=SC2086
+_matrix_sorted() { printf '%s\n' $1 | sort | tr '\n' ' '; }
+_matrix_expect() {
+  _name="$1"; _got="$(_matrix_sorted "$2")"; _want="$(_matrix_sorted "$3")"
+  [ "$_got" = "$_want" ] || die "lab matrix drift: $_name is [${_got% }], want [${_want% }] (see REQUIREMENTS.md LAB-01)"
+}
+_matrix_expect LAB_VMS "$LAB_VMS" \
+  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf lab-attacker"
+_matrix_expect LAB_AGENT_VMS "$LAB_AGENT_VMS" \
+  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf"
+_matrix_expect LAB_CSF_VMS "$LAB_CSF_VMS" \
+  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset"
+unset -f _matrix_sorted _matrix_expect
+unset _name _got _want
+
 # vm_distro VM -> "distro:version" (orbctl create argument)
 vm_distro() {
   case "$1" in
