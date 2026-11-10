@@ -133,8 +133,17 @@ jobs:
   # gate (TestLabCSFDetection, TestLabCSFVersion, TestLabCSFTestingFlag,
   # TestLabLFDState, TestLabCSFListsReadable, TestLabCSFCollectorFork,
   # TestLabCSFCollectorState, TestLabCSFPortAddRemove, TestLabCSFPortSSHGuard,
-  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..06) must
+  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..05) must
   # PASS, never SKIP or FAIL.
+  #
+  # COL-06 is NOT in that list, despite TestLabNoCSFNoExec appearing in it:
+  # on a host that HAS CSF that test takes its other branch, where the only
+  # assertion is that CollectCSF returns non-nil. The script therefore runs a
+  # second pass in a container of the same image with csf.sh deliberately not
+  # run, and hard-gates the same test there, on the branch that asserts zero
+  # commands and no csf-seen marker. That pass is also the only place the
+  # no-CSF path is exercised on an RPM host at all — the OrbStack lab's one
+  # CSF-less VM is Debian, which has no rpm to probe for in the first place.
   integration-csf:
     name: Integration (CSF v15.00, systemd container)
     runs-on: ubuntu-latest
