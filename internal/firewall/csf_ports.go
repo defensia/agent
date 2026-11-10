@@ -241,7 +241,13 @@ func computePortChange(current string, port int, action string) (newValue string
 	}
 
 	// remove
-	if inRange && !standalone {
+	//
+	// A range covering the port wins regardless of a standalone token: dropping
+	// "8080" from "8000:9000,8080" leaves the port open via the range, so the
+	// only honest answer is to refuse. Reporting "applied" here made every
+	// layer agree on the wrong answer — the panel recorded the change and the
+	// customer was told a port was closed while it was still reachable.
+	if inRange {
 		return current, false, "port_in_range"
 	}
 	if !standalone {

@@ -915,3 +915,23 @@ func TestSafePortNeverFlush(t *testing.T) {
 	// every SafePort test), proving the guarantee continuously rather than
 	// only here.
 }
+
+// TestComputePortChangeStandaloneInsideRange pins the case that shipped broken:
+// a port present BOTH as a standalone token and inside a range. Removing the
+// token alone leaves the port open via the range, so the change must be
+// refused rather than reported as applied.
+func TestComputePortChangeStandaloneInsideRange(t *testing.T) {
+	const current = "22,80,443,8000:9000,8080"
+
+	newValue, changed, reject := computePortChange(current, 8080, "remove")
+
+	if changed {
+		t.Errorf("changed = true, want false: removing the standalone token leaves 8080 open via 8000:9000 (newValue=%q)", newValue)
+	}
+	if reject != "port_in_range" {
+		t.Errorf("rejectReason = %q, want %q", reject, "port_in_range")
+	}
+	if newValue != current {
+		t.Errorf("newValue = %q, want it unchanged (%q)", newValue, current)
+	}
+}
