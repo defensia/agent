@@ -84,6 +84,38 @@ func TestCSFStateKeys(t *testing.T) {
 	}
 }
 
+// COL-02 names AUTO_UPDATES among the facts the agent must read, but the only
+// assertion on it was "an absent key yields nil" — the key was never present
+// in any test's conf, in any fixture, and there is no LAB_EXPECT_AUTO_UPDATES
+// in the lab either. So misspelling the key it reads (AUTOUPDATES, say) kept
+// internal/firewall, cmd/defensia-agent and internal/api all green while the
+// value silently became nil on every real host: indistinguishable from "this
+// CSF has no such setting", which is exactly the state the tri-state
+// null/false/true design exists to tell apart.
+func TestCSFStateAutoUpdatesValue(t *testing.T) {
+	withHostRoot(t, t.TempDir())
+	withCSFDir(t, t.TempDir())
+	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+		return nil, errors.New("systemctl unavailable in this test")
+	})
+
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"1", true},
+		{"0", false},
+	} {
+		state := collectCSFState(context.Background(), map[string]string{"AUTO_UPDATES": tc.raw})
+		if state.AutoUpdates == nil {
+			t.Fatalf("AUTO_UPDATES=%q gave nil, want *%v — the key being read does not match the key in csf.conf", tc.raw, tc.want)
+		}
+		if *state.AutoUpdates != tc.want {
+			t.Errorf("AUTO_UPDATES=%q gave *%v, want *%v", tc.raw, *state.AutoUpdates, tc.want)
+		}
+	}
+}
+
 // TestCSFStateFixtures proves collectCSFState against two real Phase 14
 // fixtures: cwp-orphan-15.00 (TESTING=1, active configserver.com download
 // server) and original-15.00 (TESTING=0, every downloadservers line

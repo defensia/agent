@@ -529,3 +529,115 @@ func TestCSFInfoCompat(t *testing.T) {
 		t.Errorf("CSFInfo().DenyCount = %d, want >= 1", info.DenyCount)
 	}
 }
+
+// TestCollectCSFDetectsCPanelViaRPM covers the one fork rule nothing else
+// touches. detectFork's cpanel branch has two paths: `rpm -q cpanel-csf`
+// succeeding, which is version-independent, and version >= 16 plus
+// /usr/local/cpanel, which is only a fallback. Every other test in this
+// package either injects RPMHasCPanelCSF already resolved
+// (TestDetectForkSynthetic) or deliberately keeps rpm absent
+// (noRPMLookPath), so the probe that produces that boolean — lookPath("rpm")
+// then run(rpm -q cpanel-csf) — was never executed by any test, and there is
+// no cpanel fixture or cpanel VM either.
+//
+// That matters because of what the fallback does not cover: cPanel ships CSF
+// 15.x, and the version>=16 path cannot fire on it. So if the probe ever
+// stops working — renamed package, moved call, rpm missing — a cPanel host
+// does not degrade to "unknown", it is confidently reported as
+// original-15.00, and phase 16's "fork has no maintainer" health rule would
+// warn the largest installed base in the market. Forcing the boolean to false
+// keeps this whole suite green, which is how that went unnoticed.
+func TestCollectCSFDetectsCPanelViaRPM(t *testing.T) {
+	// A cPanel host running CSF 15.00: the version fallback cannot save it,
+	// so the rpm probe is the only thing standing between this and a wrong
+	// fork. Uses the original-15.00 fixture because that is literally what
+	// cPanel ships.
+	setup := func(t *testing.T, rpmHasPackage bool) (*CSFSnapshot, func() [][]string) {
+		t.Helper()
+		withCollectorMarkers(t)
+		tmp := t.TempDir()
+		withHostRoot(t, tmp)
+		withCSFDir(t, "testdata/original-15.00")
+		mustWriteFile(t, filepath.Join(tmp, "usr/sbin/csf"), "#!/bin/sh\n")
+
+		// rpm IS on this host (that is the point); csf is not on PATH, so
+		// csfBinaryPath falls back to the fixture tree exactly as in
+		// TestCollectCSFFixture.
+		withLookPath(t, func(name string) (string, error) {
+			if name == "rpm" {
+				return "/usr/bin/rpm", nil
+			}
+			return "", exec.ErrNotFound
+		})
+
+		csfVOut, err := os.ReadFile(filepath.Join("testdata", "original-15.00", "csf-v.txt"))
+		if err != nil {
+			t.Fatalf("read csf-v.txt: %v", err)
+		}
+
+		var mu sync.Mutex
+		var seen [][]string
+		restore := ObserveCommands(func(name string, args []string) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, append([]string{name}, args...))
+		})
+		t.Cleanup(restore)
+
+		withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+			if name == "rpm" {
+				if rpmHasPackage {
+					return []byte("cpanel-csf-15.00-1.noarch\n"), nil
+				}
+				return []byte("package cpanel-csf is not installed\n"), errors.New("exit status 1")
+			}
+			if name == "systemctl" {
+				return []byte("active\n"), nil
+			}
+			return csfVOut, nil
+		})
+
+		snap := CollectCSF(context.Background())
+		if snap == nil {
+			t.Fatal("CollectCSF() = nil, want a snapshot")
+		}
+		return snap, func() [][]string {
+			mu.Lock()
+			defer mu.Unlock()
+			return seen
+		}
+	}
+
+	t.Run("package present", func(t *testing.T) {
+		snap, calls := setup(t, true)
+
+		if snap.Fork != ForkCPanel {
+			t.Errorf("snap.Fork = %q, want %q — the rpm probe is the only cpanel signal on CSF 15.x", snap.Fork, ForkCPanel)
+		}
+		if !containsString(snap.ForkEvidence, "rpm:cpanel-csf") {
+			t.Errorf("snap.ForkEvidence = %v, want it to cite rpm:cpanel-csf", snap.ForkEvidence)
+		}
+
+		// Pin the exact command, not just the outcome: querying the wrong
+		// package name would silently stop detecting cPanel forever.
+		var found bool
+		for _, c := range calls() {
+			if len(c) == 3 && c[0] == "rpm" && c[1] == "-q" && c[2] == "cpanel-csf" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("commands run = %v, want one of them to be exactly [rpm -q cpanel-csf]", calls())
+		}
+	})
+
+	t.Run("package absent", func(t *testing.T) {
+		snap, _ := setup(t, false)
+
+		// Same host, probe says no: this must NOT be cpanel, or the test
+		// above would pass for the wrong reason.
+		if snap.Fork == ForkCPanel {
+			t.Errorf("snap.Fork = %q with cpanel-csf absent, want anything but cpanel", snap.Fork)
+		}
+	})
+}
