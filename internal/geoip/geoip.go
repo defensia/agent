@@ -6,16 +6,23 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/oschwald/maxminddb-golang"
 )
 
 const defaultDBPath = "/etc/defensia/GeoLite2-Country.mmdb"
 
+// ProvisionedDBPath is where the agent stores the country database it downloads
+// from the panel. Nothing ever put a file at defaultDBPath, so until Nov 2026
+// every standard install ran with geoblocking silently disabled.
+const ProvisionedDBPath = "/etc/defensia/geoip-country.mmdb"
+
 // Lookup provides country code lookups from MaxMind GeoLite2-Country database.
 type Lookup struct {
 	mu        sync.RWMutex
 	db        *maxminddb.Reader
+	path      string
 	blocked   map[string]bool   // lowercase country codes that are blocked
 	cidrCache map[string][]string // cached CIDRs per country code (extracted once)
 }
@@ -26,37 +33,72 @@ type countryRecord struct {
 	} `maxminddb:"country"`
 }
 
-// New creates a Lookup. If the database file doesn't exist, lookups return "".
+// New creates a Lookup. With an empty dbPath it tries a hand-installed
+// MaxMind file first, then the database provisioned from the panel. If neither
+// exists, lookups return "" until Reload succeeds.
 func New(dbPath string) *Lookup {
-	if dbPath == "" {
-		dbPath = defaultDBPath
-	}
-
 	l := &Lookup{
 		blocked:   make(map[string]bool),
 		cidrCache: make(map[string][]string),
 	}
 
-	db, err := maxminddb.Open(dbPath)
-	if err != nil {
-		log.Printf("[geoip] database not found at %s — geoblocking disabled", dbPath)
-		return l
+	candidates := []string{dbPath}
+	if dbPath == "" {
+		candidates = []string{defaultDBPath, ProvisionedDBPath}
+	}
+	for _, p := range candidates {
+		if err := l.Reload(p); err == nil {
+			return l
+		}
 	}
 
-	l.db = db
-	log.Printf("[geoip] loaded database from %s", dbPath)
+	log.Printf("[geoip] no country database at %s — geoblocking disabled until one is provisioned", strings.Join(candidates, " or "))
 	return l
+}
+
+// Reload opens the database at path and swaps it in, dropping cached CIDRs.
+// On error the current database, if any, stays in use.
+func (l *Lookup) Reload(path string) error {
+	db, err := maxminddb.Open(path)
+	if err != nil {
+		return err
+	}
+
+	l.mu.Lock()
+	old := l.db
+	l.db = db
+	l.path = path
+	l.cidrCache = make(map[string][]string)
+	l.mu.Unlock()
+
+	if old != nil {
+		old.Close()
+	}
+	log.Printf("[geoip] loaded database from %s (built %s)", path, time.Unix(int64(db.Metadata.BuildEpoch), 0).UTC().Format("2006-01-02"))
+	return nil
+}
+
+// Loaded reports whether a database is open, and which file.
+func (l *Lookup) Loaded() (bool, string) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.db != nil, l.path
 }
 
 // Close closes the database.
 func (l *Lookup) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.db != nil {
 		l.db.Close()
+		l.db = nil
 	}
 }
 
 // Country returns the ISO 3166-1 alpha-2 country code for an IP, or "".
 func (l *Lookup) Country(ipStr string) string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if l.db == nil {
 		return ""
 	}
@@ -104,25 +146,27 @@ func (l *Lookup) IsBlocked(ipStr string) (string, bool) {
 // ExtractCIDRs returns all CIDRs for the given country code from the mmdb.
 // Results are cached — the full mmdb iteration only happens once per country.
 func (l *Lookup) ExtractCIDRs(countryCode string) ([]string, error) {
-	if l.db == nil {
-		return nil, fmt.Errorf("geoip database not loaded")
-	}
-
 	countryCode = strings.ToUpper(strings.TrimSpace(countryCode))
 	if countryCode == "" {
 		return nil, fmt.Errorf("empty country code")
 	}
 
+	// Hold the read lock for the whole walk so Reload cannot close the reader
+	// underneath it.
 	l.mu.RLock()
+	if l.db == nil {
+		l.mu.RUnlock()
+		return nil, fmt.Errorf("geoip database not loaded")
+	}
 	if cached, ok := l.cidrCache[countryCode]; ok {
 		l.mu.RUnlock()
 		log.Printf("[geoip] returning %d cached CIDRs for %s", len(cached), countryCode)
 		return cached, nil
 	}
-	l.mu.RUnlock()
+	db := l.db
 
 	var cidrs []string
-	networks := l.db.Networks(maxminddb.SkipAliasedNetworks)
+	networks := db.Networks(maxminddb.SkipAliasedNetworks)
 	for networks.Next() {
 		var record countryRecord
 		subnet, err := networks.Network(&record)
@@ -136,13 +180,17 @@ func (l *Lookup) ExtractCIDRs(countryCode string) ([]string, error) {
 			}
 		}
 	}
-	if err := networks.Err(); err != nil {
+	err := networks.Err()
+	l.mu.RUnlock()
+	if err != nil {
 		return cidrs, fmt.Errorf("network iteration error: %w", err)
 	}
 
-	// Cache the result
+	// Cache the result, unless the database was swapped while we walked it
 	l.mu.Lock()
-	l.cidrCache[countryCode] = cidrs
+	if l.db == db {
+		l.cidrCache[countryCode] = cidrs
+	}
 	l.mu.Unlock()
 
 	log.Printf("[geoip] extracted %d CIDRs for country %s (cached)", len(cidrs), countryCode)

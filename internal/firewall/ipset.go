@@ -37,11 +37,12 @@ func ipsetSetName(countryCode string) string {
 }
 
 // createIpsetHashNet creates an ipset hash:net set if it doesn't exist.
-// maxelem defaults to 131072 (enough for any country).
+// maxelem is 262144: the United States alone is ~151,000 IPv4 networks in the
+// country databases, so the old 131072 made blocking it fail every time.
 func createIpsetHashNet(name string) error {
 	// Try to create — if it already exists, ipset returns error code 1
 	out, err := exec.Command("ipset", "create", name, "hash:net",
-		"maxelem", "131072", "-exist").CombinedOutput()
+		"maxelem", "262144", "-exist").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ipset create %s: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}

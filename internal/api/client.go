@@ -180,6 +180,11 @@ type HeartbeatRequest struct {
 	MonitoredDomains   []string       `json:"monitored_domains,omitempty"`
 	MonitoredLogPaths  []string       `json:"monitored_log_paths,omitempty"`
 	FirewallMode       string         `json:"firewall_mode,omitempty"`
+	// Pointers so false and 0 are reported, not dropped: the panel needs to
+	// tell "geoblocking configured but not running" apart from an old agent.
+	GeoIPLoaded       *bool `json:"geoip_loaded,omitempty"`
+	GeoblockEnforced  *bool `json:"geoblock_enforced,omitempty"`
+	GeoblockCountries *int  `json:"geoblock_countries,omitempty"`
 	BanCapacity        int            `json:"ban_capacity,omitempty"`
 	ActiveBans         int            `json:"active_bans,omitempty"`
 	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`
@@ -368,6 +373,11 @@ type SyncConfig struct {
 	MonitorMode       bool              `json:"monitor_mode"`
 	WAFConfig         *WAFConfig        `json:"waf_config"`
 	BlockedCountries  []string          `json:"blocked_countries"`
+	// Traffic geoblocking must never drop: CDN edges, search-engine crawlers,
+	// uptime monitors (IPv4 CIDRs), and ports such as mail and, where Let's
+	// Encrypt needs it, 80. Computed by the panel from official IP lists.
+	GeoExemptCIDRs []string `json:"geo_exempt_cidrs"`
+	GeoExemptPorts []int    `json:"geo_exempt_ports"`
 	MonitorConfig     *MonitorConfig    `json:"monitor_config,omitempty"`
 	MalwareScanConfig *MalwareScanConfig `json:"malware_scan_config,omitempty"`
 	SigmaConfig       *SigmaConfig      `json:"sigma_config,omitempty"`
