@@ -373,6 +373,11 @@ type SyncConfig struct {
 	MonitorMode       bool              `json:"monitor_mode"`
 	WAFConfig         *WAFConfig        `json:"waf_config"`
 	BlockedCountries  []string          `json:"blocked_countries"`
+	// Traffic geoblocking must never drop: CDN edges, search-engine crawlers,
+	// uptime monitors (IPv4 CIDRs), and ports such as mail and, where Let's
+	// Encrypt needs it, 80. Computed by the panel from official IP lists.
+	GeoExemptCIDRs []string `json:"geo_exempt_cidrs"`
+	GeoExemptPorts []int    `json:"geo_exempt_ports"`
 	MonitorConfig     *MonitorConfig    `json:"monitor_config,omitempty"`
 	MalwareScanConfig *MalwareScanConfig `json:"malware_scan_config,omitempty"`
 	SigmaConfig       *SigmaConfig      `json:"sigma_config,omitempty"`

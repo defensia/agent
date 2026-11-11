@@ -3,6 +3,7 @@ package firewall
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -68,17 +69,39 @@ func ensureGeoChain() error {
 	return nil
 }
 
-// rebuildGeoChain replaces the chain's contents: a RETURN for each protected IP
-// (panel and whitelist) first, then one DROP per country set. The chain is only
-// empty for the few milliseconds between flush and refill, and empty means
-// nothing is blocked, never that everything is.
-func rebuildGeoChain(protectedIPs, sets []string) error {
+// geoExemptSet holds the CIDRs geoblocking never drops (CDNs, crawlers, monitors).
+const geoExemptSet = "defensia-geo-exempt"
+
+// rebuildGeoChain replaces the chain's contents, in this order:
+//  1. RETURN for each protected IP (panel and whitelist);
+//  2. RETURN for the exempt set, if it is loaded;
+//  3. RETURN for exempt TCP destination ports (mail, and 80 for Let's Encrypt);
+//  4. one DROP per country set.
+//
+// The chain is only empty for the few milliseconds between flush and refill,
+// and empty means nothing is blocked, never that everything is.
+func rebuildGeoChain(protectedIPs []string, exemptSet bool, exemptPorts []int, sets []string) error {
 	if out, err := iptablesRun("-F", geoChain); err != nil {
 		return fmt.Errorf("flush %s: %s (%w)", geoChain, strings.TrimSpace(string(out)), err)
 	}
 	for _, ip := range protectedIPs {
 		if out, err := iptablesRun("-A", geoChain, "-s", ip, "-j", "RETURN"); err != nil {
 			return fmt.Errorf("protect %s in %s: %s (%w)", ip, geoChain, strings.TrimSpace(string(out)), err)
+		}
+	}
+	if exemptSet {
+		if out, err := iptablesRun("-A", geoChain, "-m", "set", "--match-set", geoExemptSet, "src", "-j", "RETURN"); err != nil {
+			return fmt.Errorf("exempt set in %s: %s (%w)", geoChain, strings.TrimSpace(string(out)), err)
+		}
+	}
+	if len(exemptPorts) > 0 {
+		ports := make([]string, 0, len(exemptPorts))
+		for _, p := range exemptPorts {
+			ports = append(ports, strconv.Itoa(p))
+		}
+		// multiport takes at most 15 ports; the panel sends a handful.
+		if out, err := iptablesRun("-A", geoChain, "-p", "tcp", "-m", "multiport", "--dports", strings.Join(ports, ","), "-j", "RETURN"); err != nil {
+			return fmt.Errorf("exempt ports in %s: %s (%w)", geoChain, strings.TrimSpace(string(out)), err)
 		}
 	}
 	for _, set := range sets {
@@ -116,4 +139,32 @@ func removeLegacyGeoRule(set string) {
 			return
 		}
 	}
+}
+
+// loadGeoExemptSet replaces the exempt set's contents atomically: the new list
+// is built in a scratch set and swapped in, so the chain never points at a
+// half-loaded set. Returns whether the set is usable.
+func loadGeoExemptSet(cidrs []string) bool {
+	if len(cidrs) == 0 {
+		return false
+	}
+	if err := createIpsetHashNet(geoExemptSet); err != nil {
+		return false
+	}
+	tmp := geoExemptSet + "-new"
+	_ = destroyIpset(tmp)
+	if err := createIpsetHashNet(tmp); err != nil {
+		return false
+	}
+	if err := populateIpsetBatch(tmp, cidrs); err != nil {
+		_ = destroyIpset(tmp)
+		return false
+	}
+	if out, err := exec.Command("ipset", "swap", tmp, geoExemptSet).CombinedOutput(); err != nil {
+		_ = destroyIpset(tmp)
+		_ = out
+		return false
+	}
+	_ = destroyIpset(tmp)
+	return true
 }

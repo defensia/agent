@@ -22,6 +22,10 @@ type GeoBlocker struct {
 	cidrProvider    CIDRProvider
 	protectedIPs    []string // IPs that must never be geo-blocked (panel server, etc.)
 	enforced        bool     // geoChain is live and points at activeCountries
+	exemptCIDRs     []string // never dropped: CDNs, crawlers, monitors
+	exemptPorts     []int    // TCP destination ports never dropped
+	exemptKey       string   // exemptCIDRs as last loaded into geoExemptSet
+	exemptLoaded    bool
 }
 
 // NewGeoBlocker creates a GeoBlocker with the given CIDR provider.
@@ -98,10 +102,16 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 	sort.Strings(sets)
 	if len(sets) == 0 {
 		teardownGeoChain()
+		g.dropExemptSet()
+	} else if exemptOK := g.syncExemptSet(); len(g.exemptCIDRs) > 0 && !exemptOK {
+		// Blocking without the exemptions would cut off search engines and CDN
+		// edges; leaving countries unblocked until the next sync is the lesser harm.
+		teardownGeoChain()
+		g.enforced = false
 	} else if err := ensureGeoChain(); err != nil {
 		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
 		g.enforced = false
-	} else if err := rebuildGeoChain(g.protectedIPs, sets); err != nil {
+	} else if err := rebuildGeoChain(g.protectedIPs, exemptOK, g.exemptPorts, sets); err != nil {
 		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
 		g.enforced = false
 	} else {
@@ -261,8 +271,61 @@ func (g *GeoBlocker) Cleanup() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	teardownGeoChain()
+	g.dropExemptSet()
 	for cc := range g.activeCountries {
 		g.removeCountry(cc)
 	}
 	g.enforced = false
+}
+
+// SetExemptions records the CIDRs and TCP ports geoblocking must never drop.
+// Applied on the next ApplyCountryBlocks.
+func (g *GeoBlocker) SetExemptions(cidrs []string, ports []int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	clean := make([]string, 0, len(cidrs))
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if _, n, err := net.ParseCIDR(c); err == nil && n.IP.To4() != nil {
+			clean = append(clean, n.String())
+		}
+	}
+	sort.Strings(clean)
+	g.exemptCIDRs = clean
+
+	g.exemptPorts = g.exemptPorts[:0]
+	for _, p := range ports {
+		if p > 0 && p < 65536 && len(g.exemptPorts) < 15 {
+			g.exemptPorts = append(g.exemptPorts, p)
+		}
+	}
+}
+
+// syncExemptSet loads geoExemptSet when the CIDR list changed and reports
+// whether the chain may reference it. Caller holds g.mu.
+func (g *GeoBlocker) syncExemptSet() bool {
+	key := strings.Join(g.exemptCIDRs, ",")
+	if key == g.exemptKey && g.exemptLoaded {
+		return true
+	}
+	g.exemptLoaded = loadGeoExemptSet(g.exemptCIDRs)
+	if g.exemptLoaded {
+		g.exemptKey = key
+		log.Printf("[geoblock] exempt from country blocks: %d CIDRs (CDNs, crawlers, monitors), ports %v", len(g.exemptCIDRs), g.exemptPorts)
+	} else if len(g.exemptCIDRs) > 0 {
+		log.Printf("[geoblock] WARNING: could not load the %d exempt CIDRs — crawlers and CDNs in blocked countries will be blocked", len(g.exemptCIDRs))
+	}
+	return g.exemptLoaded
+}
+
+// dropExemptSet destroys geoExemptSet once nothing references it.
+func (g *GeoBlocker) dropExemptSet() {
+	if g.exemptKey == "" && !g.exemptLoaded {
+		return
+	}
+	_ = flushIpset(geoExemptSet)
+	_ = destroyIpset(geoExemptSet)
+	g.exemptKey = ""
+	g.exemptLoaded = false
 }

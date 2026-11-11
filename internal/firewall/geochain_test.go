@@ -132,7 +132,7 @@ func TestRebuildGeoChainPutsProtectedIPsFirst(t *testing.T) {
 	f.chains[geoChain] = []string{"-m set --match-set defensia-geo-xx src -j DROP"} // stale
 	withFake(t, f)
 
-	if err := rebuildGeoChain([]string{"203.0.113.7", "198.51.100.1"}, []string{"defensia-geo-cn", "defensia-geo-ru"}); err != nil {
+	if err := rebuildGeoChain([]string{"203.0.113.7", "198.51.100.1"}, false, nil, []string{"defensia-geo-cn", "defensia-geo-ru"}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -153,7 +153,7 @@ func TestTeardownGeoChainLeavesNoTrace(t *testing.T) {
 	if err := ensureGeoChain(); err != nil {
 		t.Fatal(err)
 	}
-	if err := rebuildGeoChain(nil, []string{"defensia-geo-cn"}); err != nil {
+	if err := rebuildGeoChain(nil, false, nil, []string{"defensia-geo-cn"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,5 +177,51 @@ func TestRemoveLegacyGeoRuleDropsEveryCopy(t *testing.T) {
 
 	if strings.Join(f.chains["INPUT"], "|") != "-j ACCEPT" {
 		t.Fatalf("INPUT = %v, want only the unrelated rule", f.chains["INPUT"])
+	}
+}
+
+func TestRebuildGeoChainExemptionsComeBeforeEveryCountryDrop(t *testing.T) {
+	f := newFakeIptables("INPUT", geoChain)
+	withFake(t, f)
+
+	if err := rebuildGeoChain([]string{"203.0.113.7"}, true, []int{25, 465, 587, 80}, []string{"defensia-geo-us"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"-s 203.0.113.7 -j RETURN",
+		"-m set --match-set defensia-geo-exempt src -j RETURN",
+		"-p tcp -m multiport --dports 25,465,587,80 -j RETURN",
+		"-m set --match-set defensia-geo-us src -j DROP",
+	}
+	if got := f.chains[geoChain]; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("chain = %v\nwant    %v", got, want)
+	}
+}
+
+func TestRebuildGeoChainWithoutExemptionsHasNoReturnForThem(t *testing.T) {
+	f := newFakeIptables("INPUT", geoChain)
+	withFake(t, f)
+
+	if err := rebuildGeoChain(nil, false, nil, []string{"defensia-geo-cn"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.chains[geoChain]; len(got) != 1 || !strings.HasSuffix(got[0], "-j DROP") {
+		t.Fatalf("chain = %v, want just the country DROP", got)
+	}
+}
+
+func TestSetExemptionsKeepsOnlyValidIPv4AndCapsPorts(t *testing.T) {
+	g := &GeoBlocker{activeCountries: map[string]bool{}}
+	ports := []int{25, 465, 587, 80, 0, 70000}
+	for i := 1000; i < 1020; i++ {
+		ports = append(ports, i)
+	}
+	g.SetExemptions([]string{"66.249.64.0/27", " 40.77.167.0/24 ", "2001:4860:4801::/48", "nonsense", "66.249.64.5/27"}, ports)
+
+	if strings.Join(g.exemptCIDRs, ",") != "40.77.167.0/24,66.249.64.0/27,66.249.64.0/27" {
+		t.Fatalf("exemptCIDRs = %v", g.exemptCIDRs)
+	}
+	if len(g.exemptPorts) != 15 || g.exemptPorts[0] != 25 || g.exemptPorts[3] != 80 {
+		t.Fatalf("exemptPorts = %v, want 15 valid ports starting 25,465,587,80", g.exemptPorts)
 	}
 }

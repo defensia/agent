@@ -1149,6 +1149,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 	// Pass whitelisted IPs to geoblocker so they get ACCEPT rules before geo DROPs
 	geoBlocker.SetWhitelistedIPs(wlIPs)
+	geoBlocker.SetExemptions(sync.Config.GeoExemptCIDRs, sync.Config.GeoExemptPorts)
 
 	// Apply proactive country blocks via ipset hash:net (kernel-level, all CIDRs)
 	if !sync.Config.MonitorMode {
