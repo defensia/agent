@@ -269,6 +269,12 @@ func runAgent() {
 		return geo.ExtractCIDRs(cc)
 	}, cfg.ServerURL)
 
+	// Fetch the country database from the panel unless an operator pointed
+	// GEOIP_DB_PATH at their own; without it geoblocking does nothing.
+	if geoDBPath == "" {
+		go provisionGeoIP(apiClient, geo, geoBlocker)
+	}
+
 	// Initialize Kubernetes client (nil if not running in K8s)
 	k8sClient := kubernetes.NewClient()
 	if k8sClient != nil {
@@ -916,7 +922,12 @@ func runAgent() {
 
 			fwStatus := firewall.FirewallStatus()
 			csfSnap := firewall.CurrentCSFSnapshot()
+			geoLoaded, _ := geo.Loaded()
+			geoEnforced, geoCountries := geoBlocker.Enforced()
 			hbReq := api.HeartbeatRequest{
+				GeoIPLoaded:       &geoLoaded,
+				GeoblockEnforced:  &geoEnforced,
+				GeoblockCountries: &geoCountries,
 				Status:            "online",
 				Version:           version,
 				Timestamp:         time.Now().UTC().Format(time.RFC3339),

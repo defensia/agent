@@ -180,6 +180,11 @@ type HeartbeatRequest struct {
 	MonitoredDomains   []string       `json:"monitored_domains,omitempty"`
 	MonitoredLogPaths  []string       `json:"monitored_log_paths,omitempty"`
 	FirewallMode       string         `json:"firewall_mode,omitempty"`
+	// Pointers so false and 0 are reported, not dropped: the panel needs to
+	// tell "geoblocking configured but not running" apart from an old agent.
+	GeoIPLoaded       *bool `json:"geoip_loaded,omitempty"`
+	GeoblockEnforced  *bool `json:"geoblock_enforced,omitempty"`
+	GeoblockCountries *int  `json:"geoblock_countries,omitempty"`
 	BanCapacity        int            `json:"ban_capacity,omitempty"`
 	ActiveBans         int            `json:"active_bans,omitempty"`
 	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`

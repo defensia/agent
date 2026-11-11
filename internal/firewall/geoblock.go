@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -20,6 +21,7 @@ type GeoBlocker struct {
 	activeCountries map[string]bool // currently blocked country codes (uppercase)
 	cidrProvider    CIDRProvider
 	protectedIPs    []string // IPs that must never be geo-blocked (panel server, etc.)
+	enforced        bool     // geoChain is live and points at activeCountries
 }
 
 // NewGeoBlocker creates a GeoBlocker with the given CIDR provider.
@@ -51,8 +53,9 @@ func NewGeoBlocker(provider CIDRProvider, panelURL string) *GeoBlocker {
 }
 
 // ApplyCountryBlocks synchronizes the ipset country blocks with the desired list.
-// It adds sets for new countries and removes sets for countries no longer blocked.
-// Protected IPs (panel server) always get an ACCEPT rule before any geo DROP.
+// Sets for new countries are loaded first, then geoChain is rebuilt to point at
+// exactly the active sets, and only then are sets for dropped countries
+// destroyed — ipset refuses to destroy a set an iptables rule still references.
 func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 	if !HasIpset() {
 		if len(countries) > 0 {
@@ -78,22 +81,46 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 		}
 	}
 
-	// Remove countries that are no longer blocked
-	for cc := range g.activeCountries {
-		if !desired[cc] {
-			g.removeCountry(cc)
-		}
-	}
-
-	// Add countries that are newly blocked
+	// Load sets for countries that are newly blocked
 	for cc := range desired {
 		if !g.activeCountries[cc] {
 			g.addCountry(cc)
 		}
 	}
+
+	// Point the chain at what is actually loaded
+	var sets []string
+	for cc := range desired {
+		if g.activeCountries[cc] {
+			sets = append(sets, ipsetSetName(cc))
+		}
+	}
+	sort.Strings(sets)
+	if len(sets) == 0 {
+		teardownGeoChain()
+	} else if err := ensureGeoChain(); err != nil {
+		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
+		g.enforced = false
+	} else if err := rebuildGeoChain(g.protectedIPs, sets); err != nil {
+		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
+		g.enforced = false
+	} else {
+		g.enforced = true
+	}
+	if len(sets) == 0 {
+		g.enforced = false
+	}
+
+	// Destroy sets for countries that are no longer blocked
+	for cc := range g.activeCountries {
+		if !desired[cc] {
+			g.removeCountry(cc)
+		}
+	}
 }
 
-// addCountry creates an ipset set for the country, loads CIDRs, and adds the iptables rule.
+// addCountry creates an ipset set for the country and loads its CIDRs. The
+// iptables side is geoChain's job.
 func (g *GeoBlocker) addCountry(cc string) {
 	setName := ipsetSetName(cc)
 
@@ -108,10 +135,18 @@ func (g *GeoBlocker) addCountry(cc string) {
 		return
 	}
 
-	// Create the ipset set
+	// An older agent may have left a per-country DROP in INPUT for this set
+	removeLegacyGeoRule(setName)
+
+	// Create the ipset set. A set left by an older agent with the smaller
+	// maxelem cannot be re-created in place, so drop it and try once more.
 	if err := createIpsetHashNet(setName); err != nil {
-		log.Printf("[geoblock] failed to create set %s: %v", setName, err)
-		return
+		_ = flushIpset(setName)
+		_ = destroyIpset(setName)
+		if err := createIpsetHashNet(setName); err != nil {
+			log.Printf("[geoblock] failed to create set %s: %v", setName, err)
+			return
+		}
 	}
 
 	// Flush any stale entries
@@ -122,32 +157,22 @@ func (g *GeoBlocker) addCountry(cc string) {
 	// Populate with CIDRs using batch restore (fast)
 	if err := populateIpsetBatch(setName, cidrs); err != nil {
 		log.Printf("[geoblock] failed to populate set %s with %d CIDRs: %v", setName, len(cidrs), err)
-		// Cleanup on failure
-		_ = destroyIpset(setName)
-		return
-	}
-
-	// Add iptables rule pointing to this set
-	if err := addIptablesIpsetRule(setName); err != nil {
-		log.Printf("[geoblock] failed to add iptables rule for %s: %v", setName, err)
-		_ = flushIpset(setName)
+		// A set geoChain does not reference yet can be destroyed safely
 		_ = destroyIpset(setName)
 		return
 	}
 
 	g.activeCountries[cc] = true
 	count := ipsetEntryCount(setName)
-	log.Printf("[geoblock] ✓ blocked %s: %d CIDRs loaded into %s", cc, count, setName)
+	log.Printf("[geoblock] ✓ loaded %s: %d CIDRs in %s", cc, count, setName)
 }
 
-// removeCountry removes the iptables rule and destroys the ipset set for a country.
+// removeCountry destroys the ipset set for a country. Callers must rebuild
+// geoChain without it first.
 func (g *GeoBlocker) removeCountry(cc string) {
 	setName := ipsetSetName(cc)
 
-	// Remove iptables rule first (must happen before destroying the set)
-	if err := removeIptablesIpsetRule(setName); err != nil {
-		log.Printf("[geoblock] warning: failed to remove iptables rule for %s: %v", setName, err)
-	}
+	removeLegacyGeoRule(setName)
 
 	// Flush and destroy the set
 	_ = flushIpset(setName)
@@ -157,6 +182,25 @@ func (g *GeoBlocker) removeCountry(cc string) {
 
 	delete(g.activeCountries, cc)
 	log.Printf("[geoblock] ✓ unblocked %s: set %s removed", cc, setName)
+}
+
+// Invalidate forgets which sets are loaded, so the next ApplyCountryBlocks
+// reloads every country — used after the GeoIP database is replaced.
+func (g *GeoBlocker) Invalidate() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.activeCountries = make(map[string]bool)
+}
+
+// Enforced reports whether country blocks are live in the kernel right now,
+// and how many countries they cover.
+func (g *GeoBlocker) Enforced() (bool, int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.enforced {
+		return false, 0
+	}
+	return true, len(g.activeCountries)
 }
 
 // ActiveCountries returns the list of currently blocked countries.
@@ -216,7 +260,9 @@ func (g *GeoBlocker) ensureProtectedIPs() {
 func (g *GeoBlocker) Cleanup() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	teardownGeoChain()
 	for cc := range g.activeCountries {
 		g.removeCountry(cc)
 	}
+	g.enforced = false
 }
