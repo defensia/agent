@@ -227,7 +227,8 @@ func portListStatus(value string, port int) (standalone, inRange bool) {
 
 // computePortChange computes the new value of a single TCP_IN/TCP_OUT-style
 // key for one add/remove request. rejectReason is non-empty only for
-// "port_in_range" (remove of a port covered solely by a range).
+// "port_in_range": a remove of a port that any range still covers, whether or
+// not a standalone token for it is also present. See the remove branch below.
 func computePortChange(current string, port int, action string) (newValue string, changed bool, rejectReason string) {
 	standalone, inRange := portListStatus(current, port)
 
