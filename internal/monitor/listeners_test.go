@@ -32,7 +32,10 @@ func TestClassifyBind(t *testing.T) {
 		// 172.32 is outside RFC1918 — the classic off-by-one in hand-rolled
 		// private-range checks.
 		{"172.32 is public", "172.32.0.1", ExposurePublic},
-		{"routable", "185.7.81.107", ExposurePublic},
+		// A routable unicast address. RFC 5737 documentation range, which is
+		// deliberately NOT RFC1918 — the assertion is "not private", so the
+		// fixture has to be a public-looking address we do not own.
+		{"routable", "198.51.100.10", ExposurePublic},
 		{"ipv6 routable", "2a01:4f8::1", ExposurePublic},
 
 		// Unparseable must not be downgraded to safe. A finding we cannot

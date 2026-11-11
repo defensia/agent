@@ -65,11 +65,15 @@ func TestMailObservationFromRealLines(t *testing.T) {
 			// Postfix never logs the account. PLAIN reached Dovecot over the
 			// auth socket, so Postfix appended the mailbox to its own warning.
 			// 312 of 341 SMTP AUTH failures on their server looked like this.
+			// The mailbox is an RFC 2606 placeholder: sasl_username is read by
+			// `sasl_username=([^(\s,][^\s,]*)`, which cares only that the
+			// value does not start with "(" and contains no space or comma,
+			// so nothing here depends on the real domain.
 			name:     "postfix sasl plain names the mailbox",
-			line:     `2026-11-03T21:15:54Z mail postfix/submission/smtpd[662212]: warning: unknown[185.201.188.46]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=jsmith@kaburu.cc`,
+			line:     `2026-11-03T21:15:54Z mail postfix/submission/smtpd[662212]: warning: unknown[185.201.188.46]: SASL PLAIN authentication failed: (reason unavailable), sasl_username=jsmith@example.com`,
 			reason:   "mail_brute_force",
 			ip:       "185.201.188.46",
-			user:     "jsmith@kaburu.cc",
+			user:     "jsmith@example.com",
 			method:   "PLAIN",
 			protocol: "smtp",
 		},

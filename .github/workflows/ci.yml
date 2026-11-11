@@ -23,68 +23,71 @@ jobs:
     # This repository is public. Phase 14 shipped a pilot customer's name in a
     # fixture README and it was caught by hand, by one person reading a diff;
     # the lesson was never institutionalised, so nothing stopped the next one.
-    # An independent review of phase 15 found three disclosures still on main
-    # (a customer mailbox, a customer name, the production IP) and no guard
-    # anywhere in CI.
+    # An independent review of phase 15 then found three more disclosures on
+    # main (a customer mailbox, a customer name, the production IP) and no
+    # guard anywhere in CI.
     #
-    # Scope is the diff, not the tree: the pre-existing disclosures need a
-    # decision about rewriting published history, which is not this job's call.
-    # Blocking only what a change ADDS stops the bleeding without holding every
-    # future PR hostage to that decision. The known ones are printed as a
-    # reminder so they stay visible instead of forgotten.
-    name: Leak guard (diff)
+    # Scope is the whole tracked tree, not the diff, and the job BLOCKS. A
+    # diff-scoped check only stops what a PR adds, so a disclosure that is
+    # already committed stays green forever and nothing ever forces the
+    # cleanup. The three known ones are fixed, so the tree-wide scan passes
+    # today and from here any reintroduction — in a change or by a revert —
+    # fails the job.
+    name: Leak guard (tracked tree)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
-      - name: Scan added lines for things that must not be public
+      - name: Scan the tracked tree for things that must not be public
         run: |
           set -euo pipefail
-          BASE="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$BASE" ]; then
-            git fetch --no-tags origin main >/dev/null 2>&1 || true
-            BASE="$(git merge-base origin/main HEAD 2>/dev/null || echo '')"
-          fi
-          if [ -z "$BASE" ] || [ "$BASE" = "$(git rev-parse HEAD)" ]; then
-            echo "No diff to scan (base == head); nothing to do."
-            exit 0
+
+          # The forbidden list is base64 and that is not obfuscation theatre,
+          # it is the only correct way to store it HERE. Two reasons:
+          #
+          #  1. The patterns ARE the disclosure. A paying customer's name
+          #     sitting in plaintext in a tracked file of a PUBLIC repo is the
+          #     same leak this job exists to prevent — greppable by anyone,
+          #     indexed by GitHub code search.
+          #  2. In plaintext the guard matches ITSELF and fails on every run
+          #     forever. The alternative — excluding this file from its own
+          #     scan — creates the one file in the tree where a leak is
+          #     invisible, and a workflow is exactly where a debug `echo` of a
+          #     real host ends up.
+          #
+          # Decode:    echo "$BLOB" | base64 -d
+          # Re-encode: printf '%s\n' 'label|regex' ... | base64 | tr -d '\n'
+          # Format is one "label|extended-regex" per line; the regex half may
+          # itself contain "|" alternations, which is why only the FIRST field
+          # is the label.
+          BLOB='Y3VzdG9tZXIgb3IgcGlsb3QgbmFtZXx6ZW53ZWJ8dGFzc298a2FidXJ1fGRpZ2lcLmhvc3Rpbmd8bGV2ZXJhZ2VjeWJlcgptYWludGFpbmVyIHVzZXJuYW1lfHJpY2FyZG1hcnRpY2FycmlsbG98cmlja3ltY3Bvd2VyCmxvY2FsIGhvbWUgcGF0aHwvVXNlcnMvW2Etel0KcHJvZHVjdGlvbiBob3N0fDE4NVwuN1wuODFcLjEwNwo='
+          PATTERNS="$(printf '%s' "$BLOB" | base64 -d)"
+          if [ -z "$PATTERNS" ]; then
+            echo "::error::forbidden pattern list failed to decode — failing closed"
+            exit 1
           fi
 
-          # Added lines only. Customer names, the maintainer's local username and
-          # home paths, and the production host.
-          ADDED="$(git diff "$BASE"...HEAD --unified=0 | grep '^+' | grep -v '^+++' || true)"
-
+          # git grep, not grep -r: it searches tracked files only, so .git and
+          # everything .gitignore'd (lab/cache/, build artefacts) are excluded
+          # by construction rather than by a list of --exclude-dir flags that
+          # drifts. -I skips binaries, -i because a name can be capitalised.
           FOUND=0
           while IFS='|' read -r label pattern; do
             [ -z "$label" ] && continue
-            if HITS="$(printf '%s\n' "$ADDED" | grep -inE "$pattern" || true)"; [ -n "$HITS" ]; then
-              echo "::error::$label found in added lines of this change"
+            if HITS="$(git grep -nIiE -e "$pattern" -- . || true)"; [ -n "$HITS" ]; then
+              echo "::error::$label present in the tracked tree"
               printf '%s\n' "$HITS" | head -5
               FOUND=1
             fi
-          done <<'PATTERNS'
-          customer name|zenweb|tasso|kaburu|digi\.hosting|leveragecyber
-          maintainer username|ricardmarticarrillo|rickymcpower
-          local home path|/Users/[a-z]
-          production host|185\.7\.81\.107
-          PATTERNS
+          done <<EOF
+          $PATTERNS
+          EOF
 
           if [ "$FOUND" = "1" ]; then
             echo "::error::This repository is public. Remove the above before merging."
             exit 1
           fi
-          echo "No new disclosures in the diff."
-
-      - name: Report disclosures already on main (not a failure)
-        if: always()
-        run: |
-          set -uo pipefail
-          echo "Already public on main — these need a decision about rewriting history,"
-          echo "not a CI failure, and are listed so they are not forgotten:"
-          grep -rnIE "jsmith@kaburu\.cc|Kaburu MSP|185\.7\.81\.107" \
-            --exclude-dir=.git . 2>/dev/null | head -10 || echo "  (none found)"
+          echo "Tracked tree clean: no forbidden strings."
 
   test:
     name: Build, vet & test
