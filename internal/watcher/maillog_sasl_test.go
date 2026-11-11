@@ -22,11 +22,12 @@ import (
 // pattern anchored on the literal `auth:` therefore discards exactly the line
 // that carries the name.
 //
-// Reported by Kaburu MSP. The figure first recorded here — 644 mail events in
-// seven days, none naming an account — was wrong: it summed mail_brute_force,
-// mail_relay_scan and mail_suspicious, and only the first are authentication
-// attempts. Measured properly on that server: 341 SMTP AUTH failures, 312 of
-// them carrying a sasl_username we were not reading.
+// Reported by an MSP running Postfix with a Dovecot SASL backend. The figure
+// first recorded here — 644 mail events in seven days, none naming an account
+// — was wrong: it summed mail_brute_force, mail_relay_scan and
+// mail_suspicious, and only the first are authentication attempts. Measured
+// properly on that server: 341 SMTP AUTH failures, 312 of them carrying a
+// sasl_username we were not reading.
 func TestDovecotAuthWorkerLinesNameTheMailbox(t *testing.T) {
 	cases := []struct {
 		name string

@@ -19,6 +19,76 @@ on:
 permissions: read-all
 
 jobs:
+  leak-guard:
+    # This repository is public. Phase 14 shipped a pilot customer's name in a
+    # fixture README and it was caught by hand, by one person reading a diff;
+    # the lesson was never institutionalised, so nothing stopped the next one.
+    # An independent review of phase 15 then found three more disclosures on
+    # main (a customer mailbox, a customer name, the production IP) and no
+    # guard anywhere in CI.
+    #
+    # Scope is the whole tracked tree, not the diff, and the job BLOCKS. A
+    # diff-scoped check only stops what a PR adds, so a disclosure that is
+    # already committed stays green forever and nothing ever forces the
+    # cleanup. The three known ones are fixed, so the tree-wide scan passes
+    # today and from here any reintroduction — in a change or by a revert —
+    # fails the job.
+    name: Leak guard (tracked tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Scan the tracked tree for things that must not be public
+        run: |
+          set -euo pipefail
+
+          # The forbidden list is base64 and that is not obfuscation theatre,
+          # it is the only correct way to store it HERE. Two reasons:
+          #
+          #  1. The patterns ARE the disclosure. A paying customer's name
+          #     sitting in plaintext in a tracked file of a PUBLIC repo is the
+          #     same leak this job exists to prevent — greppable by anyone,
+          #     indexed by GitHub code search.
+          #  2. In plaintext the guard matches ITSELF and fails on every run
+          #     forever. The alternative — excluding this file from its own
+          #     scan — creates the one file in the tree where a leak is
+          #     invisible, and a workflow is exactly where a debug `echo` of a
+          #     real host ends up.
+          #
+          # Decode:    echo "$BLOB" | base64 -d
+          # Re-encode: printf '%s\n' 'label|regex' ... | base64 | tr -d '\n'
+          # Format is one "label|extended-regex" per line; the regex half may
+          # itself contain "|" alternations, which is why only the FIRST field
+          # is the label.
+          BLOB='Y3VzdG9tZXIgb3IgcGlsb3QgbmFtZXx6ZW53ZWJ8dGFzc298a2FidXJ1fGRpZ2lcLmhvc3Rpbmd8bGV2ZXJhZ2VjeWJlcgptYWludGFpbmVyIHVzZXJuYW1lfHJpY2FyZG1hcnRpY2FycmlsbG98cmlja3ltY3Bvd2VyCmxvY2FsIGhvbWUgcGF0aHwvVXNlcnMvW2Etel0KcHJvZHVjdGlvbiBob3N0fDE4NVwuN1wuODFcLjEwNwo='
+          PATTERNS="$(printf '%s' "$BLOB" | base64 -d)"
+          if [ -z "$PATTERNS" ]; then
+            echo "::error::forbidden pattern list failed to decode — failing closed"
+            exit 1
+          fi
+
+          # git grep, not grep -r: it searches tracked files only, so .git and
+          # everything .gitignore'd (lab/cache/, build artefacts) are excluded
+          # by construction rather than by a list of --exclude-dir flags that
+          # drifts. -I skips binaries, -i because a name can be capitalised.
+          FOUND=0
+          while IFS='|' read -r label pattern; do
+            [ -z "$label" ] && continue
+            if HITS="$(git grep -nIiE -e "$pattern" -- . || true)"; [ -n "$HITS" ]; then
+              echo "::error::$label present in the tracked tree"
+              printf '%s\n' "$HITS" | head -5
+              FOUND=1
+            fi
+          done <<EOF
+          $PATTERNS
+          EOF
+
+          if [ "$FOUND" = "1" ]; then
+            echo "::error::This repository is public. Remove the above before merging."
+            exit 1
+          fi
+          echo "Tracked tree clean: no forbidden strings."
+
   test:
     name: Build, vet & test
     runs-on: ubuntu-latest
@@ -62,8 +132,21 @@ jobs:
   # diagnostic step is non-blocking: GitHub-hosted runner kernel support
   # for those modules inside a container is unverified, so
   # LAB_EXPECT_FW_MODE is left empty and that one check is allowed to
-  # skip — the 5 CSF assertions in lab/ci/run-csf-container.sh's own hard
-  # gate must PASS, never SKIP or FAIL.
+  # skip — the 11 CSF assertions in lab/ci/run-csf-container.sh's own hard
+  # gate (TestLabCSFDetection, TestLabCSFVersion, TestLabCSFTestingFlag,
+  # TestLabLFDState, TestLabCSFListsReadable, TestLabCSFCollectorFork,
+  # TestLabCSFCollectorState, TestLabCSFPortAddRemove, TestLabCSFPortSSHGuard,
+  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..05) must
+  # PASS, never SKIP or FAIL.
+  #
+  # COL-06 is NOT in that list, despite TestLabNoCSFNoExec appearing in it:
+  # on a host that HAS CSF that test takes its other branch, where the only
+  # assertion is that CollectCSF returns non-nil. The script therefore runs a
+  # second pass in a container of the same image with csf.sh deliberately not
+  # run, and hard-gates the same test there, on the branch that asserts zero
+  # commands and no csf-seen marker. That pass is also the only place the
+  # no-CSF path is exercised on an RPM host at all — the OrbStack lab's one
+  # CSF-less VM is Debian, which has no rpm to probe for in the first place.
   integration-csf:
     name: Integration (CSF v15.00, systemd container)
     runs-on: ubuntu-latest
@@ -99,3 +182,30 @@ jobs:
           name: ci-integration-log
           path: build/ci-integration.log
           if-no-files-found: ignore
+
+  release-script:
+    name: Release mode script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Release mode tests (stubbed)
+        run: bash .github/scripts/test-release-mode.sh
+
+      - name: Release promote tests (stubbed)
+        run: bash .github/scripts/test-release-promote.sh
+
+      - name: Release build-dispatch tests (stubbed)
+        run: bash .github/scripts/test-release-build.sh
+
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" .github/workflows/release.yml .github/workflows/ci.yml

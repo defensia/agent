@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -760,6 +761,11 @@ func runAgent() {
 	})
 	log.Printf("[session] tracker initialized (waiting for panel activation)")
 
+	// Start the CSF collector, lists uploader and kill-switch state before
+	// the first sync — a port action or a paused kill switch may already
+	// be waiting on this very first sync response.
+	startCSFRuntime(context.Background(), apiClient, cfg.ServerURL)
+
 	// Initial sync (applies config, whitelists, rules, bans)
 	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
@@ -909,6 +915,7 @@ func runAgent() {
 			}
 
 			fwStatus := firewall.FirewallStatus()
+			csfSnap := firewall.CurrentCSFSnapshot()
 			hbReq := api.HeartbeatRequest{
 				Status:            "online",
 				Version:           version,
@@ -926,12 +933,6 @@ func runAgent() {
 				YaraInstalled:    func() bool { if yaraScanner != nil { yaraScanner.Recheck() }; return yaraScanner != nil && yaraScanner.IsAvailable() }(),
 				ModsecActive:     modsecEngine.IsActive(),
 				RequestsAnalyzed: reqAnalyzed,
-				CSFInstalled:     fwStatus.CSF.Installed,
-				CSFVersion:       fwStatus.CSF.Version,
-				CSFPortsIn:       fwStatus.CSF.PortsIn,
-				CSFPortsOut:      fwStatus.CSF.PortsOut,
-				CSFDenyCount:     fwStatus.CSF.DenyCount,
-				CSFAllowCount:    fwStatus.CSF.AllowCount,
 				ControlPanel:        cpName,
 				ControlPanelVersion: cpVersion,
 				PanelDomains:        panelDomains,
@@ -954,12 +955,14 @@ func runAgent() {
 					NetBytesOut:   sysMetrics.NetBytesOut,
 				},
 			}
+			hbReq.CSFHeartbeatFields, hbReq.CSFPaused = buildCSFHeartbeat(csfSnap, firewall.CSFPaused())
 
 			resp, err := apiClient.Heartbeat(hbReq)
 			if err != nil {
 				log.Printf("[heartbeat] error: %v", err)
 				continue
 			}
+			onHeartbeatSuccess(csfSnap)
 
 			// Check for agent update
 			if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
@@ -1008,6 +1011,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	if err != nil {
 		return err
 	}
+	applyCSFIntegrationFlag(sync.CSFIntegrationDisabled)
 
 	// Handle suspension: when suspended, stop all active protection but keep heartbeat alive.
 	// The agent stays installed — upgrading the plan automatically lifts the suspension.
@@ -1442,26 +1446,8 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	}
 
 	// Apply CSF port actions if requested from dashboard
-	if len(sync.CSFPortActions) > 0 && firewall.HasCSF() {
-		for _, action := range sync.CSFPortActions {
-			log.Printf("[csf] port action: %s port %d %s", action.Action, action.Port, action.Direction)
-			if err := firewall.CSFPortAction(action.Port, action.Direction, action.Action); err != nil {
-				log.Printf("[csf] port action failed: %v", err)
-				client.ReportEvents([]api.EventRequest{{
-					Type:     "csf_port_error",
-					Severity: "warning",
-					Details:  map[string]string{"port": fmt.Sprintf("%d", action.Port), "direction": action.Direction, "action": action.Action, "error": err.Error()},
-					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
-			} else {
-				client.ReportEvents([]api.EventRequest{{
-					Type:     "csf_port_changed",
-					Severity: "info",
-					Details:  map[string]string{"port": fmt.Sprintf("%d", action.Port), "direction": action.Direction, "action": action.Action},
-					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				}})
-			}
-		}
+	if len(sync.CSFPortActions) > 0 {
+		handleCSFPortActions(client.ReportEvents, sync.CSFPortActions, csfPortOpts)
 	}
 
 	// Session tracking — activate/deactivate per panel config or env override

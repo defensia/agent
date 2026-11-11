@@ -1,9 +1,25 @@
 name: Release
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release {0} build={1} promote={2}', inputs.tag, inputs.build, inputs.promote) || format('Release {0}', github.ref_name) }}
+
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v1.4.95"
+        type: string
+        required: true
+      promote:
+        description: "true = promote; false = read-only preflight (ignored when build=true)"
+        type: boolean
+        default: false
+      build:
+        description: "true = build/sign/publish version-only artifacts for an existing STAGED (prerelease) tag whose tag event did not trigger this workflow; mutually exclusive with promote"
+        type: boolean
+        default: false
 
 permissions: read-all
 
@@ -11,14 +27,44 @@ jobs:
   build:
     name: Build & Release
     runs-on: ubuntu-latest
+    # A promote dispatch never rebuilds or re-releases; only a tag push or an
+    # explicit build dispatch reaches this job (Phase 15 COL-04).
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
+    # A dispatch queued behind a late tag-event run for the SAME tag then
+    # hits release-mode.sh's already-built guard instead of double-publishing
+    # (cancel-in-progress: false — the tag-event run must finish, not be
+    # cancelled by a dispatch that arrived later for the same tag).
+    concurrency:
+      group: release-build-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
       attestations: write
+    outputs:
+      promoted: ${{ steps.mode.outputs.promoted }}
+      docker_tags: ${{ steps.mode.outputs.docker_tags }}
 
     steps:
+      # Runs before checkout, so a bad tag or build+promote both true never
+      # reaches the repository at all.
+      - name: Dispatch guard
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.tag }}
+          BUILD: ${{ inputs.build }}
+          PROMOTE: ${{ inputs.promote }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          if [ "$PROMOTE" = true ]; then
+            echo "::error::build and promote are mutually exclusive: build first, promote in a separate run" >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -28,7 +74,25 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Decides promoted vs staged BEFORE anything builds or publishes, so a
+      # staged (prerelease) release never reaches Docker :latest, the
+      # GitHub "latest" badge, or the Helm chart (Phase 15 COL-04). See
+      # .github/scripts/release-mode.sh.
+      - name: Release mode (promoted or staged)
+        id: mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+          BUILD_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+        run: bash .github/scripts/release-mode.sh
 
       # Blocking on purpose. install.sh ships as a release asset, and an asset
       # that differs from the installer customers actually run is a false
@@ -86,7 +150,7 @@ jobs:
           sha256sum defensia-agent-linux-arm64 > defensia-agent-linux-arm64.sha256
           sha256sum defensia-agent-linux-amd64-k8s > defensia-agent-linux-amd64-k8s.sha256
           sha256sum defensia-agent-linux-arm64-k8s > defensia-agent-linux-arm64-k8s.sha256
-          cat *.sha256 > checksums.txt
+          cat -- *.sha256 > checksums.txt
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
@@ -126,9 +190,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.version.outputs.TAG }}
           name: ${{ steps.version.outputs.VERSION }}
           fail_on_unmatched_files: true
-          make_latest: true
+          make_latest: ${{ steps.mode.outputs.make_latest }}
+          prerelease: ${{ steps.mode.outputs.prerelease == 'true' }}
           body: |
             ## Defensia Agent ${{ steps.version.outputs.VERSION }}
 
@@ -175,6 +241,8 @@ jobs:
     name: Docker Image
     runs-on: ubuntu-latest
     needs: build
+    # Same guard as the build job: a promote dispatch never rebuilds.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.build)
     permissions:
       packages: write
       id-token: write
@@ -183,10 +251,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -218,11 +293,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
             BUILD_TAGS=kubernetes
-          tags: |
-            ghcr.io/defensia/agent:latest
-            ghcr.io/defensia/agent:${{ steps.version.outputs.VERSION }}
-            defensiacloud/agent:latest
-            defensiacloud/agent:${{ steps.version.outputs.VERSION }}
+          tags: ${{ needs.build.outputs.docker_tags }}
           labels: |
             org.opencontainers.image.title=Defensia Agent
             org.opencontainers.image.description=Real-time attack detection and blocking for Linux servers
@@ -249,10 +320,63 @@ jobs:
             --yes \
             ghcr.io/defensia/agent@${{ steps.docker-build.outputs.digest }}
 
+  promote:
+    name: Promote staged release
+    runs-on: ubuntu-latest
+    # A build dispatch (or a tag push) never promotes in the same run —
+    # promoting an already-staged release is a separate, deliberate run
+    # (Phase 15 COL-04). `!inputs.build` also excludes tag pushes, which
+    # never reach this job: `github.event_name == 'workflow_dispatch'`
+    # already requires a dispatch.
+    if: github.event_name == 'workflow_dispatch' && !inputs.build
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Deliberately NOT continue-on-error, unlike the docker job's Docker
+      # Hub login: a failed Docker Hub login here must stop the promotion
+      # before the script's preflight (and the ghcr retag) ever starts —
+      # promoting only one of the two registries would leave :latest
+      # inconsistent between them.
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Promote (or preflight) staged release
+        id: promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          PROMOTE: ${{ inputs.promote }}
+        run: bash .github/scripts/release-promote.sh
+
   helm:
     name: Helm Chart
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, promote]
+    # An unpromoted (staged) release must not overwrite the chart's
+    # appVersion — Phase 15 COL-04. Runs after either a promoted tag push
+    # (needs.build.outputs.promoted) or a successful promote dispatch
+    # (needs.promote.result); !cancelled() && !failure() keeps a skipped
+    # build/promote job (the "other" path on a given run) from blocking it.
+    if: ${{ !cancelled() && !failure() && (needs.build.outputs.promoted == 'true' || (github.event_name == 'workflow_dispatch' && inputs.promote && needs.promote.result == 'success')) }}
     permissions:
       packages: write
       id-token: write
@@ -260,14 +384,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad tag" >&2; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Update Chart appVersion
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.VERSION }}\"/" charts/defensia-agent/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/defensia-agent/Chart.yaml
 
       - name: Login to GHCR (Helm)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -317,14 +449,14 @@ jobs:
 
           # Fetch manifest, add .prov as layer, re-push
           # (oras attach uses referrers API which GHCR doesn't support)
-          oras manifest fetch ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} > /tmp/manifest.json
+          oras manifest fetch "ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION}" > /tmp/manifest.json
 
           jq --arg digest "${PROV_DIGEST}" \
-             --argjson size ${PROV_SIZE} \
+             --argjson size "${PROV_SIZE}" \
              '.layers += [{"mediaType": "application/vnd.cncf.helm.chart.provenance.v1.prov", "digest": $digest, "size": $size}]' \
              /tmp/manifest.json > /tmp/manifest-signed.json
 
           oras manifest push \
             --media-type "application/vnd.oci.image.manifest.v1+json" \
-            ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION} \
+            "ghcr.io/defensia/charts/defensia-agent:${CHART_VERSION}" \
             /tmp/manifest-signed.json

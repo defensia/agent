@@ -56,7 +56,7 @@ type Status struct {
 
 // FirewallStatus returns mode, capacity, active ban count, and CSF info.
 func FirewallStatus() Status {
-	csf := CSFInfo()
+	csf := csfStatusFromSnapshot(CurrentCSFSnapshot())
 
 	if HasIpset() {
 		return Status{
