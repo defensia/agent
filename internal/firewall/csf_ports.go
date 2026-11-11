@@ -37,7 +37,8 @@ type PortChangeOptions struct {
 }
 
 // PortChangeResult.Reason values: "" | invalid_request | csf_not_installed |
-// integration_disabled | csf_disabled | ssh_port_in_use | panel_port_in_use |
+// integration_disabled | csf_disabled | ssh_port_in_use |
+// ssh_ports_unverified | panel_port_in_use |
 // port_in_range | key_missing | duplicate_key | invalid_existing_value |
 // backup_failed | write_failed | restart_failed | restart_timeout |
 // health_check_failed | lfd_not_running | rollback_failed
@@ -429,6 +430,16 @@ func containsPort(ports []int, port int) bool {
 	return false
 }
 
+// sshPortsUnverified reports whether activeSSHPorts' sources prove nothing:
+// "default" is the name the fallback uses when sshd -T, ss, ss-established
+// and sshd_config ALL found nothing, so a sources list consisting only of
+// it means the returned port (22) is an assumption, not a measurement. Any
+// other source name — on its own or alongside "default" — means at least
+// one source actually saw a port.
+func sshPortsUnverified(sources []string) bool {
+	return len(sources) == 1 && sources[0] == "default"
+}
+
 // SafePortChange is the single entry point for changing a CSF TCP_IN/
 // TCP_OUT port, replacing the old sed -i + csf -r CSFPortAction. See the
 // package doc comment above PortChangeRequest for the guarantee this makes.
@@ -520,9 +531,21 @@ func SafePortChange(ctx context.Context, req PortChangeRequest, opts PortChangeO
 	// agent itself might be reached on, never close the panel's own route.
 	if req.Action == "remove" {
 		if req.Direction == "in" {
-			sshPorts, _ := sshPortsFn(ctx)
+			sshPorts, sshSources := sshPortsFn(ctx)
 			if containsPort(sshPorts, req.Port) {
 				return PortChangeResult{Result: "rejected", Reason: "ssh_port_in_use", TestingMode: testingMode}
+			}
+			// activeSSHPorts' only-source-is-"default" answer is not
+			// evidence: it means every one of the four detection sources
+			// found nothing and the fallback assumed 22. On a host whose
+			// real SSH port is, say, 2222, containsPort above is false and
+			// we would happily close the port the customer is logged in
+			// through. We do not know which port sshd is on, so refuse the
+			// inbound removal of ANY port until we do. Checked after
+			// containsPort so the assumed port 22 keeps reporting the
+			// more specific ssh_port_in_use.
+			if sshPortsUnverified(sshSources) {
+				return PortChangeResult{Result: "rejected", Reason: "ssh_ports_unverified", TestingMode: testingMode}
 			}
 		} else if req.Direction == "out" && opts.PanelPort != 0 && req.Port == opts.PanelPort {
 			return PortChangeResult{Result: "rejected", Reason: "panel_port_in_use", TestingMode: testingMode}

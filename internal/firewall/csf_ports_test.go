@@ -383,6 +383,107 @@ func TestSafePortRemoveSSHRejected(t *testing.T) {
 	}
 }
 
+// TestSafePortRemoveSSHUnverifiedRejected covers the case the SSH guard
+// used to fail open on (M-01): every detection source came up empty, so
+// activeSSHPorts fell back to port 22 tagged "default". That answer is an
+// assumption, not evidence, so an inbound removal of ANY port must be
+// refused — on a host whose real SSH port is 2222, trusting the fallback is
+// how the customer loses their own shell. The second subtest pins that a
+// real source still lets an unrelated inbound removal through, i.e. the fix
+// did not turn the guard into a blanket refusal.
+func TestSafePortRemoveSSHUnverifiedRejected(t *testing.T) {
+	// 2222 has to be a standalone token in TCP_IN, otherwise the removal is
+	// a no-op and returns "unchanged" before the guard is ever reached.
+	confWith2222 := strings.Replace(baseSafePortConf,
+		`TCP_IN = "20,21,22,25,80,443,30000:35000"`,
+		`TCP_IN = "20,21,22,25,80,443,2222,30000:35000"`, 1)
+
+	t.Run("only source is default -> refuse the removal", func(t *testing.T) {
+		dir := newSafePortFixtureWithConf(t, confWith2222)
+		withSSHPortsFn(t, func(ctx context.Context) ([]int, []string) {
+			return []int{22}, []string{"default"}
+		})
+		var restartCalls int32
+		withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "-r" {
+				atomic.AddInt32(&restartCalls, 1)
+			}
+			return []byte("ok\n"), nil
+		})
+
+		before, err := os.ReadFile(filepath.Join(dir, "csf.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeHash := sha256.Sum256(before)
+
+		res := SafePortChange(context.Background(), PortChangeRequest{Port: 2222, Direction: "in", Action: "remove"}, PortChangeOptions{})
+		if res.Result != "rejected" || res.Reason != "ssh_ports_unverified" {
+			t.Fatalf("result = %+v, want rejected/ssh_ports_unverified", res)
+		}
+		if atomic.LoadInt32(&restartCalls) != 0 {
+			t.Fatalf("csf -r called, want 0")
+		}
+		after, err := os.ReadFile(filepath.Join(dir, "csf.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sha256.Sum256(after) != beforeHash {
+			t.Fatalf("csf.conf modified")
+		}
+		entries, err := os.ReadDir(csfBackupDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("backup written (%d files), want none", len(entries))
+		}
+	})
+
+	t.Run("a real source -> a non-SSH removal still proceeds", func(t *testing.T) {
+		dir := newSafePortFixtureWithConf(t, confWith2222)
+		withSSHPortsFn(t, func(ctx context.Context) ([]int, []string) {
+			return []int{22}, []string{"sshd-T"}
+		})
+
+		res := SafePortChange(context.Background(), PortChangeRequest{Port: 2222, Direction: "in", Action: "remove"}, PortChangeOptions{})
+		if res.Result != "applied" {
+			t.Fatalf("result = %+v, want applied", res)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, "csf.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(got), `TCP_IN = "20,21,22,25,80,443,30000:35000"`) {
+			t.Fatalf("2222 not removed from TCP_IN: %s", got)
+		}
+	})
+}
+
+func TestSSHPortsUnverified(t *testing.T) {
+	cases := []struct {
+		sources []string
+		want    bool
+	}{
+		{[]string{"default"}, true},
+		{[]string{"sshd-T"}, false},
+		{[]string{"config"}, false},
+		// "default" is only ever added when nothing else found a port, so
+		// this shape cannot come out of activeSSHPorts — assert the
+		// predicate still answers "verified" if it ever did.
+		{[]string{"default", "ss"}, false},
+		// An empty sources list is also unreachable from activeSSHPorts
+		// (the fallback always tags "default"); it is the shape test stubs
+		// use, and it must not trip the guard.
+		{nil, false},
+	}
+	for _, c := range cases {
+		if got := sshPortsUnverified(c.sources); got != c.want {
+			t.Errorf("sshPortsUnverified(%v) = %v, want %v", c.sources, got, c.want)
+		}
+	}
+}
+
 func TestSafePortRemoveInRangeRejected(t *testing.T) {
 	newSafePortFixture(t)
 	res := SafePortChange(context.Background(), PortChangeRequest{Port: 31000, Direction: "in", Action: "remove"}, PortChangeOptions{})
