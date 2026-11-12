@@ -23,8 +23,9 @@ type Lookup struct {
 	mu        sync.RWMutex
 	db        *maxminddb.Reader
 	path      string
-	blocked   map[string]bool   // lowercase country codes that are blocked
+	blocked   map[string]bool     // lowercase country codes that are blocked
 	cidrCache map[string][]string // cached CIDRs per country code (extracted once)
+	exempt    []*net.IPNet        // ranges a country block never applies to (CDNs, crawlers)
 }
 
 type countryRecord struct {
@@ -129,18 +130,49 @@ func (l *Lookup) SetBlocked(codes []string) {
 	log.Printf("[geoip] blocking %d countries: %v", len(codes), codes)
 }
 
-// IsBlocked returns true if the given IP belongs to a blocked country.
-// Returns the country code and blocked status.
+// SetExempt replaces the ranges IsBlocked never reports as blocked: the same
+// CDN, crawler and monitor ranges the kernel country chain lets through.
+// Without this, the per-IP geoblock ban banned Cloudflare edges that the
+// chain itself exempts, taking proxied sites down for some visitors.
+func (l *Lookup) SetExempt(cidrs []string) {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	l.mu.Lock()
+	l.exempt = nets
+	l.mu.Unlock()
+}
+
+// IsBlocked returns true if the given IP belongs to a blocked country and is
+// not in an exempt range. Returns the country code and blocked status.
 func (l *Lookup) IsBlocked(ipStr string) (string, bool) {
 	cc := l.Country(ipStr)
 	if cc == "" {
 		return "", false
 	}
 
+	return cc, l.blockedFor(cc, ipStr)
+}
+
+// blockedFor decides for an IP already resolved to country cc.
+func (l *Lookup) blockedFor(cc, ipStr string) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return cc, l.blocked[cc]
+	if !l.blocked[cc] {
+		return false
+	}
+	if ip := net.ParseIP(ipStr); ip != nil {
+		for _, n := range l.exempt {
+			if n.Contains(ip) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ExtractCIDRs returns all CIDRs for the given country code from the mmdb.

@@ -328,11 +328,7 @@ func runAgent() {
 
 	// Set geoblocking check on watcher
 	w.SetCheckIP(func(ip string) string {
-		cc, blocked := geo.IsBlocked(ip)
-		if blocked {
-			return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
-		}
-		return ""
+		return geoBanReason(geo, geoBlocker, ip)
 	})
 
 	// Start web log watcher (if web server access logs found)
@@ -405,11 +401,7 @@ func runAgent() {
 			},
 		)
 		webW.SetCheckIP(func(ip string) string {
-			cc, blocked := geo.IsBlocked(ip)
-			if blocked {
-				return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
-			}
-			return ""
+			return geoBanReason(geo, geoBlocker, ip)
 		})
 		webW.SetOnScoredBan(func(ip, reason string, score int, duration time.Duration) {
 			log.Printf("[webwatcher] scored ban %s: %s (score=%d, duration=%s)", ip, reason, score, duration)
@@ -515,11 +507,7 @@ func runAgent() {
 				})
 			})
 			mailW.SetCheckIP(func(ip string) string {
-				cc, blocked := geo.IsBlocked(ip)
-				if blocked {
-					return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
-				}
-				return ""
+				return geoBanReason(geo, geoBlocker, ip)
 			})
 			log.Printf("[mailwatcher] mail service detected")
 		}
@@ -555,11 +543,7 @@ func runAgent() {
 				})
 			})
 			dbW.SetCheckIP(func(ip string) string {
-				cc, blocked := geo.IsBlocked(ip)
-				if blocked {
-					return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
-				}
-				return ""
+				return geoBanReason(geo, geoBlocker, ip)
 			})
 			log.Printf("[dbwatcher] database service detected")
 		}
@@ -595,11 +579,7 @@ func runAgent() {
 				})
 			})
 			ftpW.SetCheckIP(func(ip string) string {
-				cc, blocked := geo.IsBlocked(ip)
-				if blocked {
-					return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
-				}
-				return ""
+				return geoBanReason(geo, geoBlocker, ip)
 			})
 			log.Printf("[ftpwatcher] FTP service detected")
 		}
@@ -1146,6 +1126,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	geo.SetBlocked(blockedCountries)
+	geo.SetExempt(sync.Config.GeoExemptCIDRs)
 
 	// Pass whitelisted IPs to geoblocker so they get ACCEPT rules before geo DROPs
 	geoBlocker.SetWhitelistedIPs(wlIPs)
@@ -2475,4 +2456,25 @@ func saveDBExposureState(state map[int]monitor.Exposure) {
 		log.Printf("[dbwatcher] failed to replace exposure state: %v", err)
 		os.Remove(tmp)
 	}
+}
+
+// geoBanReason is the ban reason for an IP seen in a log, or "" when it must
+// not be banned for its country.
+//
+// When country blocks are live in the kernel (DEFENSIA-GEO), it never bans:
+// the chain already drops new connections from blocked countries, and it lets
+// through the mail ports, Let's Encrypt's port 80 and the CDN/crawler ranges on
+// purpose. A per-IP ban on top would override exactly those exemptions — ban a
+// US address on port 80, a sender on port 25, or a Cloudflare edge that a
+// proxied site's visitors arrive through. Otherwise (no kernel enforcement)
+// it bans, but never inside an exempt range.
+func geoBanReason(geo *geoip.Lookup, gb *firewall.GeoBlocker, ip string) string {
+	if enforced, _ := gb.Enforced(); enforced {
+		return ""
+	}
+	cc, blocked := geo.IsBlocked(ip)
+	if !blocked {
+		return ""
+	}
+	return fmt.Sprintf("geoblock_%s", strings.ToLower(cc))
 }
