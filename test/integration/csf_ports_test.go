@@ -257,6 +257,23 @@ func TestLabCSFPortRollbackFailed(t *testing.T) {
 	if requireEnv(t, "LAB_EXPECT_CSF") != "1" {
 		return
 	}
+	// The deliberately failed csf restart leaves /etc/csf/csf.error behind and
+	// lfd stops itself when it notices it ("unresolved error when starting
+	// csf"), racing the cleanup below. Registered first so it runs LAST, after
+	// snapshotConf has restored csf.conf and run a good csf -r: bring lfd back
+	// if it was running before this test and died during it.
+	lfdBefore, _ := sh(t, "systemctl", "is-active", "lfd")
+	t.Cleanup(func() {
+		if lfdBefore != "active" {
+			return
+		}
+		if now, _ := sh(t, "systemctl", "is-active", "lfd"); now != "active" {
+			sh(t, "rm", "-f", "/etc/csf/csf.error")
+			if out, err := sh(t, "systemctl", "restart", "lfd"); err != nil {
+				t.Errorf("restart lfd after rollback-failed test: %v (%s)", err, out)
+			}
+		}
+	})
 	snapshotConf(t)
 	ctx := context.Background()
 	_, calls := countCommands(t)
