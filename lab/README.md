@@ -68,8 +68,12 @@ own verifiers require before any CSF-behaviour change is accepted.
 | `LAB_VMS="vm1 vm2"` | Restricts almost any `lab-*` target to a subset of VMs (space-separated, matching `lab/matrix.sh` names). |
 | `LAB_FORCE_FAIL=1 make lab-test` | Self-test: forces `TestLabHarnessForcedFailure` to fail on every VM, proving the gate can actually go red (not a tautology). Never leave this set for a real run. |
 | `LAB_SKIP_ATTACK=1 make lab-test` | Skips the attack stage (saves ~3 min) for a quick CSF-only run. |
+| `LAB_TEST_TIMEOUT=<go-duration> make lab-test` | Overrides the `-test.timeout` passed to the in-VM integration binary (default `30m`). The daemon ban-enforcement tests poll for up to 2 minutes each, so a slow/loaded host can need more headroom than the default. |
+| `LAB_CAPTURE_NFT_FIXTURES=1 make lab-test` | Phase 17: on nftables VMs, `TestLabNftCaptureFixtures` additionally writes real captured `nft -j list ...` output to `/root/nft-fixtures/` on the VM (pull manually) — used to refresh `internal/firewall/testdata/nft/real-alma10/`, not part of the day-to-day gate. |
+| `DEFENSIA_FIREWALL_BACKEND=<ipset\|iptables\|nftables\|none>` (agent-side env var, not a `lab/*` one, read by `Reselect()` in `internal/firewall/backend.go`) | A real-world support override: forces the agent's backend selection to exactly one name (or `none`), bypassing the normal probe-and-detect order. An unknown value is logged and ignored (falls back to auto-detection). The lab's `alma10-*` fw-variant VMs do **not** use this — they get a real, unforced backend decision by actually removing/breaking `ipset`/`iptables` via `lab/provision/fw-variant.sh` (see below), which is what proves the detection logic itself, not just the override. |
 | `lab/up.sh --rebuild-golden <vm>` | Forces a from-scratch golden rebuild for one VM (e.g. after a `lab/provision/*.sh` change), instead of reusing the existing golden. |
 | `lab/capture-fixtures.sh [--no-reset] [vm...]` | Re-captures the real `/etc/csf/*` fixture files under `internal/firewall/testdata/<fork>/` from the live VMs (used by plan 07's fixture-driven unit tests, not part of the day-to-day gate). |
+| `lab/diagnose-firewall.sh [--expect-enforced] [vm...]` | Phase 17 (NFT-01): per-VM firewall-backend diagnosis — reported `firewall_mode`/capacity, an IPv4 and an IPv6 sync ban checked directly against the kernel (not just the panel), a watcher-path ban (N/A on VMs `lab/attack.sh` cannot target), panel-vs-kernel consistency, and the geoblock verdict (`ENFORCED`/`REPORTED`/`SILENT`). Writes `lab/reports/nft-diagnosis-<timestamp>.md`. Flips each target's `monitor_mode` off first (`ensure_active_protection`, shared with `attack.sh`/`test.sh`) and restarts its agent for an immediate sync. Plain (no flag) run just records observed verdicts; `--expect-enforced` additionally exits non-zero if any VM's sync/watcher ban is not `ENFORCED` or geoblock is `SILENT` — the mode `make lab-test`'s gate sequence uses to assert no regression. Creates and deletes its own test bans (see each report's `## Cleanup` section); always follow with `make lab-verify` to confirm it left nothing behind. |
 
 ## 4. Matrix
 
@@ -80,12 +84,44 @@ own verifiers require before any CSF-behaviour change is accepted.
 | `debian12-csf-sentinel` | Debian 12 (bookworm) | `sentinel-15.13` | `v15.11 (generic)` (release 15.13, reports 15.11 — see Known gaps) | `0` | active | yes | ipset |
 | `alma9-csf-da` | AlmaLinux 9 | `directadmin-15.12` | `v15.12 (DirectAdmin)` | `0` | active | yes | ipset |
 | `alma8-csf-cwp-orphan` | AlmaLinux 8 | `original-15.00` (configured as an abandoned CWP install) | `v15.00 (generic)` + `*WARNING* TESTING mode is enabled` | `1` | **inactive** | yes | ipset |
-| `alma10-noipset` | AlmaLinux 10 | `original-15.00` | `v15.00 (generic)` | `0` | active | **no** | **iptables** |
+| `alma10-noipset` | AlmaLinux 10 | `original-15.00` | `v15.00 (generic)` | `0` | active | **no** | **nftables** |
+| `alma10-noiptables` | AlmaLinux 10 | none (CSF not installed) | n/a | n/a | n/a | **no** | **nftables** |
+| `alma10-ipset-broken` | AlmaLinux 10 | none (CSF not installed) | n/a | n/a | n/a | **present but shimmed unusable** | **nftables** |
 | `debian12-nocsf` | Debian 12 (bookworm) | none (control) | n/a | n/a | n/a | yes | n/a — also the fixed attack target |
 | `lab-attacker` | AlmaLinux 9 | none | n/a | n/a | n/a | no | n/a — no agent, sends attack traffic only |
 
-`alma10-noipset` exists for Phase 17 (iptables-only fallback). cPanel and
+`alma10-noipset`/`alma10-noiptables`/`alma10-ipset-broken` exist for Phase 17
+(NFT-01..04, RHEL 10 and nftables compatibility) — see §4a. cPanel and
 licensed DirectAdmin are deliberately absent from this matrix (see §8).
+
+### 4a. Phase 17 fw-variant VMs (`nft-a`/`nft-b`/`nft-c`)
+
+`lab/provision/fw-variant.sh <vm> <nft-a|nft-b|nft-c>` provisions one of
+three real backend-selection scenarios on an AlmaLinux 10 VM, always with
+`nftables` + `firewalld` installed and running (`lab/matrix.sh`'s
+`vm_fw_variant`/`vm_fw_mode` record the expected variant/mode per VM):
+
+- **`nft-a` (`alma10-noipset`)**: `ipset` package removed; `iptables`/
+  `iptables-nft` left in place; CSF (`original-15.00`) installed on top —
+  the "ipset missing, everything else present" scenario, plus proof that
+  the nftables backend coexists with a real CSF install.
+- **`nft-b` (`alma10-noiptables`)**: `ipset` **and** `iptables`/
+  `iptables-nft` both removed, no CSF — simulates a minimal/hardened RHEL
+  10 image that ships neither legacy tool, leaving `nftables` as the only
+  usable backend.
+- **`nft-c` (`alma10-ipset-broken`)**: `ipset` binary **present** but made
+  unusable by a shim at `/usr/sbin/ipset` (the real binary moved to
+  `/usr/sbin/ipset.real`, which always fails except `--version`) — the
+  OrbStack guest kernel actually has `CONFIG_IP_SET=y`/
+  `CONFIG_NETFILTER_XT_SET=y` built in, so a real "ipset kernel module
+  missing" cannot be produced here and must be simulated; this scenario
+  proves the backend's functional probe (try-and-fail), not just binary
+  presence, drives detection.
+
+All three select `nftables` via the real, unforced probe-and-detect order
+in `internal/firewall/backend.go` (never `DEFENSIA_FIREWALL_BACKEND`).
+`lab/diagnose-firewall.sh` is the tool that proves ENFORCED/REPORTED per
+scenario end to end (kernel-level, not just panel-reported).
 
 ## 5. Architecture
 
@@ -164,6 +200,30 @@ licensed DirectAdmin are deliberately absent from this matrix (see §8).
 
 ## 8. Known gaps / findings for later phases
 
+- **OrbStack's guest kernel is not the real RHEL 10 kernel (Phase 17).**
+  The `alma10-*` fw-variant VMs prove the agent's backend-selection and
+  nftables logic against a real `nf_tables`/`ip_set`-capable Linux kernel
+  and real AlmaLinux 10 userland tools (`nft` v1.1.5, `firewalld`,
+  `iptables-nft`), not RHEL-specific kernel behaviour. A manual check on a
+  real Alma/Rocky 10 cloud VM remains required before any release that
+  carries Phase 17 (`17-RELEASE-HANDOFF.md`'s "Pre-release manual check").
+- **No GeoLite2 database in the lab (Phase 17).** The lab panel has no
+  real MaxMind license, so `geoip_provision.go` always reports "download
+  too small" and no agent in this lab ever reaches the kernel via a real
+  country lookup. `lab/diagnose-firewall.sh`'s geoblock verdict is
+  therefore `REPORTED` (the agent correctly emits the
+  `firewall_unavailable`-scope geoblock event instead of going silent),
+  never a true country-block `ENFORCED` via the real GeoIP pipeline — the
+  kernel-level set-population mechanism itself is proven separately,
+  in-process, against a synthetic provider (`TestLabNftGeoblock`), so this
+  is a lab-environment ceiling, not an unproven code path.
+- **`install.sh` still requires `iptables` (Phase 17, deferred).** The
+  installer aborts if `iptables`/`iptables-nft` is missing even on a host
+  where `nft` alone would be sufficient — `install.sh` is served directly
+  by production and guarded by the installer-sync CI check, so making it
+  nft-aware needs a coordinated panel + agent-repo change, out of scope
+  for this lab-only phase (tracked as a Phase 17 follow-up, not fixed
+  here).
 - **Vite build is required for a green `php artisan test` in the panel
   worktree.** `public/build` is gitignored; a fresh worktree or a rebase has
   no `manifest.json`, which makes **117 tests fail** with
