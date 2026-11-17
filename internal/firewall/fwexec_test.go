@@ -38,6 +38,14 @@ func (f *fakeFW) Calls() []fakeCall {
 	return out
 }
 
+// Clear discards every call recorded so far, so a test can isolate the calls
+// made by a specific operation from setup noise (e.g. the initial Reselect).
+func (f *fakeFW) Clear() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = nil
+}
+
 func (f *fakeFW) run(ctx context.Context, stdin, name string, args ...string) ([]byte, error) {
 	c := fakeCall{Name: name, Args: args, Stdin: stdin}
 	f.record(c)

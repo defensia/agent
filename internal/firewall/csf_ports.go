@@ -74,16 +74,20 @@ var (
 	// at the same time.
 	csfWriteMu sync.Mutex
 
-	// afterCSFRestart re-creates the defensia-bans ipset sets and the
-	// iptables DROP rule that point at them (Init is idempotent: it checks
-	// before creating/adding) — a CSF restart rebuilds INPUT from csf.conf
-	// and silently drops anything CSF itself didn't put there. It is called
-	// after EVERY completed `csf -r`, success or failure, because the chain
-	// rebuild happens either way. Phase 17 (17-05) switches this default
-	// body from Init() to firewall.Ensure() after rebasing onto post-15
-	// origin/main — keep the var name, signature and "= func() { Init() }"
-	// shape exactly so that switch stays a one-line change.
-	afterCSFRestart = func() { Init() }
+	// afterCSFRestart re-asserts the ACTIVE backend's sets/table and match
+	// rules (Ensure is idempotent: it checks before creating/adding) — a CSF
+	// restart rebuilds INPUT from csf.conf and silently drops anything CSF
+	// itself didn't put there. It is called after EVERY completed `csf -r`,
+	// success or failure, because the chain rebuild happens either way.
+	// Ensure(), not Init(): Init() re-runs backend detection from scratch and
+	// would reset selection state mid-operation, which Ensure() never does.
+	afterCSFRestart = func() {
+		// csf -r flushes iptables; re-assert the ACTIVE backend idempotently (sets, match rules / nft table).
+		// Deliberately not the detection entry point: re-running detection here would reset selection state mid-restart.
+		if err := Ensure(); err != nil {
+			log.Printf("[firewall] re-assert after csf -r failed: %v", err)
+		}
+	}
 )
 
 // SetAfterCSFRestartHook lets main (or later phases) extend what runs after
