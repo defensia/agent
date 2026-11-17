@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,29 +12,12 @@ import (
 const banSetName = "defensia-bans"
 const banSet6Name = "defensia-bans6"
 
-// Init initializes the firewall backend: detects ipset availability
-// and creates the defensia-bans hash:ip set(s) if ipset is present.
+// Init runs backend detection (see Reselect). Kept as a named entry point —
+// main.go calls Init() once at startup; phase 17 replaces its ipset-only
+// body with the full functional-probe selection.
 func Init() {
-	if !checkIpset() {
-		return
-	}
-	// Create the IPv4 bans set (hash:ip family inet, 65536 max)
-	if err := createIpsetHashIP(banSetName); err != nil {
-		log.Printf("[firewall] failed to create ban set: %v", err)
-		return
-	}
-	if err := addIptablesIpsetRule(banSetName); err != nil {
-		log.Printf("[firewall] failed to add iptables rule for ban set: %v", err)
-		return
-	}
-	// Create the IPv6 bans set (hash:ip family inet6, 65536 max)
-	if err := createIpsetHashIP6(banSet6Name); err != nil {
-		log.Printf("[firewall] failed to create IPv6 ban set: %v", err)
-		// Non-fatal — IPv4 still works
-	} else if err := addIp6tablesIpsetRule(banSet6Name); err != nil {
-		log.Printf("[firewall] failed to add ip6tables rule for ban set: %v", err)
-	}
-	log.Printf("[firewall] ipset ban sets ready: %s (inet) + %s (inet6)", banSetName, banSet6Name)
+	mode := Reselect()
+	log.Printf("[firewall] backend selected: %s", mode)
 }
 
 // SetK8sHook registers a Kubernetes-level firewall implementation.
@@ -45,38 +27,28 @@ func SetK8sHook(hook interface{}) {
 	log.Printf("[firewall] K8s firewall hook registered")
 }
 
-// FirewallStatus returns the current firewall backend status.
+// Status is the current firewall backend status.
 type Status struct {
-	Mode       string    // "ipset" or "iptables"
+	Mode       string // "ipset", "iptables", "nftables" or "none"
 	HasIpset   bool
 	Capacity   int
 	ActiveBans int
 	CSF        CSFStatus // CSF info (empty if not installed)
+	Reason     string    // non-empty only when Mode == "none" (phase 17)
 }
 
 // FirewallStatus returns mode, capacity, active ban count, and CSF info.
 func FirewallStatus() Status {
 	csf := csfStatusFromSnapshot(CurrentCSFSnapshot())
-
-	if HasIpset() {
-		return Status{
-			Mode:       "ipset",
-			HasIpset:   true,
-			Capacity:   65536,
-			ActiveBans: ipsetEntryCount(banSetName) + ipsetEntryCount(banSet6Name),
-			CSF:        csf,
-		}
+	b := current()
+	return Status{
+		Mode:       b.Name(),
+		HasIpset:   b.Name() == "ipset",
+		Capacity:   b.Capacity(),
+		ActiveBans: b.Count(),
+		CSF:        csf,
+		Reason:     SelectionReason(),
 	}
-	rules, err := ListRules()
-	bans := 0
-	if err == nil {
-		for _, r := range rules {
-			if r.Type == "block" && r.Source != "" && r.Port == 0 {
-				bans++
-			}
-		}
-	}
-	return Status{Mode: "iptables", HasIpset: false, Capacity: 500, ActiveBans: bans, CSF: csf}
 }
 
 // RuleSpec describes a firewall rule to apply.
@@ -88,21 +60,30 @@ type RuleSpec struct {
 	Port      *int    // destination port (only for tcp/udp)
 }
 
-// ApplyRule adds an iptables rule based on a RuleSpec.
+// ApplyRule delegates to the active backend.
+func ApplyRule(spec RuleSpec) error { return current().ApplyRule(spec) }
+
+// RemoveRule delegates to the active backend.
+func RemoveRule(spec RuleSpec) error { return current().RemoveRule(spec) }
+
+// ListRules delegates to the active backend.
+func ListRules() ([]ParsedRule, error) { return current().ListRules() }
+
+// iptablesApplyRule adds an iptables rule based on a RuleSpec.
 // Returns nil if the rule was applied successfully.
-func ApplyRule(spec RuleSpec) error {
+func iptablesApplyRule(spec RuleSpec) error {
 	args := buildRuleArgs(spec)
 
 	// Check if rule already exists
 	checkArgs := append([]string{"-C", "INPUT"}, args...)
-	if exec.Command("iptables", checkArgs...).Run() == nil {
+	if fwOK("iptables", checkArgs...) {
 		log.Printf("[firewall] rule already exists, skipping")
 		return nil
 	}
 
 	// Insert at top of chain
 	insertArgs := append([]string{"-I", "INPUT", "1"}, args...)
-	if err := exec.Command("iptables", insertArgs...).Run(); err != nil {
+	if _, err := fwExec("iptables", insertArgs...); err != nil {
 		return fmt.Errorf("iptables apply rule: %w", err)
 	}
 
@@ -110,12 +91,12 @@ func ApplyRule(spec RuleSpec) error {
 	return nil
 }
 
-// RemoveRule removes an iptables rule matching the given RuleSpec.
-func RemoveRule(spec RuleSpec) error {
+// iptablesRemoveRule removes an iptables rule matching the given RuleSpec.
+func iptablesRemoveRule(spec RuleSpec) error {
 	args := buildRuleArgs(spec)
 	deleteArgs := append([]string{"-D", "INPUT"}, args...)
 
-	if err := exec.Command("iptables", deleteArgs...).Run(); err != nil {
+	if _, err := fwExec("iptables", deleteArgs...); err != nil {
 		return fmt.Errorf("iptables remove rule: %w", err)
 	}
 
@@ -229,180 +210,100 @@ func isSafeIP(ip net.IP) bool {
 	return isReservedIP(ip) || isLocalIP(ip) || protectedIPs[ip.String()]
 }
 
-// BanIP adds a DROP rule for the given IP address.
-// When ipset is available, adds to the appropriate set (IPv4 → defensia-bans, IPv6 → defensia-bans6).
-// Otherwise falls back to individual iptables/ip6tables rules.
-func BanIP(ip string) error {
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return fmt.Errorf("invalid IP address: %s", ip)
-	}
-	if isSafeIP(parsed) {
-		return fmt.Errorf("refusing to ban safe IP: %s", ip)
-	}
+// BanIP adds a DROP rule for the given IP address via the active backend.
+func BanIP(ip string) error { return BanIPFor(ip, 0) }
 
-	if HasIpset() {
-		if parsed.To4() != nil {
-			return ipsetAdd(banSetName, ip)
-		}
-		return ipsetAdd(banSet6Name, ip)
-	}
-
-	return ApplyRule(RuleSpec{
-		Type:      "block",
-		Protocol:  "all",
-		IPAddress: &ip,
-	})
-}
-
-// UnbanIP removes the DROP rule for the given IP address.
+// UnbanIP removes the DROP rule for the given IP address via the active backend.
 func UnbanIP(ip string) error {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
 	}
-
-	if HasIpset() {
-		if parsed.To4() != nil {
-			return ipsetDel(banSetName, ip)
-		}
-		return ipsetDel(banSet6Name, ip)
-	}
-
-	return RemoveRule(RuleSpec{
-		Type:      "block",
-		Protocol:  "all",
-		IPAddress: &ip,
-	})
+	return current().Unban(parsed)
 }
 
-// ApplyBans applies a list of IPs from the server sync.
-// When ipset is available, uses batch restore for maximum speed.
-// Splits IPv4 and IPv6 into separate sets to prevent ipset restore atomicity failures.
-// Returns the number of IPs actually applied to the kernel.
+// ApplyBans applies a list of IPs from the server sync (no TTL). Returns the
+// number of IPs actually applied to the kernel.
 func ApplyBans(ips []string) int {
-	if HasIpset() && len(ips) > 0 {
-		// Split by address family — ipset restore is atomic, one bad entry kills the whole batch
-		var v4, v6 []string
-		for _, ip := range ips {
-			parsed := net.ParseIP(ip)
-			if parsed == nil || isSafeIP(parsed) {
-				continue
-			}
-			if parsed.To4() != nil {
-				v4 = append(v4, ip)
-			} else {
-				v6 = append(v6, ip)
-			}
-		}
-		v4applied, v6applied := 0, 0
-		if len(v4) > 0 {
-			if err := ipsetBatchAdd(banSetName, v4); err != nil {
-				log.Printf("[firewall] ipset batch ban failed (v4, %d IPs): %v", len(v4), err)
-			} else {
-				v4applied = len(v4)
-			}
-		}
-		if len(v6) > 0 {
-			if err := ipsetBatchAdd(banSet6Name, v6); err != nil {
-				log.Printf("[firewall] ipset batch ban failed (v6, %d IPs): %v", len(v6), err)
-			} else {
-				v6applied = len(v6)
-			}
-		}
-		return v4applied + v6applied
-	}
-	applied := 0
+	entries := make([]BanEntry, 0, len(ips))
 	for _, ip := range ips {
-		if err := BanIP(ip); err != nil {
-			log.Printf("[firewall] error applying ban for %s: %v", ip, err)
-		} else {
-			applied++
-		}
+		entries = append(entries, BanEntry{IP: ip})
 	}
-	return applied
+	return ApplyBanEntries(entries)
 }
 
-// CleanupStaleBans removes bans for IPs that are no longer in the active ban list.
-// When ipset is available, cleans both IPv4 and IPv6 sets.
-// When using iptables, removes individual DROP rules.
+// CleanupStaleBans removes bans for IPs that are no longer in the active ban
+// list. activeRuleIPs is only consulted for the iptables backend (ipset and
+// nftables semantics: only active bans are kept, matching origin/main's
+// ipset-mode behaviour).
 func CleanupStaleBans(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
-	if HasIpset() {
-		return cleanupIpsetBans(activeBanIPs)
-	}
-	return cleanupIptablesBans(activeBanIPs, activeRuleIPs)
-}
+	b := current()
 
-// cleanupIpsetBans syncs both IPv4 and IPv6 ipsets to match exactly the active bans.
-func cleanupIpsetBans(activeBanIPs map[string]bool) int {
-	removed := 0
-	// Clean IPv4 set
-	for _, ip := range ipsetListMembers(banSetName) {
-		if !activeBanIPs[ip] {
-			if err := ipsetDel(banSetName, ip); err == nil {
-				removed++
-			}
+	normalised := make(map[string]bool, len(activeBanIPs))
+	for k, v := range activeBanIPs {
+		if ip := net.ParseIP(k); ip != nil {
+			normalised[ip.String()] = v
+		} else {
+			normalised[k] = v
 		}
 	}
-	// Clean IPv6 set
-	for _, ip := range ipsetListMembers(banSet6Name) {
-		if !activeBanIPs[ip] {
-			if err := ipsetDel(banSet6Name, ip); err == nil {
-				removed++
-			}
-		}
-	}
-	if removed > 0 {
-		log.Printf("[firewall] cleanup: removed %d expired bans from ipset", removed)
-	}
-	return removed
-}
 
-// cleanupIptablesBans removes individual iptables DROP rules for expired bans.
-func cleanupIptablesBans(activeBanIPs map[string]bool, activeRuleIPs map[string]bool) int {
-	current, err := ListRules()
+	v4, v6, err := b.Members()
 	if err != nil {
-		log.Printf("[firewall] cleanup: cannot list rules: %v", err)
+		log.Printf("[firewall] cleanup: cannot list bans: %v", err)
 		return 0
 	}
 
 	removed := 0
-	for _, r := range current {
-		if r.Type != "block" || r.Source == "" || r.Port != 0 || r.Protocol != "all" {
+	for _, m := range append(v4, v6...) {
+		ipStr := m
+		if ip := net.ParseIP(m); ip != nil {
+			ipStr = ip.String()
+		}
+		if normalised[ipStr] {
 			continue
 		}
-		if activeBanIPs[r.Source] {
+		if b.Name() == "iptables" && activeRuleIPs[ipStr] {
 			continue
 		}
-		if activeRuleIPs[r.Source] {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
 			continue
 		}
-		if err := UnbanIP(r.Source); err != nil {
-			log.Printf("[firewall] cleanup: failed to remove stale ban for %s: %v", r.Source, err)
-		} else {
-			removed++
+		if err := b.Unban(ip); err != nil {
+			log.Printf("[firewall] cleanup: failed to remove stale ban for %s: %v", ipStr, err)
+			continue
 		}
+		removed++
 	}
 
 	if removed > 0 {
-		log.Printf("[firewall] cleanup: removed %d expired iptables bans", removed)
+		switch b.Name() {
+		case "ipset":
+			log.Printf("[firewall] cleanup: removed %d expired bans from ipset", removed)
+		case "nftables":
+			log.Printf("[firewall] cleanup: removed %d expired bans from nftables", removed)
+		default:
+			log.Printf("[firewall] cleanup: removed %d expired iptables bans", removed)
+		}
 	}
 	return removed
 }
 
-// ParsedRule represents an iptables rule parsed from `iptables -S INPUT`.
+// ParsedRule represents a firewall rule parsed from `iptables -S INPUT` (or
+// the equivalent listing for another backend).
 type ParsedRule struct {
-	RawRule   string
-	Type      string // "block" or "allow"
-	Protocol  string // "tcp", "udp", "icmp", "all"
-	Source    string // IP address (no CIDR /32)
-	Port      int    // 0 means no port
+	RawRule  string
+	Type     string // "block" or "allow"
+	Protocol string // "tcp", "udp", "icmp", "all"
+	Source   string // IP address (no CIDR /32 or /128)
+	Port     int    // 0 means no port
 }
 
-// ListRules reads existing INPUT chain rules via `iptables -S INPUT`
+// iptablesListRules reads existing INPUT chain rules via `iptables -S INPUT`
 // and returns only simple rules Defensia can manage.
-func ListRules() ([]ParsedRule, error) {
-	out, err := exec.Command("iptables", "-S", "INPUT").CombinedOutput()
+func iptablesListRules() ([]ParsedRule, error) {
+	out, err := fwExec("iptables", "-S", "INPUT")
 	if err != nil {
 		return nil, fmt.Errorf("iptables -S INPUT: %w", err)
 	}
@@ -417,7 +318,7 @@ func ListRules() ([]ParsedRule, error) {
 		if !strings.HasPrefix(line, "-A INPUT") {
 			continue
 		}
-		parsed, ok := parseLine(line)
+		parsed, ok := parseLine(line, "/32")
 		if ok {
 			rules = append(rules, parsed)
 		}
@@ -427,9 +328,34 @@ func ListRules() ([]ParsedRule, error) {
 	return rules, nil
 }
 
-// parseLine parses a single iptables -S line into a ParsedRule.
+// ip6tablesListRules reads existing INPUT chain rules via `ip6tables -S INPUT`.
+func ip6tablesListRules() ([]ParsedRule, error) {
+	out, err := fwExec("ip6tables", "-S", "INPUT")
+	if err != nil {
+		return nil, fmt.Errorf("ip6tables -S INPUT: %w", err)
+	}
+
+	var rules []ParsedRule
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "-A INPUT") {
+			continue
+		}
+		parsed, ok := parseLine(line, "/128")
+		if ok {
+			rules = append(rules, parsed)
+		}
+	}
+	return rules, nil
+}
+
+// parseLine parses a single iptables/ip6tables -S line into a ParsedRule.
+// cidrSuffix ("/32" or "/128") is stripped from a bare single-IP source.
 // Returns false if the rule is too complex for Defensia to manage.
-func parseLine(line string) (ParsedRule, bool) {
+func parseLine(line string, cidrSuffix string) (ParsedRule, bool) {
 	fields := strings.Fields(line)
 
 	// Skip rules with interface binds (-i, -o) or negations (!)
@@ -478,8 +404,7 @@ func parseLine(line string) (ParsedRule, bool) {
 		case "-s":
 			if i+1 < len(fields) {
 				src := fields[i+1]
-				// Strip /32 suffix from single IPs
-				src = strings.TrimSuffix(src, "/32")
+				src = strings.TrimSuffix(src, cidrSuffix)
 				rule.Source = src
 				i++
 			}

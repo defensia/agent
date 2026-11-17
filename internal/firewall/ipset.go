@@ -2,33 +2,12 @@ package firewall
 
 import (
 	"fmt"
-	"log"
-	"os/exec"
 	"strings"
-	"sync"
 )
 
-// ipsetAvailable is true when the `ipset` binary is found on the system.
-var ipsetAvailable bool
-var ipsetOnce sync.Once
-
-// checkIpset detects whether ipset is available on this system.
-func checkIpset() bool {
-	ipsetOnce.Do(func() {
-		_, err := exec.LookPath("ipset")
-		ipsetAvailable = err == nil
-		if ipsetAvailable {
-			log.Println("[firewall] ipset detected — using ipset for bans + country blocks")
-		} else {
-			log.Println("[firewall] ipset not found — falling back to iptables (limited capacity)")
-		}
-	})
-	return ipsetAvailable
-}
-
-// HasIpset returns true if ipset is available on this system.
+// HasIpset returns true when the active backend is ipset.
 func HasIpset() bool {
-	return checkIpset()
+	return current().Name() == "ipset"
 }
 
 // ipsetSetName returns the ipset set name for a country code.
@@ -40,9 +19,7 @@ func ipsetSetName(countryCode string) string {
 // maxelem is 262144: the United States alone is ~151,000 IPv4 networks in the
 // country databases, so the old 131072 made blocking it fail every time.
 func createIpsetHashNet(name string) error {
-	// Try to create — if it already exists, ipset returns error code 1
-	out, err := exec.Command("ipset", "create", name, "hash:net",
-		"maxelem", "262144", "-exist").CombinedOutput()
+	out, err := fwExec("ipset", "create", name, "hash:net", "maxelem", "262144", "-exist")
 	if err != nil {
 		return fmt.Errorf("ipset create %s: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}
@@ -51,7 +28,7 @@ func createIpsetHashNet(name string) error {
 
 // flushIpset removes all entries from an ipset set.
 func flushIpset(name string) error {
-	out, err := exec.Command("ipset", "flush", name).CombinedOutput()
+	out, err := fwExec("ipset", "flush", name)
 	if err != nil {
 		return fmt.Errorf("ipset flush %s: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}
@@ -60,7 +37,7 @@ func flushIpset(name string) error {
 
 // destroyIpset destroys an ipset set (must be flushed and unlinked from iptables first).
 func destroyIpset(name string) error {
-	out, err := exec.Command("ipset", "destroy", name).CombinedOutput()
+	out, err := fwExec("ipset", "destroy", name)
 	if err != nil {
 		return fmt.Errorf("ipset destroy %s: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}
@@ -79,9 +56,7 @@ func populateIpsetBatch(setName string, cidrs []string) error {
 		fmt.Fprintf(&b, "add %s %s -exist\n", setName, cidr)
 	}
 
-	cmd := exec.Command("ipset", "restore")
-	cmd.Stdin = strings.NewReader(b.String())
-	out, err := cmd.CombinedOutput()
+	out, err := fwExecIn(b.String(), "ipset", "restore")
 	if err != nil {
 		return fmt.Errorf("ipset restore for %s (%d CIDRs): %s (%w)",
 			setName, len(cidrs), strings.TrimSpace(string(out)), err)
@@ -93,13 +68,11 @@ func populateIpsetBatch(setName string, cidrs []string) error {
 // Uses -A (append) so protected IP ACCEPT rules (inserted with -I at position 1) always come first.
 func addIptablesIpsetRule(setName string) error {
 	// Check if rule already exists
-	if exec.Command("iptables", "-C", "INPUT",
-		"-m", "set", "--match-set", setName, "src", "-j", "DROP").Run() == nil {
+	if fwOK("iptables", "-C", "INPUT", "-m", "set", "--match-set", setName, "src", "-j", "DROP") {
 		return nil // already exists
 	}
 
-	out, err := exec.Command("iptables", "-A", "INPUT",
-		"-m", "set", "--match-set", setName, "src", "-j", "DROP").CombinedOutput()
+	out, err := fwExec("iptables", "-A", "INPUT", "-m", "set", "--match-set", setName, "src", "-j", "DROP")
 	if err != nil {
 		return fmt.Errorf("iptables add ipset rule for %s: %s (%w)",
 			setName, strings.TrimSpace(string(out)), err)
@@ -109,12 +82,10 @@ func addIptablesIpsetRule(setName string) error {
 
 // addIp6tablesIpsetRule adds an ip6tables rule that matches traffic from an ipset set (IPv6).
 func addIp6tablesIpsetRule(setName string) error {
-	if exec.Command("ip6tables", "-C", "INPUT",
-		"-m", "set", "--match-set", setName, "src", "-j", "DROP").Run() == nil {
+	if fwOK("ip6tables", "-C", "INPUT", "-m", "set", "--match-set", setName, "src", "-j", "DROP") {
 		return nil // already exists
 	}
-	out, err := exec.Command("ip6tables", "-A", "INPUT",
-		"-m", "set", "--match-set", setName, "src", "-j", "DROP").CombinedOutput()
+	out, err := fwExec("ip6tables", "-A", "INPUT", "-m", "set", "--match-set", setName, "src", "-j", "DROP")
 	if err != nil {
 		return fmt.Errorf("ip6tables add ipset rule for %s: %s (%w)",
 			setName, strings.TrimSpace(string(out)), err)
@@ -124,8 +95,7 @@ func addIp6tablesIpsetRule(setName string) error {
 
 // removeIptablesIpsetRule removes the iptables rule referencing an ipset set.
 func removeIptablesIpsetRule(setName string) error {
-	out, err := exec.Command("iptables", "-D", "INPUT",
-		"-m", "set", "--match-set", setName, "src", "-j", "DROP").CombinedOutput()
+	out, err := fwExec("iptables", "-D", "INPUT", "-m", "set", "--match-set", setName, "src", "-j", "DROP")
 	if err != nil {
 		return fmt.Errorf("iptables remove ipset rule for %s: %s (%w)",
 			setName, strings.TrimSpace(string(out)), err)
@@ -135,8 +105,7 @@ func removeIptablesIpsetRule(setName string) error {
 
 // createIpsetHashIP creates an ipset hash:ip set for individual IP bans (IPv4, family inet).
 func createIpsetHashIP(name string) error {
-	out, err := exec.Command("ipset", "create", name, "hash:ip",
-		"family", "inet", "maxelem", "65536", "-exist").CombinedOutput()
+	out, err := fwExec("ipset", "create", name, "hash:ip", "family", "inet", "maxelem", "65536", "-exist")
 	if err != nil {
 		return fmt.Errorf("ipset create %s hash:ip inet: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}
@@ -145,8 +114,7 @@ func createIpsetHashIP(name string) error {
 
 // createIpsetHashIP6 creates an ipset hash:ip set for IPv6 bans (family inet6).
 func createIpsetHashIP6(name string) error {
-	out, err := exec.Command("ipset", "create", name, "hash:ip",
-		"family", "inet6", "maxelem", "65536", "-exist").CombinedOutput()
+	out, err := fwExec("ipset", "create", name, "hash:ip", "family", "inet6", "maxelem", "65536", "-exist")
 	if err != nil {
 		return fmt.Errorf("ipset create %s hash:ip inet6: %s (%w)", name, strings.TrimSpace(string(out)), err)
 	}
@@ -155,7 +123,7 @@ func createIpsetHashIP6(name string) error {
 
 // ipsetAdd adds a single IP to an ipset set.
 func ipsetAdd(setName, ip string) error {
-	out, err := exec.Command("ipset", "add", setName, ip, "-exist").CombinedOutput()
+	out, err := fwExec("ipset", "add", setName, ip, "-exist")
 	if err != nil {
 		return fmt.Errorf("ipset add %s to %s: %s (%w)", ip, setName, strings.TrimSpace(string(out)), err)
 	}
@@ -164,7 +132,7 @@ func ipsetAdd(setName, ip string) error {
 
 // ipsetDel removes a single IP from an ipset set.
 func ipsetDel(setName, ip string) error {
-	out, err := exec.Command("ipset", "del", setName, ip, "-exist").CombinedOutput()
+	out, err := fwExec("ipset", "del", setName, ip, "-exist")
 	if err != nil {
 		return fmt.Errorf("ipset del %s from %s: %s (%w)", ip, setName, strings.TrimSpace(string(out)), err)
 	}
@@ -180,9 +148,7 @@ func ipsetBatchAdd(setName string, ips []string) error {
 	for _, ip := range ips {
 		fmt.Fprintf(&b, "add %s %s -exist\n", setName, ip)
 	}
-	cmd := exec.Command("ipset", "restore")
-	cmd.Stdin = strings.NewReader(b.String())
-	out, err := cmd.CombinedOutput()
+	out, err := fwExecIn(b.String(), "ipset", "restore")
 	if err != nil {
 		return fmt.Errorf("ipset batch add to %s (%d IPs): %s (%w)",
 			setName, len(ips), strings.TrimSpace(string(out)), err)
@@ -192,7 +158,7 @@ func ipsetBatchAdd(setName string, ips []string) error {
 
 // ipsetListMembers returns all IPs in an ipset set.
 func ipsetListMembers(setName string) []string {
-	out, err := exec.Command("ipset", "list", setName).CombinedOutput()
+	out, err := fwExec("ipset", "list", setName)
 	if err != nil {
 		return nil
 	}
@@ -213,7 +179,7 @@ func ipsetListMembers(setName string) []string {
 
 // ipsetEntryCount returns how many entries are in a set (for logging).
 func ipsetEntryCount(setName string) int {
-	out, err := exec.Command("ipset", "list", setName, "-t").CombinedOutput()
+	out, err := fwExec("ipset", "list", setName, "-t")
 	if err != nil {
 		return 0
 	}
