@@ -216,23 +216,12 @@ geoblock_check() {
   fi
 }
 
-# ensure_active_protection VM — flips the agent's monitor_mode off via a
-# direct DB update (same effect as toggling "Active Protection" on in the
-# panel UI). New agents register with monitor_mode=true by design
-# (AgentService::register) — with it left on, syncAndApply's own
+# ensure_active_protection is defined in lib.sh (shared with attack.sh and
+# test.sh) — without it, syncAndApply's own
 # `if !sync.Config.MonitorMode { firewall.ApplyBans(...) }` guard skips
 # every single ban regardless of backend, which would make this whole
 # diagnosis report "NOT ENFORCED" uniformly and hide the real ipset vs
-# iptables vs nftables difference it exists to measure. Idempotent; left
-# off afterward (same convention as lab/attack.sh's own helper).
-ensure_active_protection() {
-  local vm=$1
-  panel_compose exec -T app php artisan tinker --execute="
-    \$a = \App\Models\Agent::where('name', '$vm')->first();
-    if (!\$a) { echo 'ERROR: no agent named $vm'; exit(1); }
-    if (\$a->monitor_mode) { \$a->update(['monitor_mode' => false]); echo 'toggled-off'; } else { echo 'already-off'; }
-  " 2>&1 | tail -1
-}
+# iptables vs nftables difference it exists to measure.
 
 # --- main loop --------------------------------------------------------------
 for vm in $vms; do

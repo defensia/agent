@@ -131,6 +131,28 @@ panel_bootstrap() {
 # panel_api_token — the current lab Sanctum token from $STATE_DIR/panel.json.
 panel_api_token() { json_get "$STATE_DIR/panel.json" api_token; }
 
+# ensure_active_protection VM — flips the agent's monitor_mode off via a
+# direct DB update (same effect as toggling "Active Protection" on in the
+# panel UI for that server). New agents register with monitor_mode=true
+# by design (AgentService::register, app/Services/AgentService.php) — a
+# brand new install defaults to detect-only so nobody gets locked out of
+# their own box the moment the agent starts. `make lab-reset` re-registers
+# every agent from scratch, so every caller that needs real ban
+# enforcement (not just a `brute_force`/monitor-mode event) must call this
+# first: with monitor_mode left on, syncAndApply's own
+# `if !sync.Config.MonitorMode { firewall.ApplyBans(...) }` guard skips
+# every ban regardless of backend. Idempotent (no-op once already false);
+# shared by lab/attack.sh, lab/diagnose-firewall.sh and lab/test.sh so the
+# three callers can never drift into three different DB update strings.
+ensure_active_protection() {
+  local vm=$1
+  panel_compose exec -T app php artisan tinker --execute="
+    \$a = \App\Models\Agent::where('name', '$vm')->first();
+    if (!\$a) { echo 'ERROR: no agent named $vm'; exit(1); }
+    if (\$a->monitor_mode) { \$a->update(['monitor_mode' => false]); echo 'toggled-off'; } else { echo 'already-off'; }
+  " 2>&1 | tail -1
+}
+
 # panel_get PATH — authenticated GET against the lab panel (host-side URL).
 panel_get() {
   curl -fsS -H "Authorization: Bearer $(panel_api_token)" -H 'Accept: application/json' "$PANEL_URL_HOST$1"

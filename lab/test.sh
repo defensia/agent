@@ -134,6 +134,21 @@ for vm in $vms; do
   RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
   vm_push "$vm" "$BINARY" /root/integration.test
 
+  # Every agent VM registers with monitor_mode=true (AgentService::register
+  # safety default) — `make lab-reset` re-registers from scratch, so this
+  # must run before every single VM here, not just the dedicated attack
+  # target. Without it, TestLabDaemonPanelBanEnforced/
+  # TestLabDaemonCSFRestartKeepsBans only ever see monitor-mode events and
+  # time out waiting for a kernel ban that syncAndApply's own
+  # `if !sync.Config.MonitorMode` guard deliberately never applies. The
+  # suite's own restartAgent(t) picks up the new value — no restart needed
+  # here (same ordering lab/attack.sh and lab/diagnose-firewall.sh rely on).
+  ap_out="$(ensure_active_protection "$vm")"
+  case "$ap_out" in
+    toggled-off | already-off) log "$vm: active protection: $ap_out" ;;
+    *) die "test.sh: ensure_active_protection($vm) failed: $ap_out" ;;
+  esac
+
   fork="$(vm_fork "$vm")"
   expect_csf="$(csf_expect "$vm")"
   csf_version="$(expect_or_empty "$(vm_csf_version "$vm")")"

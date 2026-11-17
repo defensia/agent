@@ -50,28 +50,10 @@ load_state() {
   [ -n "${LAB_ATTACK_SSH_IP:-}" ] || die "attack.sh: $STATE_FILE has no LAB_ATTACK_SSH_IP"
 }
 
-# ensure_active_protection VM — flips the target agent's monitor_mode off
-# via a direct DB update (the same effect as a human toggling "Active
-# Protection" on in the panel UI for that server).
-#
-# New agents are registered with monitor_mode=true by design
-# (AgentService::register, app/Services/AgentService.php:58) — a brand
-# new install defaults to detect-only so nobody gets locked out of their
-# own box the moment the agent starts. The lab's attack target has to be
-# taken out of that default, exactly as a real operator would, or every
-# leg below would only ever produce a "(monitor mode)" log line and a
-# `brute_force`/`wp_bruteforce`/`mail_brute_force` event — never the real
-# ipset ban this plan's acceptance criteria requires. Idempotent (no-op
-# once already false); takes effect on the target's next agent restart,
-# which target-services.sh always performs right after this call.
-ensure_active_protection() {
-  local vm=$1
-  panel_compose exec -T app php artisan tinker --execute="
-    \$a = \App\Models\Agent::where('name', '$vm')->first();
-    if (!\$a) { echo 'ERROR: no agent named $vm'; exit(1); }
-    if (\$a->monitor_mode) { \$a->update(['monitor_mode' => false]); echo 'toggled-off'; } else { echo 'already-off'; }
-  " 2>&1 | tail -1
-}
+# ensure_active_protection is defined in lib.sh (shared with
+# diagnose-firewall.sh and test.sh) — takes effect on the target's next
+# agent restart, which target-services.sh always performs right after
+# this call below.
 
 # --- prepare: fresh TEST-NET-3 aliases + routing + state file ------------
 do_prepare() {
