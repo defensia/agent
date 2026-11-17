@@ -194,11 +194,11 @@ func (b *nftBackend) Count() int {
 	return len(v4) + len(v6)
 }
 
-// loadRules refreshes b.rules from the `rules` chain. Caller holds b.mu.
+// loadRules refreshes b.rules from the `portrules` chain. Caller holds b.mu.
 func (b *nftBackend) loadRules() error {
-	out, err := fwExec("nft", "-j", "-a", "list", "chain", nftFamily, nftTable, "rules")
+	out, err := fwExec("nft", "-j", "-a", "list", "chain", nftFamily, nftTable, "portrules")
 	if err != nil {
-		return fmt.Errorf("nft list chain rules: %w", err)
+		return fmt.Errorf("nft list chain portrules: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	refs, err := parseNftChainRules(out)
 	if err != nil {
@@ -268,7 +268,7 @@ func (b *nftBackend) RemoveRule(spec RuleSpec) error {
 		}
 	}
 
-	if out, err := fwExecIn(nftDeleteRuleScript("rules", handle), "nft", "-f", "-"); err != nil {
+	if out, err := fwExecIn(nftDeleteRuleScript("portrules", handle), "nft", "-f", "-"); err != nil {
 		return fmt.Errorf("nft delete rule: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	delete(b.rules, key)

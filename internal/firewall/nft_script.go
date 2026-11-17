@@ -32,15 +32,24 @@ const nftProbeScript = "add table inet defensia_probe\ndelete table inet defensi
 
 // nftEnsureScript returns the full idempotent setup transaction: table,
 // chains, sets, and the input/protected chain contents (flushed and rebuilt
-// every call so a tampered chain self-repairs with no window). The `rules`
-// and `geo` chains and all set elements are NEVER flushed here — only Ensure
-// recreates structure; ApplyRule/GeoReplace/etc. own their own contents.
+// every call so a tampered chain self-repairs with no window). The
+// `portrules` and `geo` chains and all set elements are NEVER flushed here —
+// only Ensure recreates structure; ApplyRule/GeoReplace/etc. own their own
+// contents.
+//
+// The chain is named "portrules", not "rules": nft's own command-line
+// grammar reserves "rules"/"rule" as keywords for its `list`/`delete` verbs
+// (confirmed on nftables v1.1.5 — `nft list chain inet defensia rules`
+// fails with "syntax error, unexpected rules, expecting string or last",
+// even though `add chain ... rules` succeeds). Every chain name that will
+// ever be passed as a bare CLI argument (not just inside an `-f -` script)
+// must avoid nft's reserved vocabulary.
 func nftEnsureScript() string {
 	lines := []string{
 		fmt.Sprintf("add table %s %s", nftFamily, nftTable),
 		fmt.Sprintf("add chain %s %s input { type filter hook input priority %d; policy accept; }", nftFamily, nftTable, nftInputPriority),
 		fmt.Sprintf("add chain %s %s protected", nftFamily, nftTable),
-		fmt.Sprintf("add chain %s %s rules", nftFamily, nftTable),
+		fmt.Sprintf("add chain %s %s portrules", nftFamily, nftTable),
 		fmt.Sprintf("add chain %s %s geo", nftFamily, nftTable),
 		fmt.Sprintf("add set %s %s bans4 { type ipv4_addr; flags timeout; size %d; }", nftFamily, nftTable, nftBanSetSize),
 		fmt.Sprintf("add set %s %s bans6 { type ipv6_addr; flags timeout; size %d; }", nftFamily, nftTable, nftBanSetSize),
@@ -48,7 +57,7 @@ func nftEnsureScript() string {
 		fmt.Sprintf("add set %s %s protected6 { type ipv6_addr; }", nftFamily, nftTable),
 		fmt.Sprintf("flush chain %s %s input", nftFamily, nftTable),
 		fmt.Sprintf(`add rule %s %s input jump protected comment "defensia:protected"`, nftFamily, nftTable),
-		fmt.Sprintf(`add rule %s %s input jump rules comment "defensia:rules"`, nftFamily, nftTable),
+		fmt.Sprintf(`add rule %s %s input jump portrules comment "defensia:rules"`, nftFamily, nftTable),
 		fmt.Sprintf(`add rule %s %s input ip saddr @bans4 drop comment "defensia:bans4"`, nftFamily, nftTable),
 		fmt.Sprintf(`add rule %s %s input ip6 saddr @bans6 drop comment "defensia:bans6"`, nftFamily, nftTable),
 		fmt.Sprintf(`add rule %s %s input jump geo comment "defensia:geo"`, nftFamily, nftTable),
@@ -233,9 +242,9 @@ func decodeRuleKey(key string) (ParsedRule, bool) {
 }
 
 // nftAddRuleScript / nftDeleteRuleScript add or remove one rule in the
-// `rules` chain by expression/comment or by handle.
+// `portrules` chain by expression/comment or by handle.
 func nftAddRuleScript(expr, key string) string {
-	return fmt.Sprintf(`add rule %s %s rules %s comment "%s"`+"\n", nftFamily, nftTable, expr, key)
+	return fmt.Sprintf(`add rule %s %s portrules %s comment "%s"`+"\n", nftFamily, nftTable, expr, key)
 }
 
 func nftDeleteRuleScript(chain string, handle int) string {
