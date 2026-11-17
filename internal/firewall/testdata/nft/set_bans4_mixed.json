@@ -1,0 +1,18 @@
+{
+  "nftables": [
+    {"metainfo": {"version": "1.0.6", "release_name": "Lester Gooch #5", "json_schema_version": 1}},
+    {"set": {
+      "family": "inet",
+      "name": "bans4",
+      "table": "defensia",
+      "type": "ipv4_addr",
+      "handle": 3,
+      "flags": ["timeout"],
+      "elem": [
+        "203.0.113.1",
+        {"elem": {"val": "203.0.113.2", "timeout": 3600000, "expires": 3590000}},
+        {"elem": {"val": "203.0.113.3"}}
+      ]
+    }}
+  ]
+}

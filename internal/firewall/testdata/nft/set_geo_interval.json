@@ -1,0 +1,18 @@
+{
+  "nftables": [
+    {"metainfo": {"version": "1.0.6", "release_name": "Lester Gooch #5", "json_schema_version": 1}},
+    {"set": {
+      "family": "inet",
+      "name": "geo_cn",
+      "table": "defensia",
+      "type": "ipv4_addr",
+      "handle": 9,
+      "flags": ["interval"],
+      "elem": [
+        {"elem": {"val": {"prefix": {"addr": "1.0.1.0", "len": 24}}}},
+        {"elem": {"val": {"range": ["1.0.4.0", "1.0.7.255"]}}},
+        "1.0.9.9"
+      ]
+    }}
+  ]
+}
