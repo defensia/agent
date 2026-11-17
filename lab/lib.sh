@@ -136,6 +136,54 @@ panel_get() {
   curl -fsS -H "Authorization: Bearer $(panel_api_token)" -H 'Accept: application/json' "$PANEL_URL_HOST$1"
 }
 
+# panel_post PATH JSON — authenticated POST. Does NOT use curl -f: an
+# error body (e.g. a 422 "not eligible" ban rejection) must stay visible
+# to the caller, not be swallowed as a bare non-zero exit. Splits the
+# response body from the trailing HTTP status via a single curl -w call
+# and returns non-zero (after printing the body) on >= 400.
+panel_post() {
+  local path=$1 json=$2 out body code
+  out="$(curl -sS -X POST \
+    -H "Authorization: Bearer $(panel_api_token)" \
+    -H 'Accept: application/json' -H 'Content-Type: application/json' \
+    -d "$json" -w '\n%{http_code}' "$PANEL_URL_HOST$path")"
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  printf '%s' "$body"
+  if [ "$code" -ge 400 ] 2>/dev/null; then
+    printf '\n[panel_post] %s %s -> HTTP %s\n' "$path" "$json" "$code" >&2
+    return 1
+  fi
+}
+
+# panel_delete PATH — authenticated DELETE, same body-visible contract as panel_post.
+panel_delete() {
+  local path=$1 out body code
+  out="$(curl -sS -X DELETE \
+    -H "Authorization: Bearer $(panel_api_token)" \
+    -H 'Accept: application/json' \
+    -w '\n%{http_code}' "$PANEL_URL_HOST$path")"
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  printf '%s' "$body"
+  if [ "$code" -ge 400 ] 2>/dev/null; then
+    printf '\n[panel_delete] %s -> HTTP %s\n' "$path" "$code" >&2
+    return 1
+  fi
+}
+
+# panel_tinker PHP — runs `php artisan tinker --execute="$1"` inside the lab
+# panel container. Refuses unless the bootstrapped panel.json confirms the
+# lab DB (defensia_lab) — this executes arbitrary PHP against whatever
+# database the container is pointed at, so a wrong/production DB must
+# never be in reach by accident.
+panel_tinker() {
+  local php=$1 db
+  db="$(json_get "$STATE_DIR/panel.json" db_database 2>/dev/null || true)"
+  [ "$db" = "defensia_lab" ] || die "panel_tinker refused: panel.json db_database='$db' (expected defensia_lab)"
+  panel_compose exec -T app php artisan tinker --execute="$php"
+}
+
 # --- JSON ------------------------------------------------------------------
 # json_get FILE KEY — dotted path (a.b.0.c; numeric segments index lists).
 json_get() {

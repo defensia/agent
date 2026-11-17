@@ -88,7 +88,7 @@ build_golden() {
         vm_root "$g" bash /root/lab-provision/csf.sh "$fork"
       fi
       ;;
-    attack-target)
+    attack-target|fw-variant)
       vm_root "$g" bash /root/lab-provision/base.sh "$(vm_family "$vm")" "$(vm_ipset "$vm")"
       ;;
     attacker)
@@ -98,6 +98,15 @@ build_golden() {
       die "unknown role '$role' for $vm"
       ;;
   esac
+
+  # Phase 17 (NFT-01): any VM with a firewall variant (alma10-noipset
+  # itself included — it gains the nftables package for scenario A) gets
+  # fw-variant.sh on top of the role-specific provisioning above, before
+  # the golden is marked and stopped.
+  fw_variant="$(vm_fw_variant "$vm")"
+  if [ "$fw_variant" != "-" ]; then
+    vm_root "$g" bash /root/lab-provision/fw-variant.sh "$fw_variant"
+  fi
 
   sha="-"
   if [ "$fork" != "none" ]; then
