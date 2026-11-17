@@ -162,6 +162,7 @@ for vm in $vms; do
     LAB_PANEL_URL="$PANEL_URL_VM" \
     LAB_PANEL_TOKEN="$TOKEN" \
     LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
+    LAB_CAPTURE_NFT_FIXTURES="${LAB_CAPTURE_NFT_FIXTURES:-}" \
     /root/integration.test -test.v -test.count=1 -test.timeout "${LAB_TEST_TIMEOUT:-30m}" -test.run '^TestLab' >"$RAW" 2>&1
   rc=$?
   seconds=$(($(date +%s) - start))

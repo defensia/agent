@@ -134,13 +134,14 @@ vm_csf_version() {
   esac
 }
 
-# vm_fw_mode VM -> ipset|iptables|"-" (CURRENT-agent observed behaviour;
-# alma10-noiptables/alma10-ipset-broken are the plan 17-06 TARGET mode
-# nftables, but this baseline records what the unmodified agent reports)
+# vm_fw_mode VM -> ipset|iptables|nftables|"-" (TARGET mode after phase 17
+# plan 17-04's nftables backend: alma10-noipset/alma10-noiptables/
+# alma10-ipset-broken select nftables because ipset is unusable there
+# (missing kernel module, missing binary, or a broken ipset shim) and nft
+# >= 1.0.0 is; every other agent VM still selects ipset, unchanged)
 vm_fw_mode() {
   case "$1" in
-    alma10-noipset|alma10-noiptables) echo "iptables" ;;
-    alma10-ipset-broken) echo "ipset" ;;
+    alma10-noipset|alma10-noiptables|alma10-ipset-broken) echo "nftables" ;;
     alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|debian12-nocsf) echo "ipset" ;;
     lab-attacker) echo "-" ;;
     *) die "unknown VM $1" ;;
