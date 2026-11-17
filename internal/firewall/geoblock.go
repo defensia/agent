@@ -122,33 +122,53 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 		}
 	}
 
-	// Point the chain at what is actually loaded
-	var sets []string
-	for cc := range desired {
-		if g.activeCountries[cc] {
-			sets = append(sets, ipsetSetName(cc))
+	// geochain.go's DEFENSIA-GEO iptables chain references ipset sets by
+	// name via `-m set --match-set` — that only ever resolves on the ipset
+	// backend. Every other GeoSupported backend (nftables) wires its own
+	// per-country DROP rule directly inside Backend.GeoReplace/GeoRemove
+	// (backend_nft.go's `geo` chain), so there is no separate chain-rebuild
+	// step for it — rebuilding geoChain against a backend without matching
+	// ipset sets fails with "Set ... doesn't exist", not a no-op.
+	if b.Name() == "ipset" {
+		// Point the chain at what is actually loaded
+		var sets []string
+		for cc := range desired {
+			if g.activeCountries[cc] {
+				sets = append(sets, ipsetSetName(cc))
+			}
 		}
-	}
-	sort.Strings(sets)
-	if len(sets) == 0 {
-		teardownGeoChain()
-		g.dropExemptSet()
-	} else if exemptOK := g.syncExemptSet(); len(g.exemptCIDRs) > 0 && !exemptOK {
-		// Blocking without the exemptions would cut off search engines and CDN
-		// edges; leaving countries unblocked until the next sync is the lesser harm.
-		teardownGeoChain()
-		g.enforced = false
-	} else if err := ensureGeoChain(); err != nil {
-		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
-		g.enforced = false
-	} else if err := rebuildGeoChain(g.protectedIPs, exemptOK, g.exemptPorts, sets); err != nil {
-		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
-		g.enforced = false
+		sort.Strings(sets)
+		if len(sets) == 0 {
+			teardownGeoChain()
+			g.dropExemptSet()
+		} else if exemptOK := g.syncExemptSet(); len(g.exemptCIDRs) > 0 && !exemptOK {
+			// Blocking without the exemptions would cut off search engines and CDN
+			// edges; leaving countries unblocked until the next sync is the lesser harm.
+			teardownGeoChain()
+			g.enforced = false
+		} else if err := ensureGeoChain(); err != nil {
+			log.Printf("[geoblock] %v — country blocks NOT enforced", err)
+			g.enforced = false
+		} else if err := rebuildGeoChain(g.protectedIPs, exemptOK, g.exemptPorts, sets); err != nil {
+			log.Printf("[geoblock] %v — country blocks NOT enforced", err)
+			g.enforced = false
+		} else {
+			g.enforced = true
+		}
+		if len(sets) == 0 {
+			g.enforced = false
+		}
 	} else {
-		g.enforced = true
-	}
-	if len(sets) == 0 {
-		g.enforced = false
+		if len(g.exemptCIDRs) > 0 || len(g.exemptPorts) > 0 {
+			log.Printf("[geoblock] WARNING: %d exempt CIDRs / %d exempt ports configured but the %s backend has no exemption mechanism yet — crawlers/CDNs in a blocked country WILL be blocked", len(g.exemptCIDRs), len(g.exemptPorts), b.Name())
+		}
+		enforcedCount := 0
+		for cc := range desired {
+			if g.activeCountries[cc] {
+				enforcedCount++
+			}
+		}
+		g.enforced = enforcedCount > 0 && enforcedCount == len(desired)
 	}
 
 	// Destroy sets for countries that are no longer blocked
