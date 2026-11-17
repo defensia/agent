@@ -123,3 +123,47 @@ func TestIsNftNotFound(t *testing.T) {
 		t.Fatalf("want false for an unrelated error")
 	}
 }
+
+// TestParseNftRealAlma10Fixtures parses real `nft -j` output captured from
+// alma10-noiptables (plan 17-06, LAB_CAPTURE_NFT_FIXTURES=1) — proof that
+// the hand-written fixtures elsewhere in this package match what a real
+// nftables v1.1.5 kernel actually emits, not just what we assumed it would.
+func TestParseNftRealAlma10Fixtures(t *testing.T) {
+	t.Run("set_bans4.json: mixed permanent and timed elements", func(t *testing.T) {
+		got, err := parseNftSetElements(readTestdata(t, "real-alma10/set_bans4.json"))
+		if err != nil {
+			t.Fatalf("parseNftSetElements: %v", err)
+		}
+		want := []string{"198.51.100.10", "198.51.100.201", "198.51.100.202", "198.51.100.203"}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("index %d: got %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("set_geo_zy.json: three adjacent /24s auto-merged into one range", func(t *testing.T) {
+		got, err := parseNftSetElements(readTestdata(t, "real-alma10/set_geo_zy.json"))
+		if err != nil {
+			t.Fatalf("parseNftSetElements: %v", err)
+		}
+		want := []string{"192.0.2.0-192.0.4.255"}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("got %v, want %v (auto-merge should have coalesced 192.0.2.0/24 + 192.0.3.0/24 + 192.0.4.0/24)", got, want)
+		}
+	})
+
+	t.Run("chain_rules.json: one portrules rule", func(t *testing.T) {
+		got, err := parseNftChainRules(readTestdata(t, "real-alma10/chain_rules.json"))
+		if err != nil {
+			t.Fatalf("parseNftChainRules: %v", err)
+		}
+		want := []nftRuleRef{{Handle: 32, Comment: "defensia-rule:block:tcp:-:18099"}}
+		if len(got) != len(want) || got[0] != want[0] {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+}
