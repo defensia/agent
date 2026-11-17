@@ -41,15 +41,16 @@ type Backend interface {
 	EnsureAccept(ips []string) error // protected IPs, evaluated before bans/geo
 }
 
-// backendOrder is the detection order. Plan 17-04 inserts "nftables" between
-// ipset and iptables.
-var backendOrder = []string{"ipset", "iptables"}
+// backendOrder is the detection order.
+var backendOrder = []string{"ipset", "nftables", "iptables"}
 
 // newBackend returns the Backend implementation for name, or nil if unknown.
 func newBackend(name string) Backend {
 	switch name {
 	case "ipset":
 		return ipsetBackend{}
+	case "nftables":
+		return nftSingleton
 	case "iptables":
 		return iptablesBackend{}
 	default:

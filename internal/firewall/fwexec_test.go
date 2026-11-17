@@ -74,11 +74,13 @@ func withFakeFW(t *testing.T, bins []string, fn func(c fakeCall) ([]byte, error)
 	fwRun = f.run
 	fwLookPath = f.lookPath
 	resetBackendState()
+	resetNftForTest()
 
 	t.Cleanup(func() {
 		fwRun = origRun
 		fwLookPath = origLookPath
 		resetBackendState()
+		resetNftForTest()
 	})
 
 	return f

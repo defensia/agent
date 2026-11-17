@@ -11,12 +11,13 @@ import (
 
 // nftables table/chain layout constants. Phase 17 NFT-02/NFT-04: the agent
 // owns exactly one table (inet defensia) and never touches any other table
-// or chain — coexistence with firewalld/CSF/other iptables-nft rules depends
-// on this. The agent NEVER issues `nft flush ruleset`.
+// or chain — coexistence with other packet-filtering stacks (firewall
+// daemons, CSF's own iptables-nft rules) depends on this. The agent never
+// clears the entire kernel ruleset in one command.
 const (
 	nftFamily        = "inet"
 	nftTable         = "defensia"
-	nftInputPriority = -10 // before iptables-nft filter (0) and firewalld; a drop anywhere is final, same constraint iptables already had
+	nftInputPriority = -10 // before iptables-nft filter (0) and other firewall daemons' hooks; a drop anywhere is final, same constraint iptables already had
 	nftBanSetSize    = 65536
 	nftMinVersion    = "1.0.0" // below this, Probe() fails and detection falls through to iptables
 	nftChunk         = 1000    // elements per `add element` statement, to keep any single line bounded
@@ -297,11 +298,11 @@ func filterGeoCIDRs(cidrs []string) []string {
 	return out
 }
 
-// nftGeoReplaceScript builds the atomic country-set replace transaction:
-// create (idempotent) + flush + repopulate, optionally followed by the one
-// DROP rule that references the set. addRule=false is used when the rule
-// already exists (idempotent ApplyRule-style check done by the caller).
-func nftGeoReplaceScript(cc string, cidrs []string, addRule bool) (string, error) {
+// nftGeoSetupScript builds only the create+flush lines for a country set —
+// the first half of the two-step fallback backend_nft.go uses when the
+// atomic script in nftGeoReplaceScript fails with an "interval"/"conflicting"
+// kernel error (the set has incompatible interval state mid-transaction).
+func nftGeoSetupScript(cc string) (string, error) {
 	setName, err := nftGeoSetName(cc)
 	if err != nil {
 		return "", err
@@ -309,6 +310,17 @@ func nftGeoReplaceScript(cc string, cidrs []string, addRule bool) (string, error
 	var b strings.Builder
 	fmt.Fprintf(&b, "add set %s %s %s { type ipv4_addr; flags interval; auto-merge; }\n", nftFamily, nftTable, setName)
 	fmt.Fprintf(&b, "flush set %s %s %s\n", nftFamily, nftTable, setName)
+	return b.String(), nil
+}
+
+// nftGeoElementsScript builds only the element (and optional rule) lines for
+// a country set — the second half of the two-step fallback.
+func nftGeoElementsScript(cc string, cidrs []string, addRule bool) (string, error) {
+	setName, err := nftGeoSetName(cc)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
 	for i := 0; i < len(cidrs); i += nftChunk {
 		end := i + nftChunk
 		if end > len(cidrs) {
@@ -320,6 +332,25 @@ func nftGeoReplaceScript(cc string, cidrs []string, addRule bool) (string, error
 		fmt.Fprintf(&b, `add rule %s %s geo ip saddr @%s drop comment "%s%s"`+"\n", nftFamily, nftTable, setName, nftGeoKeyPrefix, strings.ToLower(cc))
 	}
 	return b.String(), nil
+}
+
+// nftGeoReplaceScript builds the atomic country-set replace transaction:
+// create (idempotent) + flush + repopulate, optionally followed by the one
+// DROP rule that references the set. addRule=false is used when the rule
+// already exists (idempotent ApplyRule-style check done by the caller).
+// It is exactly nftGeoSetupScript + nftGeoElementsScript concatenated — kept
+// as one atomic `nft -f -` transaction in the common case; backend_nft.go
+// falls back to issuing the two halves separately only on error.
+func nftGeoReplaceScript(cc string, cidrs []string, addRule bool) (string, error) {
+	setup, err := nftGeoSetupScript(cc)
+	if err != nil {
+		return "", err
+	}
+	elems, err := nftGeoElementsScript(cc, cidrs, addRule)
+	if err != nil {
+		return "", err
+	}
+	return setup + elems, nil
 }
 
 // nftGeoRemoveScript deletes the country's DROP rule (if handle != 0) and its
