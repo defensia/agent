@@ -224,6 +224,114 @@ func TestLabNftBanExpiry(t *testing.T) {
 	}
 }
 
+// nftElementTimeout reads one set element's current `timeout` (seconds) via
+// `nft -j list set`. Returns (0, false) if the element is not present.
+func nftElementTimeout(t *testing.T, set, ip string) (int, bool) {
+	t.Helper()
+	out, err := sh(t, "nft", "-j", "list", "set", "inet", "defensia", set)
+	if err != nil {
+		t.Fatalf("nft -j list set inet defensia %s: %v", set, err)
+	}
+	var top struct {
+		Nftables []struct {
+			Set *struct {
+				Elem []json.RawMessage `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(out), &top); err != nil {
+		t.Fatalf("parse %s JSON: %v", set, err)
+	}
+	for _, entry := range top.Nftables {
+		if entry.Set == nil {
+			continue
+		}
+		for _, raw := range entry.Set.Elem {
+			var obj struct {
+				Elem struct {
+					Val     string `json:"val"`
+					Timeout int    `json:"timeout"`
+				} `json:"elem"`
+			}
+			if err := json.Unmarshal(raw, &obj); err == nil && obj.Elem.Val == ip {
+				return obj.Elem.Timeout, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// TestLabNftBanReAddRefreshesTTL settles phase 17's independent review
+// WARN-05 (2026-11-18): "`add element` never *updates* an element already
+// present... I could not settle [whether a duplicate aborts the whole
+// chunk] from the repo, and nothing in it tries to." The self-heal design
+// documented in 17-RESEARCH.md depends on `BanBatch` tolerating (and
+// ideally refreshing) a re-add of an IP the panel already has banned with
+// an older TTL — e.g. after the ban-escalation 24h -> 7d bump, or after a
+// restart re-syncs the full ban list. This proves it against the real
+// kernel instead of assuming: a mixed batch (one already-present IP with a
+// new, longer TTL, plus two brand-new IPs) in the exact same ApplyBanEntries
+// call that production code uses.
+func TestLabNftBanReAddRefreshesTTL(t *testing.T) {
+	if !nftApplicable(t) {
+		return
+	}
+	firewall.CleanupStaleBans(map[string]bool{}, nil)
+
+	existing := "198.51.100.254"
+	fresh1 := "198.51.100.246"
+	fresh2 := "198.51.100.247"
+
+	if applied := firewall.ApplyBanEntries([]firewall.BanEntry{{IP: existing, TTL: 5 * time.Second}}); applied != 1 {
+		t.Fatalf("first ApplyBanEntries(%s, 5s) applied=%d, want 1", existing, applied)
+	}
+	before, ok := nftElementTimeout(t, "bans4", existing)
+	if !ok {
+		t.Fatalf("%s not found in bans4 right after the first ApplyBanEntries", existing)
+	}
+	if before < 1 || before > 5 {
+		t.Fatalf("%s initial timeout = %d, want 1-5 (just set to 5s)", existing, before)
+	}
+
+	// The batch that matters: existing + new TTL, alongside two IPs that
+	// have never been banned, all three in one BanBatch/nft -f - transaction
+	// — exactly the shape a panel sync produces after a TTL escalation.
+	batch := []firewall.BanEntry{
+		{IP: existing, TTL: 600 * time.Second},
+		{IP: fresh1, TTL: 600 * time.Second},
+		{IP: fresh2, TTL: 600 * time.Second},
+	}
+	if applied := firewall.ApplyBanEntries(batch); applied != 3 {
+		t.Fatalf("second ApplyBanEntries (existing + 2 new, mixed TTLs) applied=%d, want 3 — "+
+			"a duplicate element must not abort the whole nft transaction", applied)
+	}
+
+	after, ok := nftElementTimeout(t, "bans4", existing)
+	if !ok {
+		t.Fatalf("%s missing from bans4 after the re-add batch", existing)
+	}
+	if after <= before {
+		t.Fatalf("%s timeout after re-add = %d, want > %d (the panel's longer TTL should have been re-armed, not left at the original ~5s)", existing, after, before)
+	}
+	if after < 500 {
+		t.Fatalf("%s timeout after re-add = %d, want close to 600 (the new TTL)", existing, after)
+	}
+
+	for _, ip := range []string{fresh1, fresh2} {
+		tt, ok := nftElementTimeout(t, "bans4", ip)
+		if !ok {
+			t.Fatalf("%s (brand-new in the same batch as a duplicate) never reached the kernel", ip)
+		}
+		if tt < 500 {
+			t.Fatalf("%s timeout = %d, want close to 600", ip, tt)
+		}
+	}
+
+	if removed := firewall.CleanupStaleBans(map[string]bool{}, nil); removed != 3 {
+		t.Fatalf("cleanup removed=%d, want 3", removed)
+	}
+}
+
 func TestLabNftBatchAndCleanup(t *testing.T) {
 	if !nftApplicable(t) {
 		return
