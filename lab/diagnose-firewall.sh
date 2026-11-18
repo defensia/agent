@@ -190,14 +190,33 @@ watcher_ban_check() {
 }
 
 # --- geoblock_check VM AGENT_ID -> "VERDICT" -------------------------------
+# Kernel evidence must look for the COUNTRY set, never for the backend's own
+# always-present table/chain (REVIEW.md WARN-01, 2026-11-18): nftBackend's
+# Ensure() creates the `inet defensia` table and its `geo` CHAIN on every
+# nftables host regardless of whether any country is actually blocked
+# (nft_script.go's nftEnsureScript), so `nft list tables | grep defensia`
+# is true unconditionally and can never return SILENT/REPORTED on an
+# nftables VM - it was measuring backend selection, not geoblocking. The
+# per-country SET (`geo_<cc>`, nft_script.go's nftGeoReplaceScript) is only
+# ever created when a country is actually configured, which is the nftables
+# equivalent of the ipset branch's `defensia-geo-<cc>` set check below.
 geoblock_check() {
-  local vm=$1 agent_id=$2 kernel_evidence panel_evidence tmp
+  local vm=$1 agent_id=$2 fw_mode kernel_evidence panel_evidence tmp
+
+  fw_mode="$(vm_fw_mode "$vm")"
 
   panel_tinker "\$a = App\\Models\\Agent::find($agent_id); \$a->blocked_countries = ['CN']; \$a->save();" >/dev/null 2>&1
   vm_root "$vm" systemctl restart defensia-agent >/dev/null 2>&1
   sleep 60
 
-  kernel_evidence="$(vm_root "$vm" sh -c "ipset list -n 2>/dev/null | grep defensia-geo; nft list tables 2>/dev/null | grep defensia")"
+  case "$fw_mode" in
+    nftables)
+      kernel_evidence="$(vm_root "$vm" sh -c "nft list sets inet defensia 2>/dev/null | grep 'set geo_'")"
+      ;;
+    *)
+      kernel_evidence="$(vm_root "$vm" sh -c "ipset list -n 2>/dev/null | grep defensia-geo")"
+      ;;
+  esac
 
   tmp="$(mktemp)"
   panel_get "/api/v1/events?server_id=$agent_id&type=firewall_unavailable&since=1%20hour&per_page=100" >"$tmp" 2>/dev/null
