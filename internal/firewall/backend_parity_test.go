@@ -416,6 +416,100 @@ func TestGeoBlockerUnsupportedReportsUnapplied(t *testing.T) {
 	})
 }
 
+// TestGeoBlockerNftExemptionsUnsupportedRefusesToEnforce covers phase 17's
+// independent review WARN-03 (2026-11-18): the nftables backend has no CIDR
+// or port exemption mechanism yet, so blocking a country while exemptions
+// are configured would silently drop Googlebot/CDN/mail traffic the
+// customer explicitly exempted. The ipset branch already refuses to enforce
+// in the equivalent situation (see TestGeoBlockerUnsupportedReportsUnapplied
+// and ApplyCountryBlocks' own "lesser harm" comment) — this proves the
+// nftables branch now makes the same decision instead of reporting
+// enforced=true over a half-honored config.
+func TestGeoBlockerNftExemptionsUnsupportedRefusesToEnforce(t *testing.T) {
+	fakeGeoChain(t)
+	resetNftForTest()
+
+	t.Run("exempt CIDR configured: country NOT enforced, nothing loaded at the kernel", func(t *testing.T) {
+		f := withFakeFW(t, []string{"nft"}, nftVersionOKFn(nil))
+		if got := Reselect(); got != "nftables" {
+			t.Fatalf("Reselect() = %q, want nftables", got)
+		}
+
+		gb := NewGeoBlocker(func(cc string) ([]string, error) {
+			t.Fatalf("cidrProvider must not be called: exemptions make this country unenforceable before any CIDR lookup")
+			return nil, nil
+		}, "")
+		gb.SetExemptions([]string{"66.249.64.0/19"}, nil) // Googlebot
+
+		before := len(f.Calls())
+		gb.ApplyCountryBlocks([]string{"CN"})
+
+		for _, c := range f.Calls()[before:] {
+			if c.Name == "nft" {
+				t.Fatalf("ApplyCountryBlocks issued an nft call (%v) while exemptions are unsupported — nothing should reach the kernel", c.Argv())
+			}
+		}
+
+		enforced, n := gb.Enforced()
+		if enforced || n != 0 {
+			t.Fatalf("Enforced() = (%v, %d), want (false, 0)", enforced, n)
+		}
+		unapplied, reason := gb.Unapplied()
+		if unapplied != 1 {
+			t.Fatalf("Unapplied() count = %d, want 1", unapplied)
+		}
+		if !strings.Contains(reason, "nftables") || !strings.Contains(reason, "exemption") {
+			t.Fatalf("Unapplied() reason = %q, want it to mention nftables and exemption", reason)
+		}
+	})
+
+	t.Run("exempt port configured, no CIDR exemptions: same refusal", func(t *testing.T) {
+		resetNftForTest()
+		withFakeFW(t, []string{"nft"}, nftVersionOKFn(nil))
+		Reselect()
+
+		gb := NewGeoBlocker(func(cc string) ([]string, error) {
+			t.Fatalf("cidrProvider must not be called")
+			return nil, nil
+		}, "")
+		gb.SetExemptions(nil, []int{25}) // inbound mail
+
+		gb.ApplyCountryBlocks([]string{"CN"})
+		if enforced, _ := gb.Enforced(); enforced {
+			t.Fatalf("Enforced() = true, want false with a port exemption configured")
+		}
+	})
+
+	t.Run("no exemptions configured: nftables enforces normally (unchanged behaviour)", func(t *testing.T) {
+		resetNftForTest()
+		f := withFakeFW(t, []string{"nft"}, nftVersionOKFn(func(c fakeCall) ([]byte, error) {
+			if c.Name == "nft" && len(c.Args) >= 3 && c.Args[0] == "-j" && c.Args[1] == "-a" {
+				return []byte(`{"nftables":[{"metainfo":{"version":"1.0.6"}}]}`), nil
+			}
+			return []byte{}, nil
+		}))
+		Reselect()
+
+		gb := NewGeoBlocker(func(cc string) ([]string, error) {
+			return []string{"1.0.0.0/24"}, nil
+		}, "")
+
+		gb.ApplyCountryBlocks([]string{"CN"})
+		if enforced, n := gb.Enforced(); !enforced || n != 1 {
+			t.Fatalf("Enforced() = (%v, %d), want (true, 1) with no exemptions configured", enforced, n)
+		}
+		foundLoad := false
+		for _, c := range f.Calls() {
+			if c.Name == "nft" && (strings.Contains(c.Argv(), "geo_cn") || strings.Contains(c.Stdin, "geo_cn")) {
+				foundLoad = true
+			}
+		}
+		if !foundLoad {
+			t.Fatalf("no nft call referenced geo_cn (argv or stdin) — the country was never actually loaded")
+		}
+	})
+}
+
 func TestGeoBlockerReappliesAfterGeneration(t *testing.T) {
 	fakeGeoChain(t)
 	f := withFakeFW(t, []string{"ipset", "iptables"}, nil)

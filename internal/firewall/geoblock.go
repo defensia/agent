@@ -105,6 +105,29 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 		return
 	}
 
+	// nftables (and any future GeoSupported backend without an exemption
+	// mechanism) has no way to exempt a CIDR or a port from a country block
+	// yet: nft_script.go's geo DROP rule is unconditional
+	// (`ip saddr @geo_xx drop`), unlike the ipset branch below, whose
+	// DEFENSIA-GEO iptables chain already refuses to enforce rather than
+	// cut off a customer's configured exemptions (crawlers, CDN edges,
+	// mail ports) when the exemption set itself fails to sync. Mirror that
+	// same "lesser harm" decision here instead of silently blocking with
+	// the exemptions ignored (phase 17 independent review, WARN-03,
+	// 2026-11-18): treat every desired country as unenforceable — same
+	// outcome as if nothing were configured to block — until the backend
+	// can actually honor the configured exemptions.
+	if b.Name() != "ipset" && len(desired) > 0 && (len(g.exemptCIDRs) > 0 || len(g.exemptPorts) > 0) {
+		log.Printf("[geoblock] WARNING: %d exempt CIDRs / %d exempt ports configured but the %s backend has no exemption mechanism yet — country blocks NOT enforced (enforcing anyway would also block the configured exemptions: crawlers/CDN/mail)", len(g.exemptCIDRs), len(g.exemptPorts), b.Name())
+		for cc := range g.activeCountries {
+			g.removeCountry(b, cc)
+		}
+		g.enforced = false
+		g.unapplied = len(desired)
+		g.unappliedReason = fmt.Sprintf("%s backend has no exemption mechanism for the configured CIDR/port exemptions", b.Name())
+		return
+	}
+
 	g.unapplied = 0
 	g.unappliedReason = ""
 
@@ -159,9 +182,9 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 			g.enforced = false
 		}
 	} else {
-		if len(g.exemptCIDRs) > 0 || len(g.exemptPorts) > 0 {
-			log.Printf("[geoblock] WARNING: %d exempt CIDRs / %d exempt ports configured but the %s backend has no exemption mechanism yet — crawlers/CDNs in a blocked country WILL be blocked", len(g.exemptCIDRs), len(g.exemptPorts), b.Name())
-		}
+		// No exemptions configured — the early return above already
+		// handles the case where there are any. Just report whether every
+		// desired country actually loaded at the kernel level.
 		enforcedCount := 0
 		for cc := range desired {
 			if g.activeCountries[cc] {
