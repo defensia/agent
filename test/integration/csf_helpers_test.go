@@ -80,6 +80,23 @@ func snapshotConf(t *testing.T) []byte {
 		if !chainPresent(t) {
 			t.Errorf("snapshotConf cleanup: LOCALINPUT chain missing after restore+restart")
 		}
+		// A test that forces a failed restart (TestLabCSFPortRollback,
+		// TestLabCSFPortRollbackFailed) can leave lfd dead even after
+		// csf.conf is restored and csf -r succeeds again — observed live
+		// in both the OrbStack lab (17-07-SUMMARY.md) and this suite's own
+		// CI container run, and flagged twice now without ever being fixed
+		// (Phase 15's independent review WARN-06; phase 17's independent
+		// review WARN-09, 2026-11-18: "so a lab failure downstream can't be
+		// laundered into 'environmental.'"). Assert it here, unconditionally,
+		// so the next occurrence shows up as a clear test failure at the
+		// point it happened instead of corrupting whichever test runs next.
+		if out, err := sh(t, "systemctl", "is-active", "lfd"); err != nil || out != "active" {
+			t.Errorf("snapshotConf cleanup: lfd is %q (err=%v) after restore+restart, want active — attempting recovery", out, err)
+			sh(t, "rm", "-f", "/etc/csf/csf.error")
+			if out, err := sh(t, "systemctl", "restart", "lfd"); err != nil {
+				t.Errorf("snapshotConf cleanup: systemctl restart lfd failed: %v (%s)", err, out)
+			}
+		}
 	})
 
 	return orig
