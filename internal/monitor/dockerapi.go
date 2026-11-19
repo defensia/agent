@@ -126,6 +126,24 @@ type DockerPort struct {
 	PrivatePort int    `json:"PrivatePort"`
 	PublicPort  int    `json:"PublicPort"`
 	Type        string `json:"Type"`
+
+	// IP is the host address the port is published on, and it was the field this
+	// struct was missing: "0.0.0.0" or "::" means reachable from outside the
+	// machine, "127.0.0.1" means loopback only, and empty means not published at
+	// all. The API has always returned it and we were discarding it, which is the
+	// whole difference between a vulnerable service exposed to the internet and
+	// one that no packet from outside can reach.
+	IP string `json:"IP"`
+}
+
+// Exposed reports whether this mapping publishes the port beyond the host.
+//
+// Loopback is deliberately not exposure: a container published on 127.0.0.1 is
+// reachable only by something already on the machine, and treating that as
+// internet-facing would inflate every finding on a host that fronts its
+// containers with a reverse proxy — which is the normal arrangement.
+func (p DockerPort) Exposed() bool {
+	return p.PublicPort != 0 && (p.IP == "0.0.0.0" || p.IP == "::" || p.IP == "")
 }
 
 // DockerMount represents a bind mount from container inspect.
@@ -137,6 +155,10 @@ type DockerMount struct {
 
 type dockerInspectResult struct {
 	Mounts []DockerMount `json:"Mounts"`
+	State  struct {
+		Pid     int  `json:"Pid"`
+		Running bool `json:"Running"`
+	} `json:"State"`
 }
 
 // ListDockerContainers returns running containers via the Docker socket API.
@@ -227,4 +249,41 @@ func DockerVersion() string {
 		return ""
 	}
 	return v.Version
+}
+
+// ContainerPid returns the host PID of a running container's main process, which
+// is the handle needed to read its filesystem through /proc/<pid>/root.
+//
+// Zero means no answer: the container stopped between listing and inspecting, the
+// socket went away, or the daemon declined. A caller must not treat zero as PID
+// 0 — that would make it read the host's own root and attribute the host's
+// packages to a container.
+func ContainerPid(containerID string) int {
+	sock := findDockerSocket()
+	if sock == "" || containerID == "" {
+		return 0
+	}
+
+	client := dockerHTTPClient(sock)
+
+	resp, err := client.Get("http://docker/containers/" + containerID + "/json")
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+
+	var out dockerInspectResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0
+	}
+
+	if !out.State.Running {
+		return 0
+	}
+
+	return out.State.Pid
 }

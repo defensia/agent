@@ -94,6 +94,22 @@ func IsContainerised() bool {
 	return Root() != selfRoot
 }
 
+// ReadFileIn reads a path relative to an arbitrary root, with the same
+// confinement as ReadFile.
+//
+// Exists for container filesystems, where the root is /proc/<pid>/root of some
+// container rather than of PID 1. The guarantees matter more there, not less: a
+// container image is written by whoever built it, so an absolute symlink inside
+// one is not a hypothetical — and following it would read the agent's own
+// filesystem and report it as the container's contents.
+func ReadFileIn(root, rel string) ([]byte, bool) {
+	if root == "" {
+		return nil, false
+	}
+
+	return readWithin(root, rel)
+}
+
 // ReadFile reads a path relative to the host root, returning false when it
 // cannot be read at all.
 //

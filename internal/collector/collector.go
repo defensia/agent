@@ -72,6 +72,31 @@ type KeySoftware struct {
 	// build, or the changelog may be truncated). See internal/pkgmgr/changelog.go.
 	FixedCVEs []string `json:"fixed_cves,omitempty"`
 
+	// Where this row came from: "host" (or absent, for an agent too old to say)
+	// and "container". Provenance, because a CVE can affect the host and three
+	// containers at once and the remediation differs: patching the host does
+	// nothing for a container, and the panel has to be able to say which one it
+	// is talking about.
+	Source      string `json:"source,omitempty"`
+	SourceName  string `json:"source_name,omitempty"`
+	SourceImage string `json:"source_image,omitempty"`
+
+	// Whether this software is reachable from outside the machine, and on which
+	// ports. A container bound to 127.0.0.1 behind a reverse proxy is not the
+	// same finding as one published on 0.0.0.0, and we used to record neither:
+	// the Docker API returns the bind address on every port and the agent threw
+	// it away.
+	Exposed      bool  `json:"exposed,omitempty"`
+	ExposedPorts []int `json:"exposed_ports,omitempty"`
+
+	// The distribution's own version string, when it is not comparable against
+	// upstream. A Debian backport keeps the upstream number fixed
+	// (1.26.3-3+deb13u2), so comparing it reports a patched build as vulnerable
+	// forever — and inside a container there is no changelog to settle it,
+	// measured. Those rows carry the real version here and leave Version empty,
+	// so the panel can show it and nothing matches on it.
+	DistroVersion string `json:"distro_version,omitempty"`
+
 	// BinaryPath is the file a serving-runtime detection was read from. Only set
 	// for entries resolved from a binary on disk, and purely diagnostic: it is
 	// what lets a detection be audited without asking the customer to inspect
@@ -291,7 +316,7 @@ func collectKeySoftware() []KeySoftware {
 	// machine, since "could not tell" must not render as "nothing installed".
 	if containerisedNode() {
 		if sw, ok := collectNodeSoftware(); ok {
-			return dropUnbackedLSAPI(sw)
+			return append(dropUnbackedLSAPI(sw), collectContainerSoftware()...)
 		}
 	}
 
@@ -314,7 +339,11 @@ func collectKeySoftware() []KeySoftware {
 		}
 	}
 
-	return dropUnbackedLSAPI(withPackageVerdict(result))
+	// Containers are appended after the host rows and never replace them. The
+	// three servers measured on 19 Nov 2026 were three different topologies —
+	// host only, container only, and both at once — so any approach that picks
+	// one is wrong on two of the three.
+	return append(dropUnbackedLSAPI(withPackageVerdict(result)), collectContainerSoftware()...)
 }
 
 // lsphpTreeBinary matches the layout LiteSpeed uses for a real per-branch
