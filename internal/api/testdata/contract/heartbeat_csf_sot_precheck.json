@@ -1,0 +1,22 @@
+{
+  "status": "online",
+  "version": "1.4.95-test",
+  "timestamp": "2026-11-05T10:00:00Z",
+  "zombie_count": 0,
+  "capabilities": [
+    "csf_sot"
+  ],
+  "csf_sot": {
+    "active": false,
+    "problems": [
+      {
+        "reason": "duplicate_key",
+        "detail": "TCP_IN"
+      }
+    ],
+    "generation_seen": 0,
+    "generation_acked": 0,
+    "tokens_acked": {},
+    "drift": []
+  }
+}

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/defensia/agent/internal/csfsotwire"
 )
 
 type Client struct {
@@ -174,30 +176,37 @@ type SystemMetrics struct {
 
 // HeartbeatRequest is sent every 60s.
 type HeartbeatRequest struct {
-	Status             string         `json:"status"`
-	Version            string         `json:"version"`
-	Timestamp          string         `json:"timestamp"`
-	IPAddress          string         `json:"ip_address,omitempty"`
-	ZombieCount        int            `json:"zombie_count"`
-	WebServer          string         `json:"web_server,omitempty"`
-	WebServerVersion   string         `json:"web_server_version,omitempty"`
-	Metrics            *SystemMetrics `json:"metrics,omitempty"`
-	MonitoredDomains   []string       `json:"monitored_domains,omitempty"`
-	MonitoredLogPaths  []string       `json:"monitored_log_paths,omitempty"`
-	FirewallMode       string         `json:"firewall_mode,omitempty"`
+	Status            string         `json:"status"`
+	Version           string         `json:"version"`
+	Timestamp         string         `json:"timestamp"`
+	IPAddress         string         `json:"ip_address,omitempty"`
+	ZombieCount       int            `json:"zombie_count"`
+	WebServer         string         `json:"web_server,omitempty"`
+	WebServerVersion  string         `json:"web_server_version,omitempty"`
+	Metrics           *SystemMetrics `json:"metrics,omitempty"`
+	MonitoredDomains  []string       `json:"monitored_domains,omitempty"`
+	MonitoredLogPaths []string       `json:"monitored_log_paths,omitempty"`
+	FirewallMode      string         `json:"firewall_mode,omitempty"`
 	// Pointers so false and 0 are reported, not dropped: the panel needs to
 	// tell "geoblocking configured but not running" apart from an old agent.
-	GeoIPLoaded       *bool `json:"geoip_loaded,omitempty"`
-	GeoblockEnforced  *bool `json:"geoblock_enforced,omitempty"`
-	GeoblockCountries *int  `json:"geoblock_countries,omitempty"`
-	BanCapacity        int            `json:"ban_capacity,omitempty"`
-	ActiveBans         int            `json:"active_bans,omitempty"`
-	KubernetesInfo     interface{}    `json:"kubernetes_info,omitempty"`
-	YaraInstalled      bool           `json:"yara_installed,omitempty"`
-	ModsecActive       bool              `json:"modsec_active,omitempty"`
-	RequestsAnalyzed   uint64            `json:"requests_analyzed,omitempty"`
-	ListeningServices  []ListeningService `json:"listening_services,omitempty"`
-	Runtime            *RuntimeStats     `json:"runtime,omitempty"`
+	GeoIPLoaded       *bool              `json:"geoip_loaded,omitempty"`
+	GeoblockEnforced  *bool              `json:"geoblock_enforced,omitempty"`
+	GeoblockCountries *int               `json:"geoblock_countries,omitempty"`
+	BanCapacity       int                `json:"ban_capacity,omitempty"`
+	ActiveBans        int                `json:"active_bans,omitempty"`
+	KubernetesInfo    interface{}        `json:"kubernetes_info,omitempty"`
+	YaraInstalled     bool               `json:"yara_installed,omitempty"`
+	ModsecActive      bool               `json:"modsec_active,omitempty"`
+	RequestsAnalyzed  uint64             `json:"requests_analyzed,omitempty"`
+	ListeningServices []ListeningService `json:"listening_services,omitempty"`
+	Runtime           *RuntimeStats      `json:"runtime,omitempty"`
+	// Capabilities is always sent by a 16.1+ agent binary (CONTRACT §2), even
+	// when CSFSot below is nil -- it is how the panel tells "old agent" from
+	// "new agent that just has nothing to report yet" apart.
+	Capabilities []string `json:"capabilities,omitempty"`
+	// CSFSot is the csf_sot heartbeat block (CONTRACT §2): omitted entirely
+	// when CSF is absent or the org's integration is paused.
+	CSFSot *csfsotwire.Report `json:"csf_sot,omitempty"`
 	// CSFHeartbeatFields is embedded as a pointer (not tagged) so
 	// encoding/json promotes its fields to the top level. A nil pointer
 	// means "nothing to report"
@@ -209,14 +218,14 @@ type HeartbeatRequest struct {
 	// installed: a non-nil pointer is always sent (so csf_paused:false is a
 	// real signal, not noise), while nil (integration never touched) omits
 	// the key entirely.
-	CSFPaused           *bool          `json:"csf_paused,omitempty"`
-	ControlPanel        string         `json:"control_panel,omitempty"`
-	ControlPanelVersion string         `json:"control_panel_version,omitempty"`
-	PanelDomains        []string       `json:"panel_domains,omitempty"`
-	FanotifyActive      bool           `json:"fanotify_active,omitempty"`
-	FanotifyPermMode    bool           `json:"fanotify_perm_mode,omitempty"`
-	RtFilesInspected    int64          `json:"rt_files_inspected,omitempty"`
-	RtFilesBlocked      int64          `json:"rt_files_blocked,omitempty"`
+	CSFPaused           *bool    `json:"csf_paused,omitempty"`
+	ControlPanel        string   `json:"control_panel,omitempty"`
+	ControlPanelVersion string   `json:"control_panel_version,omitempty"`
+	PanelDomains        []string `json:"panel_domains,omitempty"`
+	FanotifyActive      bool     `json:"fanotify_active,omitempty"`
+	FanotifyPermMode    bool     `json:"fanotify_perm_mode,omitempty"`
+	RtFilesInspected    int64    `json:"rt_files_inspected,omitempty"`
+	RtFilesBlocked      int64    `json:"rt_files_blocked,omitempty"`
 }
 
 // RuntimeStats reports the agent's own resource usage so we can detect leaks
@@ -240,11 +249,11 @@ type ListeningService struct {
 
 // HeartbeatResponse is the server's reply to a heartbeat.
 type HeartbeatResponse struct {
-	Status              string  `json:"status"`
-	LastSeenAt          string  `json:"last_seen_at"`
-	LatestAgentVersion  *string `json:"latest_agent_version,omitempty"`
+	Status               string  `json:"status"`
+	LastSeenAt           string  `json:"last_seen_at"`
+	LatestAgentVersion   *string `json:"latest_agent_version,omitempty"`
 	AgentDownloadBaseURL *string `json:"agent_download_base_url,omitempty"`
-	K8sDomainLimit      int     `json:"k8s_domain_limit,omitempty"`
+	K8sDomainLimit       int     `json:"k8s_domain_limit,omitempty"`
 
 	// PendingSoftwareAudit carries an audit the panel asked for and we never ran.
 	//
@@ -254,6 +263,11 @@ type HeartbeatResponse struct {
 	// February still being matched against today's advisories. Offering it on the
 	// heartbeat means a request survives being missed.
 	PendingSoftwareAudit *int64 `json:"pending_software_audit,omitempty"`
+
+	// CSFSot is the heartbeat response's sync-trigger hint (CONTRACT §3):
+	// present only when a csf_sot_states row exists at all (mode csf -> just
+	// {"mode":"csf"}).
+	CSFSot *csfsotwire.Hint `json:"csf_sot,omitempty"`
 }
 
 // BanRequest reports a newly banned IP to the server.
@@ -266,7 +280,7 @@ type BanRequest struct {
 
 // AgentUpdateInfo contains version information for auto-updates.
 type AgentUpdateInfo struct {
-	LatestVersion  string `json:"latest_version"`
+	LatestVersion   string `json:"latest_version"`
 	DownloadBaseURL string `json:"download_base_url"`
 }
 
@@ -309,22 +323,22 @@ type DetectionRule struct {
 
 // SyncResponse is the initial state fetched at startup.
 type SyncResponse struct {
-	Config            SyncConfig          `json:"config"`
-	Rules             []Rule              `json:"rules"`
-	Bans              []Ban               `json:"bans"`
-	Whitelists        []WhitelistEntry    `json:"whitelists"`
-	AgentUpdate       *AgentUpdateInfo    `json:"agent_update,omitempty"`
-	DetectionRules    []DetectionRule     `json:"detection_rules"`
-	BotFingerprints   []BotFingerprint    `json:"bot_fingerprints"`
-	WafRules          []WafRule           `json:"waf_rules"`
-	ThreatFeed        []ThreatEntry       `json:"threat_feed"`
-	MalwareAllowlist   []MalwareIgnoreEntry  `json:"malware_allowlist"`
-	MalwareSignatures  []MalwareSyncSignature `json:"malware_signatures"`
-	YaraRules              *YaraRulesSync         `json:"yara_rules,omitempty"`
-	YaraInstallRequested    bool                   `json:"yara_install_requested"`
-	MalwareScanRequested   bool                   `json:"malware_scan_requested"`
-	QuarantinePending      []string               `json:"quarantine_pending"`
-	CSFPortActions         []CSFPortAction        `json:"csf_port_actions"`
+	Config               SyncConfig             `json:"config"`
+	Rules                []Rule                 `json:"rules"`
+	Bans                 []Ban                  `json:"bans"`
+	Whitelists           []WhitelistEntry       `json:"whitelists"`
+	AgentUpdate          *AgentUpdateInfo       `json:"agent_update,omitempty"`
+	DetectionRules       []DetectionRule        `json:"detection_rules"`
+	BotFingerprints      []BotFingerprint       `json:"bot_fingerprints"`
+	WafRules             []WafRule              `json:"waf_rules"`
+	ThreatFeed           []ThreatEntry          `json:"threat_feed"`
+	MalwareAllowlist     []MalwareIgnoreEntry   `json:"malware_allowlist"`
+	MalwareSignatures    []MalwareSyncSignature `json:"malware_signatures"`
+	YaraRules            *YaraRulesSync         `json:"yara_rules,omitempty"`
+	YaraInstallRequested bool                   `json:"yara_install_requested"`
+	MalwareScanRequested bool                   `json:"malware_scan_requested"`
+	QuarantinePending    []string               `json:"quarantine_pending"`
+	CSFPortActions       []CSFPortAction        `json:"csf_port_actions"`
 
 	// CSFIntegrationDisabled is the org-level kill switch (plan 15-04): the
 	// panel always serializes this field (default false), never omits it, so
@@ -371,22 +385,26 @@ type MalwareIgnoreEntry struct {
 }
 
 type SyncConfig struct {
-	Suspended         bool              `json:"suspended"`
-	BFThreshold       int               `json:"bf_threshold"`
-	BFWindow          int               `json:"bf_window"`
-	BFBanDuration     *int              `json:"bf_ban_duration"`
-	MonitorMode       bool              `json:"monitor_mode"`
-	WAFConfig         *WAFConfig        `json:"waf_config"`
-	BlockedCountries  []string          `json:"blocked_countries"`
+	Suspended        bool       `json:"suspended"`
+	BFThreshold      int        `json:"bf_threshold"`
+	BFWindow         int        `json:"bf_window"`
+	BFBanDuration    *int       `json:"bf_ban_duration"`
+	MonitorMode      bool       `json:"monitor_mode"`
+	WAFConfig        *WAFConfig `json:"waf_config"`
+	BlockedCountries []string   `json:"blocked_countries"`
 	// Traffic geoblocking must never drop: CDN edges, search-engine crawlers,
 	// uptime monitors (IPv4 CIDRs), and ports such as mail and, where Let's
 	// Encrypt needs it, 80. Computed by the panel from official IP lists.
-	GeoExemptCIDRs []string `json:"geo_exempt_cidrs"`
-	GeoExemptPorts []int    `json:"geo_exempt_ports"`
-	MonitorConfig     *MonitorConfig    `json:"monitor_config,omitempty"`
+	GeoExemptCIDRs    []string           `json:"geo_exempt_cidrs"`
+	GeoExemptPorts    []int              `json:"geo_exempt_ports"`
+	MonitorConfig     *MonitorConfig     `json:"monitor_config,omitempty"`
 	MalwareScanConfig *MalwareScanConfig `json:"malware_scan_config,omitempty"`
-	SigmaConfig       *SigmaConfig      `json:"sigma_config,omitempty"`
-	SessionConfig     *SessionConfig    `json:"session_config,omitempty"`
+	SigmaConfig       *SigmaConfig       `json:"sigma_config,omitempty"`
+	SessionConfig     *SessionConfig     `json:"session_config,omitempty"`
+	// CSFSot is the config.csf_sot block (CONTRACT §1), sent on every sync.
+	// An absent key (old panel) decodes as nil, which the runtime treats
+	// identically to mode "csf" (not source-of-truth managed).
+	CSFSot *csfsotwire.Config `json:"csf_sot,omitempty"`
 }
 
 // MonitorConfig holds monitoring settings synced from the panel.
@@ -408,13 +426,13 @@ type SessionConfig struct {
 // MalwareScanConfig controls scheduled malware scanning.
 type MalwareScanConfig struct {
 	Enabled             bool     `json:"enabled"`
-	Frequency           string   `json:"frequency"`              // "daily", "weekly", "disabled"
-	Time                string   `json:"time"`                    // "03:00" (HH:MM in server local time)
-	Intensity           string   `json:"intensity"`               // "low", "medium", "high"
-	CustomScanPaths     []string `json:"custom_scan_paths"`       // additional paths to scan (e.g. "/home/*/public_html")
-	ExcludePaths        []string `json:"exclude_paths"`           // paths never to scan, scheduled or realtime
-	FanotifyEnabled     bool     `json:"fanotify_enabled"`        // user toggle: enable/disable real-time monitoring
-	FanotifyPermEnabled bool     `json:"fanotify_perm_enabled"`   // opt-in: allow fanotify to block malicious files
+	Frequency           string   `json:"frequency"`             // "daily", "weekly", "disabled"
+	Time                string   `json:"time"`                  // "03:00" (HH:MM in server local time)
+	Intensity           string   `json:"intensity"`             // "low", "medium", "high"
+	CustomScanPaths     []string `json:"custom_scan_paths"`     // additional paths to scan (e.g. "/home/*/public_html")
+	ExcludePaths        []string `json:"exclude_paths"`         // paths never to scan, scheduled or realtime
+	FanotifyEnabled     bool     `json:"fanotify_enabled"`      // user toggle: enable/disable real-time monitoring
+	FanotifyPermEnabled bool     `json:"fanotify_perm_enabled"` // opt-in: allow fanotify to block malicious files
 }
 
 type WAFConfig struct {
@@ -531,11 +549,11 @@ func (c *Client) SubmitScanResults(req ScanResultRequest) error {
 
 // ImportedRule represents a single iptables rule to import.
 type ImportedRule struct {
-	RawRule   string `json:"raw_rule"`
-	Type      string `json:"type"`
-	Protocol  string `json:"protocol"`
-	Source    string `json:"source,omitempty"`
-	Port      int    `json:"port,omitempty"`
+	RawRule  string `json:"raw_rule"`
+	Type     string `json:"type"`
+	Protocol string `json:"protocol"`
+	Source   string `json:"source,omitempty"`
+	Port     int    `json:"port,omitempty"`
 }
 
 // ImportRulesRequest sends discovered iptables rules to the server.
@@ -645,11 +663,11 @@ func (c *Client) SubmitMalwareScanResults(req MalwareScanResultRequest) error {
 
 // MalwareScanChunkRequest sends results for a single web root (incremental).
 type MalwareScanChunkRequest struct {
-	WebRoot           MalwareScanWebRoot     `json:"web_root"`
-	Findings          []MalwareScanFinding   `json:"findings"`
+	WebRoot           MalwareScanWebRoot      `json:"web_root"`
+	Findings          []MalwareScanFinding    `json:"findings"`
 	FrameworkFindings []MalwareFrameworkIssue `json:"framework_findings"`
-	FilesScanned      int64                  `json:"files_scanned"`
-	FilesSkipped      int64                  `json:"files_skipped"`
+	FilesScanned      int64                   `json:"files_scanned"`
+	FilesSkipped      int64                   `json:"files_skipped"`
 }
 
 type MalwareScanChunkResponse struct {
@@ -668,8 +686,8 @@ func (c *Client) SubmitMalwareScanChunk(req MalwareScanChunkRequest) (*MalwareSc
 
 // MalwareScanCompleteRequest finalizes an incremental scan.
 type MalwareScanCompleteRequest struct {
-	ScanID          int64                `json:"scan_id"`
-	DurationSeconds float64             `json:"duration_seconds"`
+	ScanID          int64                 `json:"scan_id"`
+	DurationSeconds float64               `json:"duration_seconds"`
 	SecurityScore   *MalwareSecurityScore `json:"security_score,omitempty"`
 }
 
