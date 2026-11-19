@@ -87,7 +87,7 @@ func TestApplySotPortsMultiKey(t *testing.T) {
 		t.Errorf("restarts = %d, want exactly 1", restarts)
 	}
 
-	backups, _ := filepath.Glob(filepath.Join(csfBackupDir, "csf.conf.defensia.*"))
+	backups, _ := filepath.Glob(filepath.Join(csfBackupDir, "csf.conf.*"))
 	if len(backups) != 1 {
 		t.Errorf("backup files = %v, want exactly 1", backups)
 	}
@@ -218,9 +218,15 @@ func TestApplySotPortsUnsupportedKey(t *testing.T) {
 func TestApplySotPortsRollback(t *testing.T) {
 	dir := newSotApplyFixture(t)
 
+	var restartCalls int
 	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "-r" {
-			return []byte("*Error*: restart failed\n"), errors.New("exit 1")
+			restartCalls++
+			if restartCalls == 1 {
+				return []byte("*Error*: restart failed\n"), errors.New("exit 1")
+			}
+
+			return []byte("ok\n"), nil // the rollback restart succeeds
 		}
 		if name == "iptables" {
 			return []byte("-N LOCALINPUT\n"), nil
@@ -291,9 +297,13 @@ func TestApplySotListsAddRemove(t *testing.T) {
 	dir := newSotApplyFixture(t)
 	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "198.51.100.9 # defensia:sot\n")
 
+	withSessionIPsFn(t, func(ctx context.Context, sshPorts []int) ([]netip.Addr, error) {
+		return nil, nil // no live SSH sessions -> the allow removal is not blocked
+	})
+
 	var gotArgv [][]string
 	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
-		if name != "csf" {
+		if !strings.HasSuffix(name, "csf") {
 			return nil, errors.New("unexpected binary " + name)
 		}
 		gotArgv = append(gotArgv, append([]string{}, args...))
@@ -333,7 +343,9 @@ func TestApplySotListsAddRemove(t *testing.T) {
 
 func TestApplySotListsForeignProtection(t *testing.T) {
 	dir := newSotApplyFixture(t)
-	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "198.51.100.9 # lab-panel\n203.0.113.5 # lab-admin\n")
+	// 198.51.100.9 has BOTH a tagged line (ours) and a foreign line (someone
+	// else's) for the same IP: csf -ar would remove both indiscriminately.
+	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "198.51.100.9 # defensia:sot\n198.51.100.9 # lab-panel\n")
 	mustWriteFile(t, filepath.Join(dir, "csf.deny"), "203.0.113.5 # abuse\n")
 
 	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
@@ -345,9 +357,10 @@ func TestApplySotListsForeignProtection(t *testing.T) {
 		t.Fatalf("observeSot: %v", err)
 	}
 
-	// (a) remove a value with a foreign line -> foreign_entry_same_ip
+	// (a) remove our own tagged 198.51.100.9, but a foreign line for the
+	// same IP also exists -> foreign_entry_same_ip, nothing runs.
 	desired := obs.Managed
-	desired.Allow = []SotEntry{} // trying to remove 198.51.100.9, but it's foreign
+	desired.Allow = []SotEntry{}
 	result := applySotLists(context.Background(), desired, obs, netip.Addr{})
 	if !hasRefusalReason(result.Refusals, "foreign_entry_same_ip") {
 		t.Errorf("remove-foreign result = %+v, want foreign_entry_same_ip", result)
@@ -374,8 +387,11 @@ func hasRefusalReason(refs []SotRefusal, reason string) bool {
 
 func TestApplySotListsPerEntry(t *testing.T) {
 	dir := newSotApplyFixture(t)
-	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "")
+	mustWriteFile(t, filepath.Join(dir, "csf.deny"), "")
 
+	// Deny-add is guarded against covering a live SSH session IP
+	// (Decision 6); allow-add is not. Use deny entries so the middle one
+	// is genuinely expected to be refused.
 	withSessionIPsFn(t, func(ctx context.Context, sshPorts []int) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("203.0.113.9")}, nil
 	})
@@ -393,7 +409,7 @@ func TestApplySotListsPerEntry(t *testing.T) {
 	}
 
 	desired := obs.Managed
-	desired.Allow = []SotEntry{
+	desired.Deny = []SotEntry{
 		{Value: "203.0.113.5", Comment: "defensia:a"},
 		{Value: "203.0.113.9", Comment: "defensia:b"}, // blocked: a live SSH session peer
 		{Value: "203.0.113.11", Comment: "defensia:c"},
