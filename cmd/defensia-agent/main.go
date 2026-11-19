@@ -24,6 +24,7 @@ import (
 	"github.com/defensia/agent/internal/fim"
 	"github.com/defensia/agent/internal/firewall"
 	"github.com/defensia/agent/internal/geoip"
+	"github.com/defensia/agent/internal/hostroot"
 	"github.com/defensia/agent/internal/kubernetes"
 	"github.com/defensia/agent/internal/malware"
 	"github.com/defensia/agent/internal/modsecurity"
@@ -39,18 +40,18 @@ import (
 var version = "1.4.107"
 
 // Global malware scanner state (initialized in runAgent, used in syncAndApply + runMalwareScan)
-var malwareScanRunning  atomic.Bool
-var malwareScanCancel   atomic.Bool
-var malwareScheduler    *malware.Scheduler
-var malwareAllowList    *malware.AllowList
-var malwareScanner      *malware.Scanner
-var malwareRTWatcher    *malware.RealtimeWatcher
-var malwareFanotify     *malware.FanotifyWatcher
-var yaraScanner         *malware.YaraScanner
-var malwareCustomPaths  []string
-var modsecEngine      *modsecurity.Engine
-var sessionTracker    *session.SessionTracker
-var fimMonitor        *fim.Monitor
+var malwareScanRunning atomic.Bool
+var malwareScanCancel atomic.Bool
+var malwareScheduler *malware.Scheduler
+var malwareAllowList *malware.AllowList
+var malwareScanner *malware.Scanner
+var malwareRTWatcher *malware.RealtimeWatcher
+var malwareFanotify *malware.FanotifyWatcher
+var yaraScanner *malware.YaraScanner
+var malwareCustomPaths []string
+var modsecEngine *modsecurity.Engine
+var sessionTracker *session.SessionTracker
+var fimMonitor *fim.Monitor
 
 // banDurationSecs holds the panel's bf_ban_duration, in seconds, as of the last
 // sync. Zero means the panel left it unset, which is the case for the large
@@ -217,12 +218,12 @@ func runAgent() {
 		}
 
 		details := map[string]string{
-			"source":       "modsecurity",
-			"attack_type":  attackCat,
-			"rule_ids":     strings.Join(ruleIDs, ","),
-			"uri":          entry.URI,
-			"action":       entry.Action,
-			"engine_mode":  entry.EngineMode,
+			"source":      "modsecurity",
+			"attack_type": attackCat,
+			"rule_ids":    strings.Join(ruleIDs, ","),
+			"uri":         entry.URI,
+			"action":      entry.Action,
+			"engine_mode": entry.EngineMode,
 		}
 		if entry.Host != "" {
 			details["domain"] = entry.Host
@@ -971,16 +972,31 @@ func runAgent() {
 				BanCapacity:       fwStatus.Capacity,
 				ActiveBans:        fwStatus.ActiveBans,
 				KubernetesInfo:    collectK8sInfo(k8sClient),
-				YaraInstalled:    func() bool { if yaraScanner != nil { yaraScanner.Recheck() }; return yaraScanner != nil && yaraScanner.IsAvailable() }(),
-				ModsecActive:     modsecEngine.IsActive(),
-				RequestsAnalyzed: reqAnalyzed,
+				YaraInstalled: func() bool {
+					if yaraScanner != nil {
+						yaraScanner.Recheck()
+					}
+					return yaraScanner != nil && yaraScanner.IsAvailable()
+				}(),
+				ModsecActive:        modsecEngine.IsActive(),
+				RequestsAnalyzed:    reqAnalyzed,
 				ControlPanel:        cpName,
 				ControlPanelVersion: cpVersion,
 				PanelDomains:        panelDomains,
 				FanotifyActive:      malwareFanotify != nil,
 				FanotifyPermMode:    malwareFanotify != nil && malwareFanotify.PermMode(),
-				RtFilesInspected:    func() int64 { if malwareFanotify != nil { return malwareFanotify.Stats().FilesInspected }; return 0 }(),
-				RtFilesBlocked:      func() int64 { if malwareFanotify != nil { return malwareFanotify.Stats().FilesBlocked }; return 0 }(),
+				RtFilesInspected: func() int64 {
+					if malwareFanotify != nil {
+						return malwareFanotify.Stats().FilesInspected
+					}
+					return 0
+				}(),
+				RtFilesBlocked: func() int64 {
+					if malwareFanotify != nil {
+						return malwareFanotify.Stats().FilesBlocked
+					}
+					return 0
+				}(),
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -1394,17 +1410,17 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 			if _, err := malware.QuarantineFile(filePath); err != nil {
 				log.Printf("[quarantine] failed to quarantine %s: %v", filePath, err)
 				_ = client.ReportEvents([]api.EventRequest{{
-					Type:     "quarantine_failed",
-					Severity: "warning",
-					Details:  map[string]string{"file": filePath, "error": err.Error()},
+					Type:       "quarantine_failed",
+					Severity:   "warning",
+					Details:    map[string]string{"file": filePath, "error": err.Error()},
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
 				}})
 			} else {
 				log.Printf("[quarantine] moved %s to quarantine", filePath)
 				_ = client.ReportEvents([]api.EventRequest{{
-					Type:     "quarantine_completed",
-					Severity: "info",
-					Details:  map[string]string{"file": filePath},
+					Type:       "quarantine_completed",
+					Severity:   "info",
+					Details:    map[string]string{"file": filePath},
 					OccurredAt: time.Now().UTC().Format(time.RFC3339),
 				}})
 			}
@@ -1558,11 +1574,11 @@ func importExistingRules(client *api.Client) {
 	imported := make([]api.ImportedRule, len(rules))
 	for i, r := range rules {
 		imported[i] = api.ImportedRule{
-			RawRule:   r.RawRule,
-			Type:      r.Type,
-			Protocol:  r.Protocol,
-			Source:    r.Source,
-			Port:      r.Port,
+			RawRule:  r.RawRule,
+			Type:     r.Type,
+			Protocol: r.Protocol,
+			Source:   r.Source,
+			Port:     r.Port,
 		}
 	}
 
@@ -1692,9 +1708,22 @@ type osInfo struct {
 	version string
 }
 
+// detectOS reports the operating system of the machine being monitored, which is
+// not always the one this process is running in.
+//
+// In Kubernetes the agent runs as a DaemonSet, so reading /etc/os-release
+// directly describes its own container image. Every node then reported "alpine
+// 3.20.10" — the agent's base image — and that value is not cosmetic: the panel
+// feeds it to isBackportDistro() when deciding whether a package's version can
+// be compared against upstream, so a Debian node judged as Alpine gets judged by
+// the wrong rules entirely. Measured in production on 19 Nov 2026: eight agents
+// reporting that exact string, and not only Kubernetes ones.
+//
+// hostroot resolves to the node's filesystem when PID 1 belongs to the host, and
+// to "/" otherwise, so a host install is unchanged.
 func detectOS() osInfo {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
+	data, ok := hostroot.ReadFile("etc/os-release")
+	if !ok {
 		return osInfo{name: "linux", version: "unknown"}
 	}
 
@@ -1938,6 +1967,7 @@ func collectPanelDomains(panel string) []string {
 	}
 	return domains
 }
+
 // runZombieMonitor periodically scans for zombie processes and reports events when threshold is exceeded.
 func runZombieMonitor(client *api.Client) {
 	const threshold = 5 // report event when zombies exceed this

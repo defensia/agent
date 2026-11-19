@@ -284,6 +284,17 @@ func withPackageVerdict(sw []KeySoftware) []KeySoftware {
 }
 
 func collectKeySoftware() []KeySoftware {
+	// In a container every detector below reads the agent's own image instead of
+	// the machine it is reporting on, so the node's package database is the only
+	// source that answers for the node. Falls through when there is no database
+	// to read — an RPM or immutable node — rather than reporting an empty
+	// machine, since "could not tell" must not render as "nothing installed".
+	if containerisedNode() {
+		if sw, ok := collectNodeSoftware(); ok {
+			return dropUnbackedLSAPI(sw)
+		}
+	}
+
 	var sw []KeySoftware
 	sw = append(sw, detectKernel())
 	sw = append(sw, detectOpenSSH())
