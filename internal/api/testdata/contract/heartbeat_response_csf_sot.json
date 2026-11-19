@@ -1,0 +1,13 @@
+{
+  "status": "ok",
+  "last_seen_at": "2026-11-05T10:00:00Z",
+  "csf_sot": {
+    "mode": "defensia",
+    "generation": 7,
+    "correction": "warn",
+    "snapshot_requested": false,
+    "revert_token": null,
+    "resume_token": null,
+    "retry_token": null
+  }
+}
