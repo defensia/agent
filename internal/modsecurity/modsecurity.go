@@ -226,6 +226,58 @@ func (e *Engine) IsActive() bool {
 	return detectLiteSpeedModSecurity()
 }
 
+// Mismatch describes a ModSecurity that is loaded and configured correctly but
+// sits in front of a server nobody reaches.
+//
+// Measured on one of our own hosts on 19 Nov 2026, and it explains the fleet-wide
+// silence on its own: Apache had security2_module loaded, SecRuleEngine On,
+// SecRequestBodyAccess On, and our rules included and working — a SQL injection
+// against it returns 403 — while Apache listened on :8080 and :8443 and nginx
+// served the public :80 and :443 with no ModSecurity at all. Everything was
+// right except which door it was guarding.
+//
+// Empty string means no mismatch worth reporting: either the serving server
+// carries the module, or there is nothing to compare.
+func Mismatch(e *Engine) string {
+	serving := webserver.OnPublicPorts()
+	if serving == "" || serving == webserver.ContainerPublished {
+		return ""
+	}
+
+	apache := e != nil && e.IsAvailable()
+	nginx := detectNginxModSecurity()
+	lite := detectLiteSpeedModSecurity()
+
+	return describeMismatch(serving, apache, nginx, lite)
+}
+
+// describeMismatch is Mismatch's wording, separated from the probing so it can
+// be tested without a web server.
+//
+// Naming the server that DOES have the module is the whole point of the message:
+// the customer has already done the work, and telling them "no WAF" would be
+// both wrong and insulting.
+func describeMismatch(serving string, apache, nginx, lite bool) string {
+	if serving == "" || serving == webserver.ContainerPublished {
+		return ""
+	}
+
+	if decideActive(serving, apache, nginx, lite) {
+		return ""
+	}
+
+	switch {
+	case apache && serving != "apache":
+		return "ModSecurity is loaded in Apache, but " + serving + " serves the public ports"
+	case nginx && serving != "nginx":
+		return "ModSecurity is loaded in nginx, but " + serving + " serves the public ports"
+	case lite && serving != "litespeed":
+		return "ModSecurity is loaded in LiteSpeed, but " + serving + " serves the public ports"
+	}
+
+	return ""
+}
+
 // decideActive is IsActive's rule, separated from the probing so it can be
 // tested: OnPublicPorts reads live sockets and cannot be faked in a unit test,
 // but the decision it feeds is the part worth pinning.

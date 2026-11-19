@@ -146,3 +146,43 @@ func TestWhichServerMattersIsTheOneHoldingThePublicPorts(t *testing.T) {
 		}
 	}
 }
+
+// Mismatch is the finding worth telling a customer about: they already did the
+// work, and it is guarding the wrong door. Our own server is the case —
+// everything about its ModSecurity is correct except which port it sits in
+// front of.
+func TestMismatchNamesTheServerThatHasTheModule(t *testing.T) {
+	cases := []struct {
+		serving string
+		apache  bool
+		nginx   bool
+		lite    bool
+		want    string
+	}{
+		{"nginx", true, false, false, "ModSecurity is loaded in Apache, but nginx serves the public ports"},
+		{"apache", false, true, false, "ModSecurity is loaded in nginx, but apache serves the public ports"},
+		{"nginx", false, false, true, "ModSecurity is loaded in LiteSpeed, but nginx serves the public ports"},
+		// No mismatch: the serving server has it.
+		{"nginx", false, true, false, ""},
+		{"apache", true, false, false, ""},
+		// Nothing has it: that is "no WAF", not a misplaced one, and the
+		// existing no-logs path already covers telling them.
+		{"nginx", false, false, false, ""},
+	}
+
+	for _, c := range cases {
+		got := describeMismatch(c.serving, c.apache, c.nginx, c.lite)
+		if got != c.want {
+			t.Errorf("serving=%s apache=%v nginx=%v lite=%v\n got: %q\nwant: %q",
+				c.serving, c.apache, c.nginx, c.lite, got, c.want)
+		}
+	}
+}
+
+// A container holding the port is not a mismatch we can diagnose: the module
+// would be inside an image we cannot inspect.
+func TestAContainerIsNotReportedAsAMismatch(t *testing.T) {
+	if got := describeMismatch("container", true, true, true); got != "" {
+		t.Errorf("want no mismatch for a container-held port, got %q", got)
+	}
+}
