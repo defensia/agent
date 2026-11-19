@@ -45,8 +45,9 @@ const (
 
 // conn is a reusable HTTP/2 connection to a CRI socket.
 type conn struct {
-	http     *http.Client
-	endpoint string
+	http      *http.Client
+	transport *http2.Transport
+	endpoint  string
 }
 
 func dial(socket string) *conn {
@@ -61,9 +62,21 @@ func dial(socket string) *conn {
 	}
 
 	return &conn{
-		http:     &http.Client{Transport: transport},
-		endpoint: socket,
+		http:      &http.Client{Transport: transport},
+		transport: transport,
+		endpoint:  socket,
 	}
+}
+
+// close releases the connection to the socket.
+//
+// Required, not tidiness: an HTTP/2 connection stays in the transport's pool
+// with a read goroutine holding it open, so it is not collected when the
+// transport goes out of scope. One leaked unix socket and goroutine per
+// inventory run, on a process that runs for months, is a leak the agent would
+// carry for its whole uptime.
+func (c *conn) close() {
+	c.transport.CloseIdleConnections()
 }
 
 // call makes one unary gRPC call and returns the response message bytes.

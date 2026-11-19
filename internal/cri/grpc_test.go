@@ -45,10 +45,22 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-func (f fakeCRI) start(t *testing.T) string {
+// fakeServer is a running fakeCRI: the socket to dial, and a channel closed
+// when the server side of a connection ends, so a test can assert the client
+// released it.
+type fakeServer struct {
+	socket string
+	ended  chan struct{}
+}
+
+func (f fakeCRI) start(t *testing.T) *fakeServer {
 	t.Helper()
 
-	socket := filepath.Join(shortTempDir(t), "cri.sock")
+	server := &fakeServer{
+		socket: filepath.Join(shortTempDir(t), "cri.sock"),
+		ended:  make(chan struct{}, 8),
+	}
+	socket := server.socket
 
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -56,7 +68,7 @@ func (f fakeCRI) start(t *testing.T) string {
 	}
 	t.Cleanup(func() { listener.Close() })
 
-	server := &http2.Server{}
+	h2 := &http2.Server{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 
@@ -94,11 +106,19 @@ func (f fakeCRI) start(t *testing.T) string {
 			}
 			// Prior-knowledge h2c: the client starts speaking HTTP/2 straight
 			// away, exactly as this package's client does.
-			go server.ServeConn(conn, &http2.ServeConnOpts{Handler: handler})
+			go func() {
+				h2.ServeConn(conn, &http2.ServeConnOpts{Handler: handler})
+				// ServeConn returns when the connection ends, which is how a
+				// test sees that the client closed it.
+				select {
+				case server.ended <- struct{}{}:
+				default:
+				}
+			}()
 		}
 	}()
 
-	return socket
+	return server
 }
 
 // The whole transport, over a real unix socket: if this passes, the hand-rolled
@@ -119,7 +139,7 @@ func TestAUnaryCallRoundTripsOverAUnixSocket(t *testing.T) {
 			gotMethod = method
 			return list, 0, ""
 		},
-	}.start(t)
+	}.start(t).socket
 
 	response, err := dial(socket).call(context.Background(), methodListContainers, encodeListRunningContainers())
 	if err != nil {
@@ -149,7 +169,7 @@ func TestARefusedCallIsAnErrorNotAnEmptyList(t *testing.T) {
 		reply: func(string, []byte) ([]byte, int, string) {
 			return nil, 7, "permission denied" // 7 is PERMISSION_DENIED
 		},
-	}.start(t)
+	}.start(t).socket
 
 	_, err := dial(socket).call(context.Background(), methodListContainers, encodeListRunningContainers())
 	if err == nil {
@@ -168,7 +188,7 @@ func TestAResponseWithoutAGrpcStatusIsAnError(t *testing.T) {
 		reply: func(string, []byte) ([]byte, int, string) {
 			return []byte("hello"), 0, ""
 		},
-	}.start(t)
+	}.start(t).socket
 
 	_, err := dial(socket).call(context.Background(), methodListContainers, encodeListRunningContainers())
 	if err == nil || !strings.Contains(err.Error(), "grpc-status") {

@@ -88,7 +88,9 @@ func Containers(ctx context.Context) ([]Container, error) {
 	}
 
 	started := time.Now()
+
 	c := dial(endpoint)
+	defer c.close()
 
 	response, err := c.call(ctx, methodListContainers, encodeListRunningContainers())
 	if err != nil {
