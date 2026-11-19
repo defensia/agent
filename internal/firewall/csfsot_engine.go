@@ -43,8 +43,6 @@ const (
 	driftSettleCycle = 2
 )
 
-var retryBackoffs = []time.Duration{60 * time.Second, 300 * time.Second, 900 * time.Second}
-
 // SotEngine is the agent-side reconcile engine for everything except
 // the automatic-correction policy (16.1-11 fills maybeAutoCorrect).
 type SotEngine struct {
@@ -64,6 +62,7 @@ type SotEngine struct {
 	lastSnapshotCfgAt   time.Time
 	lastSnapshotRefused bool
 	lastDrift           []csfsotwire.DriftItem
+	lastAuto            autoResult
 }
 
 // NewSotEngine loads any persisted state and returns a ready engine.
@@ -167,7 +166,7 @@ func (e *SotEngine) Cycle(ctx context.Context) []SotEvent {
 		return append(events, e.applyRevert(ctx, cfg, obs)...)
 	}
 
-	events = append(events, e.detectDrift(cfg, obs)...)
+	events = append(events, e.detectDrift(ctx, cfg, obs)...)
 	e.buildSteadyReport(cfg, obs)
 	e.persist()
 
@@ -321,7 +320,7 @@ func (e *SotEngine) applyIntentional(ctx context.Context, cfg *csfsotwire.Config
 	// Retries are exhausted for this generation: stop trying until a new
 	// generation or an explicit retry_token resets the counter (handled
 	// above, in Cycle, when a new retry_token arrives).
-	if e.st.IntentAttempts >= len(retryBackoffs) {
+	if e.st.IntentAttempts >= len(sotTiming().IntentBackoff) {
 		e.buildApplyingReport(cfg)
 		e.persist()
 
@@ -404,12 +403,12 @@ func (e *SotEngine) scheduleRetry(now time.Time) {
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(retryBackoffs) {
+	if idx >= len(sotTiming().IntentBackoff) {
 		e.st.IntentNextAt = time.Time{} // out of retries
 
 		return
 	}
-	next := now.Add(retryBackoffs[idx])
+	next := now.Add(sotTiming().IntentBackoff[idx])
 	e.st.IntentNextAt = next
 }
 
@@ -467,7 +466,7 @@ func (e *SotEngine) applyRevert(ctx context.Context, cfg *csfsotwire.Config, obs
 // warn mode nothing is ever written -- this is report-only. The
 // automatic-correction decision itself is 16.1-11's maybeAutoCorrect
 // hook, called here but a no-op in this plan.
-func (e *SotEngine) detectDrift(cfg *csfsotwire.Config, obs sotObservation) []SotEvent {
+func (e *SotEngine) detectDrift(ctx context.Context, cfg *csfsotwire.Config, obs sotObservation) []SotEvent {
 	var events []SotEvent
 
 	desired := csfsotwire.Managed{}
@@ -494,6 +493,12 @@ func (e *SotEngine) detectDrift(cfg *csfsotwire.Config, obs sotObservation) []So
 		drift[i].Hint = e.driftHint(obs)
 	}
 
+	// Record this cycle's IPv6 scope so the NEXT cycle's driftHint can
+	// tell "just toggled" (scope_changed, this cycle) from "already
+	// toggled a while ago" (settles back to a normal hint).
+	ipv6Now := obs.IPv6
+	e.st.LastIPv6 = &ipv6Now
+
 	// Garbage-collect bookkeeping for keys no longer drifting.
 	present := map[string]bool{}
 	for _, d := range drift {
@@ -516,7 +521,9 @@ func (e *SotEngine) detectDrift(cfg *csfsotwire.Config, obs sotObservation) []So
 	}
 	e.st.DriftReported = nowDrifting
 
-	e.maybeAutoCorrect(context.Background(), cfg, obs, drift)
+	autoRes := e.maybeAutoCorrect(ctx, cfg, obs, drift)
+	events = append(events, autoRes.Events...)
+	e.lastAuto = autoRes
 
 	e.lastDrift = drift
 
@@ -545,24 +552,23 @@ func (e *SotEngine) driftHint(obs sotObservation) string {
 	return "default"
 }
 
-// maybeAutoCorrect is the automatic-correction policy hook (settle
-// timing, rate limiting, paused_conflict escalation). A no-op in this
-// plan -- 16.1-11 implements it.
-func (e *SotEngine) maybeAutoCorrect(ctx context.Context, cfg *csfsotwire.Config, obs sotObservation, drift []csfsotwire.DriftItem) bool {
-	return false
-}
-
 // buildSteadyReport builds the heartbeat report for the normal
-// (non-applying, non-snapshot) path.
+// (non-applying, non-snapshot) path, folding in maybeAutoCorrect's
+// result (status override, hold reason, resume-token echo, refusals).
 func (e *SotEngine) buildSteadyReport(cfg *csfsotwire.Config, obs sotObservation) {
 	desired := csfsotwire.Managed{}
 	if cfg.Desired != nil {
 		desired = *cfg.Desired
 	}
 
+	auto := e.lastAuto
+
 	status := "in_sync"
 	if len(e.lastDrift) > 0 {
 		status = "drift"
+	}
+	if auto.StatusOverride != "" {
+		status = auto.StatusOverride
 	}
 
 	r := &csfsotwire.Report{
@@ -572,7 +578,20 @@ func (e *SotEngine) buildSteadyReport(cfg *csfsotwire.Config, obs sotObservation
 		Drift: capDrift(e.lastDrift, 50),
 		IPv6:  obs.IPv6, ManagedKeys: obs.ManagedKeys, TaggedEntriesCount: len(obs.Managed.Allow) + len(obs.Managed.Deny),
 		SSHPorts: nil, TestingMode: obs.Testing,
-		Refused: capRefusals(e.st.Refused, 10), Error: e.st.LastError,
+		Refused: capRefusals(append(append([]csfsotwire.Refusal{}, e.st.Refused...), auto.Refused...), 10), Error: e.st.LastError,
+	}
+
+	if cfg.Correction == "auto" {
+		var holdReasonPtr *string
+		if auto.HoldReason != "" {
+			hr := auto.HoldReason
+			holdReasonPtr = &hr
+		}
+		r.Auto = &csfsotwire.AutoInfo{FixesInWindow: auto.FixesInWindow, NextAt: auto.NextAt, HoldReason: holdReasonPtr}
+	}
+
+	if auto.ResumeTokenEcho != nil {
+		r.TokensAcked.Resume = auto.ResumeTokenEcho
 	}
 
 	if status == "in_sync" {
