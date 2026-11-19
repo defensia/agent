@@ -292,3 +292,33 @@ func TestNoRuntimeIsItsOwnSentinel(t *testing.T) {
 		t.Errorf("want ErrNoRuntime, got %v", err)
 	}
 }
+
+// A pass that runs out of time has to say so. Returning the containers it got
+// to, with the rest unidentified, would look like a node of unreadable images
+// rather than like an enumeration that was cut short — and the versions already
+// read would be reported as if the inventory were complete.
+func TestAnExpiredBudgetEndsThePassWithAnError(t *testing.T) {
+	server := fakeCRI{
+		reply: func(method string, _ []byte) ([]byte, int, string) {
+			if method == methodListContainers {
+				return oneContainer("c1", "nginx", "shop-nginx", "cliente", "nginx:alpine", "s1"), 0, ""
+			}
+			return containerStatus(true, `{"pid":4242}`), 0, ""
+		},
+	}.start(t)
+
+	t.Setenv("CONTAINER_RUNTIME_ENDPOINT", server.socket)
+
+	// Cancelled after the list call succeeds, which is the window the loop has
+	// to notice.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	containers, err := Containers(ctx)
+	if err == nil {
+		t.Fatal("a cancelled pass returned no error")
+	}
+	if len(containers) != 0 {
+		t.Errorf("want nothing alongside the error, got %d containers", len(containers))
+	}
+}

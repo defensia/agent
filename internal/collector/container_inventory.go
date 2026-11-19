@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/defensia/agent/internal/cri"
 	"github.com/defensia/agent/internal/monitor"
@@ -158,7 +159,16 @@ func dockerContainers() []containerRef {
 // already covers it, and probing both would report every container twice under
 // two different IDs.
 func criContainers() []containerRef {
-	containers, err := cri.Containers(context.Background())
+	// A budget for the whole pass, not just per call. Each RPC is bounded
+	// already, but a node with a hundred containers makes two hundred of them,
+	// and a runtime answering slowly rather than not at all would otherwise
+	// stall the audit for minutes. Measured on the lab cluster: 20 RPCs for 10
+	// containers in 21 ms, so this is three orders of magnitude of headroom and
+	// only bites when something is wrong.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	containers, err := cri.Containers(ctx)
 	if err != nil {
 		if !errors.Is(err, cri.ErrNoRuntime) {
 			// A socket that exists and will not answer is worth a line: it is

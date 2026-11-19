@@ -106,6 +106,15 @@ func Containers(ctx context.Context) ([]Container, error) {
 	sandboxes := make(map[string]sandboxExposure)
 
 	for i := range containers {
+		// An expired budget has to end the pass, not run it out one container at
+		// a time. Carrying on would return every remaining container as
+		// unidentified, which looks like a node of unreadable images rather than
+		// like a pass that ran out of time — and the versions already read would
+		// be reported alongside, as if the inventory were complete.
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("cri: enumeration cut short after %d of %d containers: %w", i, len(containers), err)
+		}
+
 		pid, running, err := c.containerPid(ctx, containers[i].ID)
 		calls++
 		if err != nil {
