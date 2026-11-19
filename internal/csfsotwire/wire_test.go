@@ -24,6 +24,35 @@ func TestManagedEmptyMarshalsToEmptyContainers(t *testing.T) {
 	}
 }
 
+// TestSnapshotRequestEmptyMarshalsToEmptyContainers locks in a real bug
+// found live (phase 16.1, 2026-11-19): a healthy activation (no precheck
+// problems -- the normal case) leaves Problems nil, which without this
+// fix marshaled to a literal JSON `null`. The panel's own validation
+// rule for `problems` (`sometimes`, `array`, no `nullable`) treats a
+// present-but-null field as a validation failure (422), not as
+// "absent" -- so every real activation snapshot was rejected outright
+// and SOT-02 never completed on any VM. ManagedKeys/SSHPorts share the
+// exact same validation shape and are fixed the same way.
+func TestSnapshotRequestEmptyMarshalsToEmptyContainers(t *testing.T) {
+	req := SnapshotRequest{Observed: Managed{Ports: map[string]string{}}, ObservedHash: "deadbeef"}
+
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	got := string(b)
+	if !strings.Contains(got, `"problems":[]`) {
+		t.Errorf("marshal(empty SnapshotRequest) = %s, want problems:[] (not null)", got)
+	}
+	if !strings.Contains(got, `"managed_keys":[]`) {
+		t.Errorf("marshal(empty SnapshotRequest) = %s, want managed_keys:[] (not null)", got)
+	}
+	if !strings.Contains(got, `"ssh_ports":[]`) {
+		t.Errorf("marshal(empty SnapshotRequest) = %s, want ssh_ports:[] (not null)", got)
+	}
+}
+
 func TestDriftItemPortRoundTrip(t *testing.T) {
 	d := DriftItem{
 		Kind:    "port",

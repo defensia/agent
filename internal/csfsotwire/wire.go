@@ -165,6 +165,34 @@ type SnapshotRequest struct {
 	Problems     []Problem `json:"problems"`
 }
 
+// MarshalJSON normalises nil ManagedKeys/SSHPorts/Problems to empty
+// (non-null) arrays before delegating to the default struct marshaling
+// -- the same fix Managed.MarshalJSON already applies above, for the
+// same reason: the panel's validation rules for these three fields
+// (`sometimes`, `array`, no `nullable`) reject an explicit JSON `null`
+// outright with a 422, even though "nothing to report" is the normal,
+// healthy case for every one of them (no precheck problems, IPv6 off
+// with no v6 keys, ssh detection returning nothing). Confirmed live
+// (phase 16.1, 2026-11-19): every real activation snapshot sent `null`
+// for the typically-empty `problems` field and was rejected outright,
+// so SOT-02 activation never completed on any real VM.
+func (r SnapshotRequest) MarshalJSON() ([]byte, error) {
+	type alias SnapshotRequest
+
+	out := alias(r)
+	if out.ManagedKeys == nil {
+		out.ManagedKeys = []string{}
+	}
+	if out.SSHPorts == nil {
+		out.SSHPorts = []int{}
+	}
+	if out.Problems == nil {
+		out.Problems = []Problem{}
+	}
+
+	return json.Marshal(out)
+}
+
 // SnapshotResponse is the panel's reply to a snapshot POST.
 type SnapshotResponse struct {
 	Accepted   bool   `json:"accepted"`
