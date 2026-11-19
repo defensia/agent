@@ -46,6 +46,64 @@ func TestDriftItemPortRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWireConfigDecode(t *testing.T) {
+	var csfMode Config
+	if err := json.Unmarshal([]byte(`{"mode":"csf"}`), &csfMode); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if csfMode.Mode != "csf" || csfMode.Desired != nil {
+		t.Errorf("csf mode = %+v, want Mode=csf Desired=nil", csfMode)
+	}
+
+	active := `{"mode":"defensia","correction":"warn","generation":7,"snapshot_requested":false,
+		"desired":{"ports":{"TCP_IN":"22,80"},"allow":[],"deny":[]},
+		"revert_token":"R1","resume_token":null,"retry_token":"T1","unknown_future_key":123}`
+	var cfg Config
+	if err := json.Unmarshal([]byte(active), &cfg); err != nil {
+		t.Fatalf("unmarshal active: %v", err)
+	}
+	if cfg.Mode != "defensia" || cfg.Correction != "warn" || cfg.Generation != 7 {
+		t.Errorf("active cfg = %+v", cfg)
+	}
+	if cfg.Desired == nil || cfg.Desired.Ports["TCP_IN"] != "22,80" {
+		t.Errorf("active cfg.Desired = %+v", cfg.Desired)
+	}
+	if cfg.RevertToken == nil || *cfg.RevertToken != "R1" {
+		t.Errorf("RevertToken = %v, want R1", cfg.RevertToken)
+	}
+	if cfg.ResumeToken != nil {
+		t.Errorf("ResumeToken = %v, want nil", cfg.ResumeToken)
+	}
+}
+
+func TestWireReportEncode(t *testing.T) {
+	r := Report{
+		Active:          true,
+		GenerationSeen:  3,
+		GenerationAcked: 3,
+		Status:          "in_sync",
+	}
+
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+
+	if !strings.Contains(s, `"drift":[]`) {
+		t.Errorf("marshal(Report{}) = %s, want drift:[]", s)
+	}
+	if strings.Contains(s, `"observed"`) {
+		t.Errorf("marshal(Report{}) = %s, want no observed key (omitempty, nil pointer)", s)
+	}
+	if !strings.Contains(s, `"tokens_acked":{}`) {
+		t.Errorf("marshal(Report{}) = %s, want tokens_acked object present", s)
+	}
+	if !strings.Contains(s, `"status":"in_sync"`) {
+		t.Errorf("marshal(Report{}) = %s, want status in_sync", s)
+	}
+}
+
 func TestProblemAndRefusalShapes(t *testing.T) {
 	p := Problem{Reason: "duplicate_key", Detail: "TCP_IN"}
 	if p.Reason != "duplicate_key" {

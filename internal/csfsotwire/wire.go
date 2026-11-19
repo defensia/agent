@@ -76,3 +76,136 @@ type Refusal struct {
 	At         time.Time `json:"at,omitempty"`
 	Generation uint64    `json:"generation,omitempty"`
 }
+
+// Config is the config.csf_sot block of every sync (CONTRACT §1): what
+// the panel wants the agent to do right now. Mode "csf" (or the type's
+// zero value / a nil *Config at the call site) means "do nothing, this
+// server is not source-of-truth managed".
+type Config struct {
+	Mode              string   `json:"mode"`
+	Correction        string   `json:"correction,omitempty"`
+	Generation        uint64   `json:"generation,omitempty"`
+	SnapshotRequested bool     `json:"snapshot_requested,omitempty"`
+	Desired           *Managed `json:"desired,omitempty"`
+	RevertToken       *string  `json:"revert_token,omitempty"`
+	ResumeToken       *string  `json:"resume_token,omitempty"`
+	RetryToken        *string  `json:"retry_token,omitempty"`
+}
+
+// TokensAcked echoes back, in the heartbeat, exactly which pending
+// token(s) the agent has now acted on (CONTRACT §2).
+type TokensAcked struct {
+	Revert *string `json:"revert,omitempty"`
+	Resume *string `json:"resume,omitempty"`
+	Retry  *string `json:"retry,omitempty"`
+}
+
+// RetryInfo tracks intentional-change retry state (CONTRACT §2/§7).
+type RetryInfo struct {
+	Count  int        `json:"count"`
+	NextAt *time.Time `json:"next_at,omitempty"`
+}
+
+// AutoInfo tracks the automatic-correction rate-limit window (CONTRACT
+// §2/§7); filled in by 16.1-11.
+type AutoInfo struct {
+	FixesInWindow int        `json:"fixes_in_window"`
+	NextAt        *time.Time `json:"next_at,omitempty"`
+	HoldReason    *string    `json:"hold_reason,omitempty"`
+}
+
+// Report is the heartbeat's csf_sot block (CONTRACT §2): everything the
+// panel needs to know about the agent's current reconcile state.
+type Report struct {
+	Active             bool        `json:"active"`
+	Problems           []Problem   `json:"problems,omitempty"`
+	GenerationSeen     uint64      `json:"generation_seen"`
+	GenerationAcked    uint64      `json:"generation_acked"`
+	Status             string      `json:"status,omitempty"`
+	ObservedHash       string      `json:"observed_hash,omitempty"`
+	DesiredHash        string      `json:"desired_hash,omitempty"`
+	TokensAcked        TokensAcked `json:"tokens_acked"`
+	Drift              []DriftItem `json:"drift"`
+	Observed           *Managed    `json:"observed,omitempty"`
+	CSFConfMtime       *time.Time  `json:"csf_conf_mtime,omitempty"`
+	IPv6               bool        `json:"ipv6,omitempty"`
+	ManagedKeys        []string    `json:"managed_keys,omitempty"`
+	TaggedEntriesCount int         `json:"tagged_entries_count,omitempty"`
+	Retry              *RetryInfo  `json:"retry,omitempty"`
+	Auto               *AutoInfo   `json:"auto,omitempty"`
+	Refused            []Refusal   `json:"refused,omitempty"`
+	Error              *Refusal    `json:"error,omitempty"`
+	SSHPorts           []int       `json:"ssh_ports,omitempty"`
+	TestingMode        bool        `json:"testing_mode,omitempty"`
+}
+
+// MarshalJSON normalises a nil Drift to an empty (non-null) array
+// before delegating to the default struct marshaling.
+func (r Report) MarshalJSON() ([]byte, error) {
+	type alias Report
+
+	out := alias(r)
+	if out.Drift == nil {
+		out.Drift = []DriftItem{}
+	}
+
+	return json.Marshal(out)
+}
+
+// SnapshotRequest is the body of POST /api/v1/agent/csf/sot/snapshot
+// (CONTRACT §4): a read-only Observe result.
+type SnapshotRequest struct {
+	Observed     Managed   `json:"observed"`
+	ObservedHash string    `json:"observed_hash"`
+	IPv6         bool      `json:"ipv6"`
+	ManagedKeys  []string  `json:"managed_keys"`
+	SSHPorts     []int     `json:"ssh_ports"`
+	Fork         string    `json:"fork,omitempty"`
+	Version      string    `json:"version,omitempty"`
+	Problems     []Problem `json:"problems"`
+}
+
+// SnapshotResponse is the panel's reply to a snapshot POST.
+type SnapshotResponse struct {
+	Accepted   bool   `json:"accepted"`
+	Generation uint64 `json:"generation,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// Hint is the heartbeat response's csf_sot trigger hint (CONTRACT §3):
+// just the scalars the agent compares against its last-seen Config to
+// decide whether to run a full sync right now.
+type Hint struct {
+	Mode              string  `json:"mode"`
+	Correction        string  `json:"correction,omitempty"`
+	Generation        uint64  `json:"generation,omitempty"`
+	SnapshotRequested bool    `json:"snapshot_requested,omitempty"`
+	RevertToken       *string `json:"revert_token,omitempty"`
+	ResumeToken       *string `json:"resume_token,omitempty"`
+	RetryToken        *string `json:"retry_token,omitempty"`
+}
+
+// Equal reports whether the hint matches what the agent already knows
+// from c (its last-seen Config) -- false means "something changed, run a
+// full sync now". A nil c (no config ever seen) is never equal.
+func (h Hint) Equal(c *Config) bool {
+	if c == nil {
+		return false
+	}
+
+	return h.Mode == c.Mode &&
+		h.Correction == c.Correction &&
+		h.Generation == c.Generation &&
+		h.SnapshotRequested == c.SnapshotRequested &&
+		strPtrEqual(h.RevertToken, c.RevertToken) &&
+		strPtrEqual(h.ResumeToken, c.ResumeToken) &&
+		strPtrEqual(h.RetryToken, c.RetryToken)
+}
+
+func strPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return *a == *b
+}
