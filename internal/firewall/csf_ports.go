@@ -556,6 +556,36 @@ func SafePortChange(ctx context.Context, req PortChangeRequest, opts PortChangeO
 		}
 	}
 
+	updates := map[string]string{}
+	for _, c := range changes {
+		if c.changed {
+			updates[c.key] = c.newVal
+		}
+	}
+
+	// 6-10 (lfd snapshot, backup, atomic write, restart+health-check,
+	// rollback-on-failure) are the locked section shared with the
+	// source-of-truth feature's multi-key apply (phase 16.1-09); extracted
+	// into safeConfUpdate without any behaviour change. csfWriteMu is
+	// already held by this function (deferred Unlock above).
+	result := safeConfUpdate(ctx, updates, origBytes, origInfo, conf, bin)
+	if result.Result == "applied" {
+		result.IPv6Mirrored = mirrorChanged
+	}
+
+	return result
+}
+
+// safeConfUpdate performs the locked steps common to every CSF
+// config-file write this package makes: snapshot lfd's prior state,
+// backup, rewrite+atomic-write the given key updates, restart csf with a
+// health check, and roll back to the original bytes on failure. Callers
+// MUST already hold csfWriteMu and must have already read origBytes/
+// origInfo/conf (so a caller that needs those values for its own
+// validation — like SafePortChange — doesn't pay for a second read).
+func safeConfUpdate(ctx context.Context, updates map[string]string, origBytes []byte, origInfo os.FileInfo, conf map[string]string, bin string) PortChangeResult {
+	testingMode := conf["TESTING"] == "1"
+
 	// 6. Snapshot lfd's state before we touch anything, so the health check
 	// can tell "lfd died because of this restart" from "lfd was never
 	// running in the first place".
@@ -568,13 +598,6 @@ func SafePortChange(ctx context.Context, req PortChangeRequest, opts PortChangeO
 	backupPath, err := backupCSFConf(origBytes)
 	if err != nil {
 		return PortChangeResult{Result: "rejected", Reason: "backup_failed", TestingMode: testingMode, Err: err}
-	}
-
-	updates := map[string]string{}
-	for _, c := range changes {
-		if c.changed {
-			updates[c.key] = c.newVal
-		}
 	}
 
 	// 8. Go-side validated, atomic write.
@@ -601,10 +624,9 @@ func SafePortChange(ctx context.Context, req PortChangeRequest, opts PortChangeO
 	if ok {
 		RequestCSFRefresh()
 		return PortChangeResult{
-			Result:       "applied",
-			Backup:       backupPath,
-			IPv6Mirrored: mirrorChanged,
-			TestingMode:  testingMode,
+			Result:      "applied",
+			Backup:      backupPath,
+			TestingMode: testingMode,
 		}
 	}
 
