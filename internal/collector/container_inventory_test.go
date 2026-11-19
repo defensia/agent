@@ -7,8 +7,22 @@ import (
 	"github.com/defensia/agent/internal/pkgdb"
 )
 
-func container(name, image string, ports ...monitor.DockerPort) monitor.DockerContainer {
-	return monitor.DockerContainer{ID: "deadbeef1234", Names: []string{"/" + name}, Image: image, Ports: ports}
+// container builds the normalised reference the inventory works on, through the
+// Docker conversion, so these cases still exercise how a Docker container's
+// name and published ports are read.
+func container(name, image string, ports ...monitor.DockerPort) containerRef {
+	c := monitor.DockerContainer{ID: "deadbeef1234", Names: []string{"/" + name}, Image: image, Ports: ports}
+	exposed, open := dockerExposure(c)
+
+	return containerRef{
+		ID:           c.ID,
+		Name:         dockerName(c),
+		Image:        image,
+		Pid:          1,
+		Running:      true,
+		Exposed:      exposed,
+		ExposedPorts: open,
+	}
 }
 
 // 0.0.0.0 is reachable from outside the machine. Loopback is not, and treating
@@ -87,6 +101,64 @@ func TestExposedPortsAreUnioned(t *testing.T) {
 	}
 	if len(got[0].ExposedPorts) != 2 {
 		t.Errorf("want both ports kept, got %v", got[0].ExposedPorts)
+	}
+}
+
+// The doctrine the whole inventory rests on: "I do not know" must never come
+// out as "it is fine". A running container the agent could not get a PID for —
+// a runtime that does not report one, a container the runtime declined — is
+// reported as present and unidentified, because a container nobody could look
+// inside must not be indistinguishable from a container that is not there.
+func TestARunningContainerWithNoPidIsReportedRatherThanOmitted(t *testing.T) {
+	rows := inventoryRows([]containerRef{{
+		ID:      "abc123def456",
+		Name:    "cliente/shop-nginx/nginx",
+		Image:   "nginx:1.27-alpine",
+		Pid:     0,
+		Running: true,
+	}})
+
+	if len(rows) != 1 {
+		t.Fatalf("want the container reported, got %d rows", len(rows))
+	}
+	if rows[0].Name != "Unidentified container" {
+		t.Errorf("Name = %q, want Unidentified container", rows[0].Name)
+	}
+	if rows[0].SourceName != "cliente/shop-nginx/nginx" || rows[0].SourceImage != "nginx:1.27-alpine" {
+		t.Errorf("the row must say which pod and image to go and look at: %+v", rows[0])
+	}
+	if rows[0].Version != "-" {
+		t.Errorf("Version = %q: nothing was read, so nothing may be claimed", rows[0].Version)
+	}
+}
+
+// A container that stopped between listing and inspecting is a different case
+// from one we could not read: there is nothing there any more, and reporting a
+// corpse would be a finding about software that is not running.
+func TestAContainerThatIsNoLongerRunningIsDropped(t *testing.T) {
+	rows := inventoryRows([]containerRef{{
+		ID:      "abc123def456",
+		Name:    "cliente/shop-nginx/nginx",
+		Image:   "nginx:1.27-alpine",
+		Pid:     0,
+		Running: false,
+	}})
+
+	if len(rows) != 0 {
+		t.Errorf("want no rows for a stopped container, got %+v", rows)
+	}
+}
+
+// Both enumerators run on every machine, because a node can have a Docker
+// socket and a CRI socket at once. The same container must not be counted twice
+// if both report it.
+func TestTheSameContainerFoundTwiceIsReportedOnce(t *testing.T) {
+	ref := containerRef{ID: "abc123def456", Name: "web", Image: "nginx:alpine", Pid: 0, Running: true}
+
+	rows := inventoryRows([]containerRef{ref, ref})
+
+	if len(rows) != 1 {
+		t.Errorf("want 1 row for one container seen by two enumerators, got %d", len(rows))
 	}
 }
 

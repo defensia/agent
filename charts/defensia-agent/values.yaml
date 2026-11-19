@@ -24,14 +24,28 @@ dockerSocket:
   enabled: false
   path: /var/run/docker.sock
 
-# containerd is off by default too, for a stronger reason than Docker's: nothing
-# in the agent reads this socket. Mounting it with type: Socket requires the path
-# to exist, and the path below is containerd's upstream default — k3s uses
-# /run/k3s/containerd/containerd.sock, and RKE2, MicroK8s and CRI-O differ again.
-# On those the pod never leaves ContainerCreating, and because it never starts it
-# never sends a heartbeat, so the failed install is invisible to us.
+# containerd is off by default too, but no longer because nothing reads it: the
+# agent has a CRI client now and this socket is how it reports what runs on the
+# node — the package versions inside each container, and whether that container
+# is reachable from outside the node. Without it the node's workloads are
+# invisible to the inventory.
 #
-# Turn it on, with the right path, only once there is something that reads it.
+# It stays off because mounting it with type: Socket requires the path to exist,
+# and the path below is containerd's upstream default, which is the minority case
+# on a cluster. Set it to whatever the distribution uses:
+#
+#   containerd upstream   /run/containerd/containerd.sock
+#   k3s, k3d, RKE2        /run/k3s/containerd/containerd.sock
+#   RKE2 (agent-local)    /var/lib/rancher/rke2/agent/containerd/containerd.sock
+#   MicroK8s              /var/snap/microk8s/common/run/containerd.sock
+#   CRI-O                 /run/crio/crio.sock
+#
+# Get it wrong and the pod never leaves ContainerCreating — and because it never
+# starts it never sends a heartbeat, so the failed install is invisible to us.
+#
+# The agent probes all of the paths above, so the mount only has to put the
+# socket where it already lives on the host; CONTAINER_RUNTIME_ENDPOINT overrides
+# the search for a node that keeps it somewhere else entirely.
 containerdSocket:
   enabled: false
   path: /run/containerd/containerd.sock

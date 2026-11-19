@@ -1,9 +1,13 @@
 package collector
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 
+	"github.com/defensia/agent/internal/cri"
 	"github.com/defensia/agent/internal/monitor"
 	"github.com/defensia/agent/internal/pkgdb"
 )
@@ -40,31 +44,160 @@ var containerSoftware = []struct {
 	{"OpenSSL", "security", []string{"openssl", "libssl3"}},
 }
 
-// collectContainerSoftware inventories every running container on the machine.
+// containerRef is one running container, whatever enumerated it.
+//
+// Docker and the CRI describe a container in different shapes — names with a
+// leading slash against pod labels, published port bindings against pod-level
+// host ports — and everything downstream of this struct is identical for both.
+// Normalising here is what keeps there from being a second copy of the package
+// reading, the version rules and the collapsing, one per runtime.
+type containerRef struct {
+	ID    string
+	Name  string
+	Image string
+
+	// Pid is the host PID of the container's main process, or zero when the
+	// runtime would not say. Zero is never PID 0: reading /proc/0/root would
+	// report the agent's own packages as the container's.
+	Pid int
+
+	// Running is what the runtime still says about it. A container with no PID
+	// that is no longer running stopped between listing and inspecting; one with
+	// no PID that is still running is a container we cannot identify, and those
+	// are two different findings.
+	Running bool
+
+	Exposed      bool
+	ExposedPorts []int
+}
+
+// collectContainerSoftware inventories every running container on the machine,
+// whichever runtime is running them.
 //
 // Returns nothing when there is no container runtime to ask, which is the common
-// case on a plain server and must stay cheap: one socket probe and out.
+// case on a plain server and must stay cheap: a handful of socket probes and out.
 func collectContainerSoftware() []KeySoftware {
+	return collapseByVersion(inventoryRows(append(dockerContainers(), criContainers()...)))
+}
+
+// inventoryRows turns the containers found on the machine into inventory rows,
+// reading each one's package database through its own /proc/<pid>/root.
+func inventoryRows(refs []containerRef) []KeySoftware {
+	var rows []KeySoftware
+	seen := make(map[string]struct{}, len(refs))
+
+	for _, ref := range refs {
+		// A node can have both a Docker socket and a CRI socket, so the same
+		// container can be enumerated twice.
+		if ref.ID != "" {
+			if _, dup := seen[ref.ID]; dup {
+				continue
+			}
+			seen[ref.ID] = struct{}{}
+		}
+
+		if ref.Pid == 0 {
+			if !ref.Running {
+				// Stopped between listing and inspecting. Reporting a corpse
+				// would be worse than saying nothing.
+				continue
+			}
+
+			// Running, and we could not get a handle on it: a runtime that does
+			// not report a PID, or one that declined this container. It is
+			// reported as present and unidentified, because a container the
+			// agent cannot read must never look like a container that is not
+			// there.
+			rows = append(rows, unidentifiedContainer(ref))
+			continue
+		}
+
+		rows = append(rows, softwareInContainer(ref, fmt.Sprintf("/proc/%d/root", ref.Pid))...)
+	}
+
+	return rows
+}
+
+// dockerContainers enumerates through the Docker or Podman socket.
+func dockerContainers() []containerRef {
 	containers, err := monitor.ListDockerContainers()
 	if err != nil || len(containers) == 0 {
 		return nil
 	}
 
-	var rows []KeySoftware
+	refs := make([]containerRef, 0, len(containers))
 
 	for _, c := range containers {
+		exposed, ports := dockerExposure(c)
 		pid := monitor.ContainerPid(c.ID)
-		if pid == 0 {
-			// Stopped between listing and inspecting, or the daemon declined.
-			// Reporting the container with no version would be honest but
-			// useless; reporting nothing keeps the inventory to what we read.
-			continue
-		}
 
-		rows = append(rows, softwareInContainer(c, fmt.Sprintf("/proc/%d/root", pid))...)
+		refs = append(refs, containerRef{
+			ID:    c.ID,
+			Name:  dockerName(c),
+			Image: c.Image,
+			Pid:   pid,
+			// ContainerPid returns zero for a container the daemon no longer
+			// reports as running, so a PID is itself the running answer here.
+			Running:      pid > 0,
+			Exposed:      exposed,
+			ExposedPorts: ports,
+		})
 	}
 
-	return collapseByVersion(rows)
+	return refs
+}
+
+// criContainers enumerates through the node's CRI runtime: containerd or CRI-O.
+//
+// This is the whole Kubernetes fleet. There is no Docker socket on a Kubernetes
+// node, so until now every containerised workload on every node we monitor was
+// invisible to the inventory — on the product we sell per node.
+//
+// cri-dockerd's socket is deliberately not in the endpoint list the cri package
+// probes: a node running it has a Docker socket too, dockerContainers above
+// already covers it, and probing both would report every container twice under
+// two different IDs.
+func criContainers() []containerRef {
+	containers, err := cri.Containers(context.Background())
+	if err != nil {
+		if !errors.Is(err, cri.ErrNoRuntime) {
+			// A socket that exists and will not answer is worth a line: it is
+			// the difference between "no containers here" and "we could not
+			// look", and those must not be silent in the same way.
+			log.Printf("[inventory] CRI enumeration failed: %v", err)
+		}
+		return nil
+	}
+
+	refs := make([]containerRef, 0, len(containers))
+
+	for _, c := range containers {
+		refs = append(refs, containerRef{
+			ID:           c.ID,
+			Name:         criName(c),
+			Image:        c.Image,
+			Pid:          c.Pid,
+			Running:      c.Running,
+			Exposed:      c.Exposed(),
+			ExposedPorts: c.HostPorts,
+		})
+	}
+
+	return refs
+}
+
+// criName identifies a container by where it runs rather than by a container
+// name alone: two pods of the same Deployment both hold a container called
+// "nginx", and a finding has to say which pod to go and look at.
+func criName(c cri.Container) string {
+	switch {
+	case c.PodNamespace != "" && c.PodName != "":
+		return c.PodNamespace + "/" + c.PodName + "/" + c.Name
+	case c.Name != "":
+		return c.Name
+	default:
+		return c.ID[:min(12, len(c.ID))]
+	}
 }
 
 // collapseByVersion folds rows that describe the same software at the same
@@ -146,7 +279,7 @@ func unionPorts(a, b []int) []int {
 
 // softwareInContainer reads one container's package database and turns it into
 // inventory rows.
-func softwareInContainer(c monitor.DockerContainer, root string) []KeySoftware {
+func softwareInContainer(c containerRef, root string) []KeySoftware {
 	db, ok := pkgdb.FromRoot(root)
 	if !ok {
 		// No package database: distroless, scratch, a static binary, or a root we
@@ -154,7 +287,10 @@ func softwareInContainer(c monitor.DockerContainer, root string) []KeySoftware {
 		// so it is reported as present with no version rather than omitted —
 		// "something is running here and I cannot identify it" is a finding, and
 		// silence is not.
-		return []KeySoftware{containerEntry(c, "Unidentified container", "", "", "container", pkgdb.Unknown)}
+		//
+		// Measured on the lab cluster: coredns and metrics-server are distroless
+		// and land here, which is two of the nine containers on one node.
+		return []KeySoftware{unidentifiedContainer(c)}
 	}
 
 	var out []KeySoftware
@@ -189,9 +325,7 @@ func softwareInContainer(c monitor.DockerContainer, root string) []KeySoftware {
 // panel can show it, and leaves Version empty so nothing compares it. That is
 // the "report unknown, do not match" decision, implemented without inventing a
 // second matching path.
-func containerEntry(c monitor.DockerContainer, display, version, pkg, category string, format pkgdb.Format) KeySoftware {
-	exposed, ports := exposure(c)
-
+func containerEntry(c containerRef, display, version, pkg, category string, format pkgdb.Format) KeySoftware {
 	e := KeySoftware{
 		Name:         display,
 		Version:      "-",
@@ -201,10 +335,10 @@ func containerEntry(c monitor.DockerContainer, display, version, pkg, category s
 		PkgManager:   string(format),
 		PkgVerdict:   "unknown",
 		Source:       "container",
-		SourceName:   containerName(c),
+		SourceName:   c.Name,
 		SourceImage:  c.Image,
-		Exposed:      exposed,
-		ExposedPorts: ports,
+		Exposed:      c.Exposed,
+		ExposedPorts: c.ExposedPorts,
 	}
 
 	switch format {
@@ -218,13 +352,26 @@ func containerEntry(c monitor.DockerContainer, display, version, pkg, category s
 	return e
 }
 
-// exposure reads whether any of the container's published ports is reachable
-// from outside the machine, and which.
+// unidentifiedContainer is the row for a container that is running and that the
+// agent could not identify: no package database inside it, or no PID to read it
+// through.
+//
+// It names the image so the finding can be chased, and carries no version. The
+// alternative — omitting it — would make an unreadable container and an absent
+// one look the same, and on a security inventory those two must never be
+// confused: "I cannot see inside this" is a finding, "there is nothing here" is
+// a reassurance, and the agent is not allowed to turn the first into the second.
+func unidentifiedContainer(c containerRef) KeySoftware {
+	return containerEntry(c, "Unidentified container", "", "", "container", pkgdb.Unknown)
+}
+
+// dockerExposure reads whether any of the container's published ports is
+// reachable from outside the machine, and which.
 //
 // This is the field that separates the two measured failures: a container bound
 // to 127.0.0.1 behind a reverse proxy is not the same finding as one published on
 // 0.0.0.0, and until now we recorded neither.
-func exposure(c monitor.DockerContainer) (bool, []int) {
+func dockerExposure(c monitor.DockerContainer) (bool, []int) {
 	var ports []int
 	seen := make(map[int]struct{})
 
@@ -242,8 +389,8 @@ func exposure(c monitor.DockerContainer) (bool, []int) {
 	return len(ports) > 0, ports
 }
 
-// containerName strips the leading slash the Docker API puts on every name.
-func containerName(c monitor.DockerContainer) string {
+// dockerName strips the leading slash the Docker API puts on every name.
+func dockerName(c monitor.DockerContainer) string {
 	if len(c.Names) == 0 {
 		return c.ID[:min(12, len(c.ID))]
 	}

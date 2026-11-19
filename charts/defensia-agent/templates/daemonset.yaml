@@ -119,12 +119,12 @@ spec:
             type: Socket
         {{- end }}
         {{- if .Values.containerdSocket.enabled }}
-        # Off by default, and the reason is not symmetry with the Docker socket
-        # above: nothing in the agent reads this socket. There is no CRI client in
-        # the codebase at all, so the mount bought nothing and cost installations.
+        # Off by default, but no longer because nothing reads it: the agent has a
+        # CRI client now (internal/cri), and this socket is how it sees what runs
+        # on the node — package versions and exposure per container.
         #
-        # type: Socket requires the path to exist, and the path is hard-coded to
-        # containerd's upstream default. k3s puts its socket at
+        # It stays off because type: Socket requires the path to exist, and the
+        # default path is containerd's upstream one. k3s puts its socket at
         # /run/k3s/containerd/containerd.sock, and RKE2, MicroK8s and CRI-O differ
         # again — so on any of those the pod never leaves ContainerCreating. That
         # failure is invisible to us: an agent that never starts never sends a
