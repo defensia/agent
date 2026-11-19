@@ -161,3 +161,78 @@ func TestTheReadCapClearsAnRpmDatabase(t *testing.T) {
 		t.Errorf("maxReadBytes = %d, too small for a measured %d-byte rpmdb.sqlite", maxReadBytes, rpmdbMeasured)
 	}
 }
+
+// Ubuntu 24.04's /etc/os-release is itself a symlink to ../usr/lib/os-release,
+// measured on our own host. A check that refused every link would refuse to read
+// the os-release of the most common distribution in the fleet — which is exactly
+// what the first version of the no-openat2 fallback did.
+func TestARelativeSymlinkInsideTheRootIsFollowed(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("foreign-root reads are Linux-only")
+	}
+
+	node := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(node, "usr", "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(node, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(node, "usr", "lib", "os-release"), []byte(nodeRelease), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../usr/lib/os-release", filepath.Join(node, "etc", "os-release")); err != nil {
+		t.Fatal(err)
+	}
+
+	self := writeRelease(t, t.TempDir(), alpineRelease)
+	withRoots(t, self, node)
+
+	data, ok := ReadFile("etc/os-release")
+	if !ok {
+		t.Fatal("a relative symlink inside the root must be followed")
+	}
+	if string(data) != nodeRelease {
+		t.Errorf("followed the link to the wrong place:\n%s", data)
+	}
+}
+
+// A relative link with enough ".." to climb out of the root must be refused,
+// which is the case that makes following relative links safe at all.
+func TestARelativeSymlinkThatClimbsOutOfTheRootIsRefused(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("foreign-root reads are Linux-only")
+	}
+
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("not the node\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	node := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(node, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// ../../<outside>/secret, built relative so it is not rejected for being absolute.
+	rel, err := filepath.Rel(filepath.Join(node, "etc"), filepath.Join(outside, "secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(node, "etc", "os-release")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := readWithin(node, "etc/os-release"); ok {
+		t.Error("a link climbing out of the root was followed")
+	}
+}
+
+// ".." in the requested path itself is a traversal attempt, not a link.
+func TestATraversalInTheRequestedPathIsRefused(t *testing.T) {
+	root := writeRelease(t, t.TempDir(), nodeRelease)
+	withRoots(t, root, root)
+
+	if _, ok := ReadFile("etc/../../escaped"); ok {
+		t.Error("a traversal in the requested path was followed")
+	}
+}

@@ -29,8 +29,6 @@
 // It failed visibly there only because the host happened not to have that path.
 package hostroot
 
-import "path/filepath"
-
 // selfRoot is where this process's own filesystem root lives, and hostPid1Root
 // is where PID 1's does. Both are variables rather than constants so tests can
 // point them at fixtures.
@@ -61,13 +59,28 @@ const maxReadBytes = 64 << 20 // 64 MiB
 // where /proc/1/root is the container's own root and switching to it changes
 // nothing. Comparing the files answers the question actually being asked.
 func Root() string {
-	if !sameFile(filepath.Join(selfRoot, osReleasePath), filepath.Join(hostPid1Root, osReleasePath)) {
-		if _, ok := readWithin(hostPid1Root, osReleasePath); ok {
-			return hostPid1Root
-		}
+	// Read through the PID 1 root as its own root, never as a path under ours.
+	// /proc/1/root is a magic link: it is opened as a directory once, which
+	// crosses into the node deliberately, and every read after that is confined
+	// inside the root it lands in. Crossing is the one hop we want; escaping
+	// afterwards is what must be impossible.
+	//
+	// Reading it needs CAP_SYS_PTRACE, measured: a container with --pid=host and
+	// no added capabilities gets EACCES on every attempt, including a plain
+	// os.ReadFile. The chart's privileged: true covers it. Without it this
+	// returns "/" and the agent reports its own image, which is wrong but at
+	// least not a claim about a machine we cannot see.
+	hostData, ok := readWithin(hostPid1Root, osReleasePath)
+	if !ok {
+		return selfRoot
 	}
 
-	return selfRoot
+	ownData, ok := readWithin(selfRoot, osReleasePath)
+	if ok && string(ownData) == string(hostData) {
+		return selfRoot
+	}
+
+	return hostPid1Root
 }
 
 // IsContainerised reports whether Root() resolved to something other than this
@@ -89,27 +102,4 @@ func IsContainerised() bool {
 // used to be indistinguishable from a small one.
 func ReadFile(rel string) ([]byte, bool) {
 	return readWithin(Root(), rel)
-}
-
-// sameFile reports whether two paths hold identical bytes. Unreadable counts as
-// different, which is the conservative direction: it makes Root() look harder at
-// the host root rather than settling for its own.
-func sameFile(a, b string) bool {
-	da, oka := readWithin(selfRoot, trimRoot(a))
-	db, okb := readWithin(selfRoot, trimRoot(b))
-	if !oka || !okb {
-		return false
-	}
-
-	return string(da) == string(db)
-}
-
-// trimRoot makes an absolute path relative, since readWithin resolves within a
-// root and a leading slash would be meaningless there.
-func trimRoot(p string) string {
-	for len(p) > 0 && p[0] == '/' {
-		p = p[1:]
-	}
-
-	return p
 }
