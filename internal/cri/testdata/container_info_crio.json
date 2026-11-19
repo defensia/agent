@@ -1,0 +1,21 @@
+{
+  "sandboxID": "f0a3e4b1c2d59687a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1",
+  "pid": 24817,
+  "runtimeSpec": {
+    "ociVersion": "1.0.2-dev",
+    "process": {
+      "user": {"uid": 0, "gid": 0},
+      "args": ["nginx", "-g", "daemon off;"],
+      "cwd": "/"
+    },
+    "root": {"path": "/var/lib/containers/storage/overlay/5f3a/merged"},
+    "linux": {
+      "namespaces": [
+        {"type": "pid"},
+        {"type": "network", "path": "/var/run/netns/8c1f2b3a-4d5e"},
+        {"type": "mount"}
+      ]
+    }
+  },
+  "privileged": false
+}
