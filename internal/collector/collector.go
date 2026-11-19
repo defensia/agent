@@ -56,6 +56,22 @@ type KeySoftware struct {
 	PkgManager string `json:"pkg_manager,omitempty"` // apt, dnf, yum
 	PkgName    string `json:"pkg_name,omitempty"`    // the package actually consulted
 
+	// FixedCVEs are the CVE identifiers this installed build's own changelog says
+	// it carries fixes for, read from the distribution's packaging rather than
+	// inferred from a version number.
+	//
+	// This is what makes a backported fix visible at all. A distro security
+	// update keeps the upstream version deliberately unchanged — nginx
+	// 1.24.0-2ubuntu7.20 still answers "nginx/1.24.0" — so no version comparison
+	// anywhere can distinguish it from the vulnerable build, which is why
+	// external scanners keep reporting patched hosts as vulnerable. The changelog
+	// names the CVE outright.
+	//
+	// Read in one direction only: an identifier present here can clear an
+	// advisory, an identifier absent proves nothing (it may not apply to this
+	// build, or the changelog may be truncated). See internal/pkgmgr/changelog.go.
+	FixedCVEs []string `json:"fixed_cves,omitempty"`
+
 	// BinaryPath is the file a serving-runtime detection was read from. Only set
 	// for entries resolved from a binary on disk, and purely diagnostic: it is
 	// what lets a detection be audited without asking the customer to inspect
@@ -261,6 +277,7 @@ func withPackageVerdict(sw []KeySoftware) []KeySoftware {
 		sw[i].PkgVerdict = string(r.Verdict)
 		sw[i].PkgManager = r.Manager
 		sw[i].PkgName = r.Package
+		sw[i].FixedCVEs = r.FixedCVEs
 	}
 
 	return sw

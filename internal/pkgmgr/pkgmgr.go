@@ -34,6 +34,11 @@ type Result struct {
 	Verdict Verdict
 	Manager string
 	Package string
+
+	// FixedCVEs are the identifiers the installed build's own changelog says it
+	// carries fixes for. Empty means no evidence either way — never "fixes
+	// nothing"; see changelog.go for why this is read in one direction only.
+	FixedCVEs []string
 }
 
 // unknown is the zero answer, carrying whichever manager was detected.
@@ -83,6 +88,15 @@ func Query(candidates ...string) Result {
 		default:
 			r.Verdict = Current
 		}
+
+		// Collected whatever the verdict is. A package with an update pending can
+		// still have been patched for the CVE we are about to raise — that is the
+		// ordinary state of a backport the day after a security release — so
+		// gating this on Current would throw away the cases it exists for.
+		if ids, ok := SortedFixedCVEs(manager, pkg); ok {
+			r.FixedCVEs = ids
+		}
+
 		return r
 	}
 
