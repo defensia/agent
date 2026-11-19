@@ -46,6 +46,15 @@ func resetSotTimingForTest() {
 	sotTimingOnce = sync.Once{}
 }
 
+// SotTickInterval is the only piece of sotTiming() cmd/defensia-agent
+// needs to run the reconcile loop's own ticker (CONTRACT §7) — exported
+// because sotTiming itself stays package-private (every other field is
+// an engine-internal policy constant the runtime has no business
+// reading directly).
+func SotTickInterval() time.Duration {
+	return sotTiming().Tick
+}
+
 func computeSotTiming() sotTimings {
 	const (
 		defaultTick   = 60 * time.Second
