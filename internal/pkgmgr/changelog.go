@@ -46,6 +46,17 @@ import (
 // Verified on 19 Nov 2026 against three hosts: nginx 1.24.0-2ubuntu7.20 names
 // four of the five nginx2root CVEs (the fifth being the HTTP/3 one, which does
 // not apply), while 1.24.0-2ubuntu7.8 on an unpatched host names none of them.
+//
+// One implementation note that is not an implementation detail: this reads the
+// file dpkg installed, deliberately, and never `apt changelog`. That command
+// fetches the changelog from repository metadata, so it describes what the
+// repository holds rather than the build in front of us, and it does not
+// reliably show third-party packages at all. Backported nginx and PHP packages
+// from a vendor outside the distribution are exactly the case this evidence
+// exists for — a host on a release with no official update left is the one most
+// likely to be running one — so sourcing it from the repository would have
+// silently excluded the population it was built to serve. Pointed out by Jo
+// Goossens (Hosted Power) before it shipped.
 
 // cveRef matches a CVE identifier. Case-insensitive on purpose: Ubuntu's own
 // changelogs mix cases within a single entry, naming the patch file as
