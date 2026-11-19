@@ -134,6 +134,21 @@ for vm in $vms; do
   RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
   vm_push "$vm" "$BINARY" /root/integration.test
 
+  # phase 16.1 CSF source-of-truth primitives (TestLabSOT*): the lab/sot
+  # helper scripts (ui-saveconf.sh etc.) and a real, ESTABLISHED SSH
+  # session from lab-attacker are both pushed/opened ONLY for CSF VMs,
+  # and the session is always closed again before moving to the next
+  # VM — via `trap`, not just the happy path, so a test failure on this
+  # VM never leaves a dangling session/alias for the next VM's run to
+  # trip over.
+  sot_peer_ip=""
+  if [ "$(csf_expect "$vm")" = "1" ]; then
+    vm_push_dir "$vm" "$LAB_DIR/sot" /root/lab-sot
+    vm_root "$vm" chmod +x /root/lab-sot/ui-saveconf.sh /root/lab-sot/loop-rewrite.sh /root/lab-sot/reinstall-sim.sh
+    sot_peer_ip="$(bash "$LAB_DIR/sot/ssh-session.sh" open "$vm")"
+    trap 'bash "$LAB_DIR/sot/ssh-session.sh" close "'"$vm"'" >/dev/null 2>&1 || true' EXIT
+  fi
+
   # Every agent VM registers with monitor_mode=true (AgentService::register
   # safety default) — `make lab-reset` re-registers from scratch, so this
   # must run before every single VM here, not just the dedicated attack
@@ -178,9 +193,19 @@ for vm in $vms; do
     LAB_PANEL_TOKEN="$TOKEN" \
     LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
     LAB_CAPTURE_NFT_FIXTURES="${LAB_CAPTURE_NFT_FIXTURES:-}" \
+    LAB_SOT_SSH_PEER_IP="$sot_peer_ip" \
     /root/integration.test -test.v -test.count=1 -test.timeout "${LAB_TEST_TIMEOUT:-30m}" -test.run '^TestLab' >"$RAW" 2>&1
   rc=$?
   seconds=$(($(date +%s) - start))
+
+  # Close the lab-sot SSH session (and clear this VM's EXIT trap) right
+  # after this VM's run, win or lose — never deferred to script exit,
+  # which would leave every earlier VM's session/alias dangling for the
+  # next VM's run to trip over.
+  if [ -n "$sot_peer_ip" ]; then
+    bash "$LAB_DIR/sot/ssh-session.sh" close "$vm" >/dev/null 2>&1 || true
+    trap - EXIT
+  fi
 
   pass=$(grep -c '^--- PASS' "$RAW" || true)
   fail=$(grep -c '^--- FAIL' "$RAW" || true)
