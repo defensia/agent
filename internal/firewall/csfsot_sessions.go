@@ -63,8 +63,19 @@ func sshSessionIPs(ctx context.Context, sshPorts []int) ([]netip.Addr, error) {
 }
 
 // parseSSPeers extracts the peer address from each line of
-// `ss -Hnt state established ...` output. Columns (no -p flag, so no
-// process column): State Recv-Q Send-Q Local-Address:Port Peer-Address:Port.
+// `ss -Hnt state established ...` output. With an explicit `state
+// established` filter, every iproute2 build observed against the real
+// lab (AlmaLinux 8/9/10 and Debian 12, iproute2 5.x-6.x) OMITS the State
+// column entirely from the data rows -- confirmed live (phase 16.1,
+// 2026-11-19): a hardcoded field index of 4 (assuming State Recv-Q
+// Send-Q Local-Address:Port Peer-Address:Port, 5 columns) silently
+// dropped every real row, because the actual rows are only 4 columns
+// (Recv-Q Send-Q Local-Address:Port Peer-Address:Port) -- making
+// guardAllowRemoval/guardDenyAdd see zero sessions and therefore refuse
+// NOTHING, the opposite of fail-closed. Peer-Address:Port is always the
+// LAST field regardless of whether State is present (no -p flag is ever
+// passed here, so there is never a trailing process column either), so
+// index from the end instead of a fixed position.
 func parseSSPeers(out string) []netip.Addr {
 	var addrs []netip.Addr
 	for _, line := range strings.Split(out, "\n") {
@@ -73,10 +84,10 @@ func parseSSPeers(out string) []netip.Addr {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) < 5 {
+		if len(fields) < 2 {
 			continue
 		}
-		if addr, ok := parseSSAddrPort(fields[4]); ok {
+		if addr, ok := parseSSAddrPort(fields[len(fields)-1]); ok {
 			addrs = append(addrs, addr)
 		}
 	}

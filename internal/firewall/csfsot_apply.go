@@ -248,6 +248,39 @@ func applySotLists(ctx context.Context, desired SotManaged, obs sotObservation, 
 
 		out, err := run(ctx, csfExecTimeout, bin, argv...)
 		if err != nil {
+			// A remove (-ar/-dr) on a TESTING=1 host: CSF's own -a/-d
+			// skip the iptables step entirely under TESTING ("Adding
+			// ... only while in TESTING mode (not iptables ACCEPT)"),
+			// but -ar/-dr always ATTEMPT the iptables removal regardless
+			// of TESTING, so it fails ("iptables: Bad rule...") against
+			// a rule that was never inserted in the first place -- a
+			// non-zero exit even though the csf.allow/csf.deny FILE
+			// mutation it performs first already succeeded. Confirmed
+			// live (phase 16.1, 2026-11-19) against alma8-csf-cwp-orphan
+			// (TESTING=1): every list removal failed this way while the
+			// file-level change had, in fact, already landed. Verify
+			// against the file itself before concluding a real failure,
+			// rather than trusting a CSF exit code that TESTING mode
+			// makes unreliable for this one case.
+			if o.action == "remove" && listRemovalTookEffect(o.kind, o.value) {
+				// CSF latches this benign TESTING-mode failure into
+				// /etc/csf/csf.error and refuses EVERY subsequent csf
+				// command ("You have an unresolved error when starting
+				// csf: ...") until that file is cleared -- confirmed
+				// live: a second list op in the very same run failed
+				// with the SAME stale error, even though the first
+				// removal had already genuinely succeeded. Only clear
+				// it when its content actually names the value we just
+				// confirmed was removed (never blind-clear a file that
+				// could be reporting something unrelated and real).
+				clearCSFErrorIfMatches(o.value)
+
+				applied = true
+				changed = append(changed, o.kind+":"+o.value)
+
+				continue
+			}
+
 			if strings.Contains(strings.ToLower(string(out)), "already in") {
 				refusals = append(refusals, SotRefusal{Reason: "foreign_entry_same_ip", Detail: o.value})
 			} else {
@@ -267,6 +300,56 @@ func applySotLists(ctx context.Context, desired SotManaged, obs sotObservation, 
 	}
 
 	return SotApplyResult{Result: result, Refusals: refusals, Changed: changed}
+}
+
+// listRemovalTookEffect re-reads csf.allow ("allow") or csf.deny
+// ("deny") directly off disk and reports whether value is now ABSENT --
+// the ground truth for "did the removal actually happen" when the CSF
+// command itself exited non-zero (see the TESTING=1 comment above this
+// function's one call site). A read error is treated as "did not take
+// effect" (fail closed: keep the original refusal rather than claim
+// success on an unreadable file).
+func listRemovalTookEffect(kind, value string) bool {
+	name := "csf.allow"
+	if kind == "deny" {
+		name = "csf.deny"
+	}
+
+	data, err := os.ReadFile(csfPath(name))
+	if err != nil {
+		return false
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		entry, ok := classifyCSFLine(line)
+		if ok && entry.Value == value {
+			return false
+		}
+	}
+
+	return true
+}
+
+// clearCSFErrorIfMatches removes /etc/csf/csf.error when it exists and
+// its content mentions value -- the one-shot recovery CSF's own message
+// documents ("You need to restart csf successfully to remove this
+// warning, or delete /etc/csf/csf.error") for exactly the benign
+// TESTING-mode -ar/-dr failure listRemovalTookEffect already confirmed
+// is not a real problem. Every subsequent csf invocation refuses to do
+// its normal work while this file exists, so leaving it in place would
+// turn one benign, already-recovered-from failure into a persistent one.
+// Never clears a csf.error that does not mention value: that could be
+// reporting something else entirely, and deleting it blind would hide a
+// real problem.
+func clearCSFErrorIfMatches(value string) {
+	path := csfPath("csf.error")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(data), value) {
+		_ = os.Remove(path)
+	}
 }
 
 func csfDisabledProblem(problems []SotProblem) bool {

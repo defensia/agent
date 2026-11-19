@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -82,8 +81,8 @@ func TestLabSOTObserveReadOnly(t *testing.T) {
 	}
 	canon := firewall.SotCanon(tcpIn)
 	for _, port := range firewall.SotActiveSSHPorts(ctx) {
-		if !portInList(canon, fmt.Sprintf("%d", port)) {
-			t.Fatalf("TCP_IN canon %q does not contain active SSH port %d", canon, port)
+		if !canonCoversPort(canon, port) {
+			t.Fatalf("TCP_IN canon %q does not cover active SSH port %d", canon, port)
 		}
 	}
 }
@@ -148,9 +147,11 @@ func TestLabSOTApplyPortsMultiKey(t *testing.T) {
 	origTCPIn := before.Ports["TCP_IN"]
 	origTCPOut := before.Ports["TCP_OUT"]
 
-	backupsBefore := 0
+	namesBefore := map[string]bool{}
 	if entries, err := os.ReadDir(csfBackupsDir); err == nil {
-		backupsBefore = len(entries)
+		for _, e := range entries {
+			namesBefore[e.Name()] = true
+		}
 	}
 
 	want := map[string]string{
@@ -165,12 +166,23 @@ func TestLabSOTApplyPortsMultiKey(t *testing.T) {
 		t.Fatalf("SotApplyPorts applied but returned no backup path")
 	}
 
+	// backupCSFConf (internal/firewall/csf_ports.go) prunes to the 5
+	// most recent backups, so the directory's total entry COUNT does
+	// not reliably go up by one once the cap is already reached --
+	// count the entries that are NEW (by name) instead, which is exactly
+	// one regardless of whether pruning also fired this time.
 	entriesAfter, err := os.ReadDir(csfBackupsDir)
 	if err != nil {
 		t.Fatalf("read %s: %v", csfBackupsDir, err)
 	}
-	if got, want := len(entriesAfter), backupsBefore+1; got != want {
-		t.Fatalf("csf-backups entries = %d, want %d (exactly one new backup)", got, want)
+	newCount := 0
+	for _, e := range entriesAfter {
+		if !namesBefore[e.Name()] {
+			newCount++
+		}
+	}
+	if newCount != 1 {
+		t.Fatalf("csf-backups has %d new entries, want exactly 1 (before=%d after=%d)", newCount, len(namesBefore), len(entriesAfter))
 	}
 
 	afterBytes, err := os.ReadFile(csfConfPath)

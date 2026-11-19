@@ -112,6 +112,44 @@ func TestActiveSSHPortsEstablished(t *testing.T) {
 	}
 }
 
+// TestActiveSSHPortsEstablishedNoStateColumn locks in the fix for a real
+// bug found live against every CSF VM in the lab (phase 16.1,
+// 2026-11-19): `ss -tnp state established` (an explicit state filter)
+// omits the State column entirely, unlike TestActiveSSHPortsEstablished's
+// fixture above. The original parser's hardcoded field index then read
+// the PEER's ephemeral port as if it were sshd's LOCAL port, injecting a
+// bogus "active SSH port" equal to whatever port the far end of an open
+// admin SSH session happened to use.
+func TestActiveSSHPortsEstablishedNoStateColumn(t *testing.T) {
+	tmp := t.TempDir()
+	withHostRoot(t, tmp)
+	withLookPath(t, func(string) (string, error) { return "", exec.ErrNotFound })
+	ssPath := filepath.Join(tmp, "usr/sbin/ss")
+	mustWriteFile(t, ssPath, "")
+
+	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+		if name == ssPath && len(args) >= 2 && args[1] == "-tnp" {
+			// No leading state column -- the real format observed on
+			// every lab VM when an explicit `state established` filter
+			// is given.
+			return []byte("0      0      10.0.0.5:22 198.51.100.77:52293 users:((\"sshd\",pid=900,fd=10))\n"), nil
+		}
+		return nil, errors.New("not stubbed")
+	})
+
+	ports, sources := activeSSHPorts(context.Background())
+
+	if !containsInt(ports, 22) {
+		t.Fatalf("ports = %v, want to include 22 (the real local sshd port)", ports)
+	}
+	if containsInt(ports, 52293) {
+		t.Fatalf("ports = %v, want NOT to include 52293 (the peer's ephemeral port)", ports)
+	}
+	if !containsString(sources, "ss-established") {
+		t.Fatalf("sources = %v, want to include ss-established", sources)
+	}
+}
+
 // TestActiveSSHPortsConfigFallback proves the last-resort direct read of
 // sshd_config(.d) when both commands fail/are unavailable.
 func TestActiveSSHPortsConfigFallback(t *testing.T) {

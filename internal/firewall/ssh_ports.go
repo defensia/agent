@@ -164,8 +164,25 @@ func sshPortsFromSSEstablished(ctx context.Context) []int {
 
 // parseSSPortsForSSHD parses `ss -H ...` tabular output shared by both the
 // listen and established queries: columns are
-// "<state> <recv-q> <send-q> <local addr:port> <peer addr:port> <process>",
+// "[<state>] <recv-q> <send-q> <local addr:port> <peer addr:port> <process>",
 // and only lines whose process field mentions "sshd" are kept.
+//
+// The leading <state> column is NOT always present: `ss -ltnp` (the
+// listen query, no explicit `state` filter keyword) keeps it, but
+// `ss -tnp state established` (the established query, an explicit state
+// FILTER) omits it entirely on every iproute2 build observed against the
+// real lab (AlmaLinux 8/9/10, Debian 12; confirmed live, phase 16.1,
+// 2026-11-19 — the same quirk as sshsot_sessions.go's parseSSPeers). A
+// hardcoded field index of 3 for "local addr:port" silently read the
+// PEER address instead once that column disappeared, injecting the
+// CLIENT's own ephemeral port (e.g. a lab-attacker SSH session's source
+// port) into the "active SSH ports" set it returns — which in turn made
+// guardPorts refuse every port apply while any admin SSH session was
+// open, against a port nobody ever asked to protect. The process field
+// (matched by `"sshd"` above) is always the LAST field whenever present,
+// and Local-Addr:Port is always exactly 3 columns before it regardless
+// of whether State is present at the front, so anchor from the end
+// instead of a fixed front-anchored index.
 func parseSSPortsForSSHD(out string) []int {
 	var ports []int
 	for _, line := range strings.Split(out, "\n") {
@@ -174,10 +191,10 @@ func parseSSPortsForSSHD(out string) []int {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) < 4 {
+		if len(fields) < 3 {
 			continue
 		}
-		if p, ok := sshPortFromAddr(fields[3]); ok {
+		if p, ok := sshPortFromAddr(fields[len(fields)-3]); ok {
 			ports = append(ports, p)
 		}
 	}

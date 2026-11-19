@@ -341,6 +341,150 @@ func TestApplySotListsAddRemove(t *testing.T) {
 	}
 }
 
+// TestApplySotListsRemoveSucceedsDespiteTestingModeExitCode locks in a
+// real bug found live against alma8-csf-cwp-orphan (phase 16.1,
+// 2026-11-19, TESTING=1): CSF's own `-a`/`-d` skip the iptables step
+// entirely under TESTING mode, but `-ar`/`-dr` always attempt the
+// iptables removal regardless of TESTING -- failing ("iptables: Bad
+// rule...", non-zero exit) against a rule that was never inserted in
+// the first place, even though the csf.allow/csf.deny FILE mutation it
+// performs first already succeeded. Before this fix, applySotLists
+// treated that non-zero exit as agent_error and refused every list
+// removal on any fresh (TESTING=1, the default for a week after every
+// new CSF install) host -- the opposite of applied.
+func TestApplySotListsRemoveSucceedsDespiteTestingModeExitCode(t *testing.T) {
+	dir := newSotApplyFixture(t)
+	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "198.51.100.9 # defensia:sot\n")
+
+	withSessionIPsFn(t, func(ctx context.Context, sshPorts []int) ([]netip.Addr, error) {
+		return nil, nil
+	})
+
+	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+		if !strings.HasSuffix(name, "csf") {
+			return nil, errors.New("unexpected binary " + name)
+		}
+		// Simulate CSF's real TESTING=1 behaviour: the file mutation
+		// already happened by the time this stub runs (same ordering
+		// the real csf -ar performs: rewrite the file, THEN attempt the
+		// iptables removal), so mirror that here before returning the
+		// error.
+		if len(args) > 0 && args[0] == "-ar" {
+			if err := os.WriteFile(filepath.Join(dir, "csf.allow"), []byte(""), 0o600); err != nil {
+				t.Fatalf("simulate csf -ar file mutation: %v", err)
+			}
+
+			return []byte("iptables: Bad rule (does a matching rule exist in that chain?).\n"), errors.New("exit status 1")
+		}
+
+		return []byte("ok\n"), nil
+	})
+
+	obs, err := observeSot()
+	if err != nil {
+		t.Fatalf("observeSot: %v", err)
+	}
+
+	desired := obs.Managed
+	desired.Allow = []SotEntry{}
+
+	result := applySotLists(context.Background(), desired, obs, netip.Addr{})
+	if result.Result != "applied" {
+		t.Fatalf("applySotLists = %+v, want applied (the file-level removal succeeded despite csf -ar's TESTING-mode exit code)", result)
+	}
+	if len(result.Refusals) != 0 {
+		t.Fatalf("applySotLists refusals = %v, want none", result.Refusals)
+	}
+}
+
+// TestApplySotListsRemoveClearsStaleCSFError locks in a second real bug
+// found live against alma8-csf-cwp-orphan alongside the one above: CSF
+// latches the benign TESTING-mode -ar/-dr failure into
+// /etc/csf/csf.error and refuses EVERY subsequent csf command ("You
+// have an unresolved error when starting csf: ...") until that file is
+// cleared, confirmed by a second list op in the same lab run failing
+// with the identical stale message even though its own removal had
+// already genuinely succeeded. The fix must clear csf.error once it has
+// confirmed the removal it names actually took effect, so later ops in
+// the same reconcile cycle are not poisoned by it.
+func TestApplySotListsRemoveClearsStaleCSFError(t *testing.T) {
+	dir := newSotApplyFixture(t)
+	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "198.51.100.9 # defensia:sot\n")
+	errPath := filepath.Join(dir, "csf.error")
+	mustWriteFile(t, errPath, "Error: iptables command [/sbin/iptables --wait -v -D ALLOWIN ! -i lo -s 198.51.100.9 -j ACCEPT] failed, at line 3568 in /usr/sbin/csf\n")
+
+	withSessionIPsFn(t, func(ctx context.Context, sshPorts []int) ([]netip.Addr, error) {
+		return nil, nil
+	})
+	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "-ar" {
+			if err := os.WriteFile(filepath.Join(dir, "csf.allow"), []byte(""), 0o600); err != nil {
+				t.Fatalf("simulate csf -ar file mutation: %v", err)
+			}
+
+			return []byte("iptables: Bad rule (does a matching rule exist in that chain?).\n"), errors.New("exit status 1")
+		}
+
+		return []byte("ok\n"), nil
+	})
+
+	obs, err := observeSot()
+	if err != nil {
+		t.Fatalf("observeSot: %v", err)
+	}
+	desired := obs.Managed
+	desired.Allow = []SotEntry{}
+
+	result := applySotLists(context.Background(), desired, obs, netip.Addr{})
+	if result.Result != "applied" {
+		t.Fatalf("applySotLists = %+v, want applied", result)
+	}
+	if _, err := os.Stat(errPath); !os.IsNotExist(err) {
+		t.Fatalf("csf.error still present after a confirmed-successful removal, want it cleared (stat err=%v)", err)
+	}
+}
+
+// TestApplySotListsRemoveLeavesUnrelatedCSFError proves the clear is
+// narrowly scoped: a csf.error that does NOT mention the value just
+// removed must survive, because it could be reporting something else
+// entirely.
+func TestApplySotListsRemoveLeavesUnrelatedCSFError(t *testing.T) {
+	dir := newSotApplyFixture(t)
+	mustWriteFile(t, filepath.Join(dir, "csf.allow"), "198.51.100.9 # defensia:sot\n")
+	errPath := filepath.Join(dir, "csf.error")
+	mustWriteFile(t, errPath, "Error: something unrelated and still unresolved\n")
+
+	withSessionIPsFn(t, func(ctx context.Context, sshPorts []int) ([]netip.Addr, error) {
+		return nil, nil
+	})
+	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "-ar" {
+			if err := os.WriteFile(filepath.Join(dir, "csf.allow"), []byte(""), 0o600); err != nil {
+				t.Fatalf("simulate csf -ar file mutation: %v", err)
+			}
+
+			return []byte("iptables: Bad rule (does a matching rule exist in that chain?).\n"), errors.New("exit status 1")
+		}
+
+		return []byte("ok\n"), nil
+	})
+
+	obs, err := observeSot()
+	if err != nil {
+		t.Fatalf("observeSot: %v", err)
+	}
+	desired := obs.Managed
+	desired.Allow = []SotEntry{}
+
+	result := applySotLists(context.Background(), desired, obs, netip.Addr{})
+	if result.Result != "applied" {
+		t.Fatalf("applySotLists = %+v, want applied", result)
+	}
+	if _, err := os.Stat(errPath); err != nil {
+		t.Fatalf("unrelated csf.error was removed, want it left alone: stat err=%v", err)
+	}
+}
+
 func TestApplySotListsForeignProtection(t *testing.T) {
 	dir := newSotApplyFixture(t)
 	// 198.51.100.9 has BOTH a tagged line (ours) and a foreign line (someone

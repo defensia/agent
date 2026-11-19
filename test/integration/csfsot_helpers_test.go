@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,35 @@ func countLinesContaining(t *testing.T, path, needle string) int {
 		}
 	}
 	return n
+}
+
+// canonCoversPort reports whether canon (a SotCanon-normalised port
+// list: comma-separated tokens, each either a bare port "N" or a
+// merged/sorted interval "N:M") covers port -- unlike a flat
+// comma-token equality check (csf_ports_test.go's portInList, which
+// only matches a standalone token), a real TCP_IN default like
+// "20:22,25,53,..." covers port 22 via the RANGE token "20:22", not a
+// bare "22" token.
+func canonCoversPort(canon string, port int) bool {
+	for _, tok := range strings.Split(canon, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		lo, hi, ok := strings.Cut(tok, ":")
+		if !ok {
+			if n, err := strconv.Atoi(lo); err == nil && n == port {
+				return true
+			}
+			continue
+		}
+		loN, err1 := strconv.Atoi(lo)
+		hiN, err2 := strconv.Atoi(hi)
+		if err1 == nil && err2 == nil && port >= loN && port <= hiN {
+			return true
+		}
+	}
+	return false
 }
 
 // confMtime stats path and returns its ModTime, failing the test on any

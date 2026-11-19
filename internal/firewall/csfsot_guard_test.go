@@ -72,6 +72,35 @@ func TestSSHSessionIPsFromSS(t *testing.T) {
 	}
 }
 
+// TestSSHSessionIPsFromSSNoStateColumn locks in the fix for a real bug
+// found live against every CSF VM in the lab (phase 16.1, 2026-11-19):
+// `ss -Hnt state established ...` (an explicit state filter) omits the
+// State column from its data rows entirely -- unlike the no-filter/-p
+// forms TestSSHSessionIPsFromSS's fixture already covered, which do
+// include it. The original parser assumed a fixed 5-column layout and a
+// hardcoded field index, silently dropping every real row (empty result,
+// no error) -- which made guardAllowRemoval/guardDenyAdd see zero live
+// sessions and therefore refuse NOTHING, the opposite of fail-closed.
+func TestSSHSessionIPsFromSSNoStateColumn(t *testing.T) {
+	withLookPathFound(t, "ss", "/usr/sbin/ss")
+	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
+		// No leading state column -- the real format observed on every
+		// lab VM (AlmaLinux 8/9/10, Debian 12; iproute2 5.x-6.x) when an
+		// explicit `state established` filter is given.
+		out := "0      0      192.168.139.130:22 198.51.100.77:53911\n"
+
+		return []byte(out), nil
+	})
+
+	got, err := sshSessionIPs(context.Background(), []int{22})
+	if err != nil {
+		t.Fatalf("sshSessionIPs: %v", err)
+	}
+	if len(got) != 1 || got[0].String() != "198.51.100.77" {
+		t.Fatalf("got %v, want exactly [198.51.100.77]", got)
+	}
+}
+
 func TestSSHSessionIPsProcFallback(t *testing.T) {
 	withLookPathMissing(t, "ss")
 
