@@ -161,6 +161,59 @@ check_attacker_tools() {
   done
 }
 
+# check_fw_variant VM VARIANT — phase 17 (NFT-01) RHEL 10 firewall variant
+# checks. Applies to EVERY vm with vm_fw_variant != "-", independent of
+# role: alma10-noipset is role=csf but variant=nft-a.
+check_fw_variant() {
+  local vm=$1 variant=$2
+  case "$variant" in
+    nft-a)
+      if vm_root "$vm" command -v nft >/dev/null 2>&1; then
+        pass "$vm" "fw-variant-nft-a"
+      else
+        fail "$vm" "fw-variant-nft-a" "command -v nft failed"
+      fi
+      ;;
+    nft-b)
+      if vm_root "$vm" command -v nft >/dev/null 2>&1; then
+        pass "$vm" "fw-variant-nft-b-nft"
+      else
+        fail "$vm" "fw-variant-nft-b-nft" "command -v nft failed"
+      fi
+      if vm_root "$vm" command -v iptables >/dev/null 2>&1; then
+        fail "$vm" "fw-variant-nft-b-no-iptables" "iptables unexpectedly present"
+      else
+        pass "$vm" "fw-variant-nft-b-no-iptables"
+      fi
+      if [ "$(vm_root_out "$vm" systemctl is-active firewalld || true)" = "active" ]; then
+        pass "$vm" "fw-variant-nft-b-firewalld"
+      else
+        fail "$vm" "fw-variant-nft-b-firewalld" "systemctl is-active firewalld != active"
+      fi
+      ;;
+    nft-c)
+      if vm_root "$vm" command -v ipset >/dev/null 2>&1; then
+        pass "$vm" "fw-variant-nft-c-ipset-present"
+      else
+        fail "$vm" "fw-variant-nft-c-ipset-present" "command -v ipset failed"
+      fi
+      if vm_root "$vm" ipset list -n >/dev/null 2>&1; then
+        fail "$vm" "fw-variant-nft-c-ipset-broken" "ipset list -n unexpectedly succeeded (shim not active)"
+      else
+        pass "$vm" "fw-variant-nft-c-ipset-broken"
+      fi
+      if [ "$(vm_root_out "$vm" systemctl is-active firewalld || true)" = "active" ]; then
+        pass "$vm" "fw-variant-nft-c-firewalld"
+      else
+        fail "$vm" "fw-variant-nft-c-firewalld" "systemctl is-active firewalld != active"
+      fi
+      ;;
+    *)
+      die "unknown fw variant '$variant' for $vm"
+      ;;
+  esac
+}
+
 for vm in $vms; do
   if ! check_vm_level "$vm"; then
     continue
@@ -172,7 +225,7 @@ for vm in $vms; do
       check_csf_level "$vm"
       check_ipset "$vm"
       ;;
-    attack-target)
+    attack-target|fw-variant)
       check_nocsf "$vm"
       check_ipset "$vm"
       ;;
@@ -180,6 +233,11 @@ for vm in $vms; do
       check_attacker_tools "$vm"
       ;;
   esac
+
+  fw_variant="$(vm_fw_variant "$vm")"
+  if [ "$fw_variant" != "-" ]; then
+    check_fw_variant "$vm" "$fw_variant"
+  fi
 done
 
 # --- panel + agent checks (plan 05) ---

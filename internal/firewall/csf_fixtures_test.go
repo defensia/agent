@@ -25,6 +25,13 @@ type fixtureExpect struct {
 	AllowCommentContains  string `json:"allow_comment_contains"`
 }
 
+// nonCSFFixtureDir is testdata/nft/ (phase 17 NFT-02/04 golden scripts and
+// nft -j JSON parse fixtures, added in plan 17-04) — not a CSF fork fixture,
+// excluded from this file's generic testdata/ directory scans so it doesn't
+// trip TestFixtureSetComplete/TestFixturesParse, which are specifically
+// about the 5 captured CSF fork fixtures below.
+const nonCSFFixtureDir = "nft"
+
 // fixtureDirs is the fixed set of fixture directories this plan captured.
 // Kept explicit (not derived from os.ReadDir) so TestFixtureSetComplete can
 // assert "exactly these 5, no more, no fewer" independently of whatever
@@ -68,7 +75,7 @@ func TestFixtureSetComplete(t *testing.T) {
 
 	var gotDirs []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && e.Name() != nonCSFFixtureDir {
 			gotDirs = append(gotDirs, e.Name())
 		}
 	}
@@ -117,7 +124,7 @@ func TestFixturesParse(t *testing.T) {
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || e.Name() == nonCSFFixtureDir {
 			continue
 		}
 		dir := e.Name()

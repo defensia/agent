@@ -131,9 +131,79 @@ panel_bootstrap() {
 # panel_api_token — the current lab Sanctum token from $STATE_DIR/panel.json.
 panel_api_token() { json_get "$STATE_DIR/panel.json" api_token; }
 
+# ensure_active_protection VM — flips the agent's monitor_mode off via a
+# direct DB update (same effect as toggling "Active Protection" on in the
+# panel UI for that server). New agents register with monitor_mode=true
+# by design (AgentService::register, app/Services/AgentService.php) — a
+# brand new install defaults to detect-only so nobody gets locked out of
+# their own box the moment the agent starts. `make lab-reset` re-registers
+# every agent from scratch, so every caller that needs real ban
+# enforcement (not just a `brute_force`/monitor-mode event) must call this
+# first: with monitor_mode left on, syncAndApply's own
+# `if !sync.Config.MonitorMode { firewall.ApplyBans(...) }` guard skips
+# every ban regardless of backend. Idempotent (no-op once already false);
+# shared by lab/attack.sh, lab/diagnose-firewall.sh and lab/test.sh so the
+# three callers can never drift into three different DB update strings.
+ensure_active_protection() {
+  local vm=$1
+  panel_compose exec -T app php artisan tinker --execute="
+    \$a = \App\Models\Agent::where('name', '$vm')->first();
+    if (!\$a) { echo 'ERROR: no agent named $vm'; exit(1); }
+    if (\$a->monitor_mode) { \$a->update(['monitor_mode' => false]); echo 'toggled-off'; } else { echo 'already-off'; }
+  " 2>&1 | tail -1
+}
+
 # panel_get PATH — authenticated GET against the lab panel (host-side URL).
 panel_get() {
   curl -fsS -H "Authorization: Bearer $(panel_api_token)" -H 'Accept: application/json' "$PANEL_URL_HOST$1"
+}
+
+# panel_post PATH JSON — authenticated POST. Does NOT use curl -f: an
+# error body (e.g. a 422 "not eligible" ban rejection) must stay visible
+# to the caller, not be swallowed as a bare non-zero exit. Splits the
+# response body from the trailing HTTP status via a single curl -w call
+# and returns non-zero (after printing the body) on >= 400.
+panel_post() {
+  local path=$1 json=$2 out body code
+  out="$(curl -sS -X POST \
+    -H "Authorization: Bearer $(panel_api_token)" \
+    -H 'Accept: application/json' -H 'Content-Type: application/json' \
+    -d "$json" -w '\n%{http_code}' "$PANEL_URL_HOST$path")"
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  printf '%s' "$body"
+  if [ "$code" -ge 400 ] 2>/dev/null; then
+    printf '\n[panel_post] %s %s -> HTTP %s\n' "$path" "$json" "$code" >&2
+    return 1
+  fi
+}
+
+# panel_delete PATH — authenticated DELETE, same body-visible contract as panel_post.
+panel_delete() {
+  local path=$1 out body code
+  out="$(curl -sS -X DELETE \
+    -H "Authorization: Bearer $(panel_api_token)" \
+    -H 'Accept: application/json' \
+    -w '\n%{http_code}' "$PANEL_URL_HOST$path")"
+  code="${out##*$'\n'}"
+  body="${out%$'\n'*}"
+  printf '%s' "$body"
+  if [ "$code" -ge 400 ] 2>/dev/null; then
+    printf '\n[panel_delete] %s -> HTTP %s\n' "$path" "$code" >&2
+    return 1
+  fi
+}
+
+# panel_tinker PHP — runs `php artisan tinker --execute="$1"` inside the lab
+# panel container. Refuses unless the bootstrapped panel.json confirms the
+# lab DB (defensia_lab) — this executes arbitrary PHP against whatever
+# database the container is pointed at, so a wrong/production DB must
+# never be in reach by accident.
+panel_tinker() {
+  local php=$1 db
+  db="$(json_get "$STATE_DIR/panel.json" db_database 2>/dev/null || true)"
+  [ "$db" = "defensia_lab" ] || die "panel_tinker refused: panel.json db_database='$db' (expected defensia_lab)"
+  panel_compose exec -T app php artisan tinker --execute="$php"
 }
 
 # --- JSON ------------------------------------------------------------------

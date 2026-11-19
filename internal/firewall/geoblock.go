@@ -1,10 +1,10 @@
 package firewall
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/url"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -14,8 +14,10 @@ import (
 // This avoids importing geoip in the firewall package.
 type CIDRProvider func(countryCode string) ([]string, error)
 
-// GeoBlocker manages ipset-based country blocking.
-// Each blocked country gets its own ipset hash:net set with all CIDRs loaded.
+// GeoBlocker manages country blocking on top of the active Backend.
+// Each blocked country gets its own backend-managed set (ipset hash:net on
+// ipset hosts) with all CIDRs loaded; geoChain (see geochain.go) is the
+// iptables-level enforcement, unchanged by backend selection.
 type GeoBlocker struct {
 	mu              sync.Mutex
 	activeCountries map[string]bool // currently blocked country codes (uppercase)
@@ -26,6 +28,10 @@ type GeoBlocker struct {
 	exemptPorts     []int    // TCP destination ports never dropped
 	exemptKey       string   // exemptCIDRs as last loaded into geoExemptSet
 	exemptLoaded    bool
+
+	appliedGen      uint64 // backend generation activeCountries was built against (phase 17)
+	unapplied       int    // countries not enforced at kernel level on the last ApplyCountryBlocks
+	unappliedReason string
 }
 
 // NewGeoBlocker creates a GeoBlocker with the given CIDR provider.
@@ -56,25 +62,26 @@ func NewGeoBlocker(provider CIDRProvider, panelURL string) *GeoBlocker {
 	return gb
 }
 
-// ApplyCountryBlocks synchronizes the ipset country blocks with the desired list.
-// Sets for new countries are loaded first, then geoChain is rebuilt to point at
-// exactly the active sets, and only then are sets for dropped countries
-// destroyed — ipset refuses to destroy a set an iptables rule still references.
+// ApplyCountryBlocks synchronizes the backend's country sets with the desired
+// list. Sets for new countries are loaded first, then geoChain is rebuilt to
+// point at exactly the active sets, and only then are sets for dropped
+// countries destroyed — a set still referenced by geoChain cannot be destroyed.
+//
+// On a backend that cannot load country sets (iptables, no ipset/nftables),
+// nothing is applied at the kernel level; Unapplied() reports how many
+// countries and why, instead of failing silently.
 func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
-	if !HasIpset() {
-		if len(countries) > 0 {
-			log.Printf("[geoblock] WARNING: %d countries configured for blocking but ipset is not installed — country blocks NOT applied at kernel level (falling back to reactive per-IP blocking)", len(countries))
-		}
-		return
-	}
-
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// Ensure protected IPs have ACCEPT rules before any geo DROP
-	if len(countries) > 0 {
-		g.ensureProtectedIPs()
+	// A backend change invalidates what we think is loaded: the new backend
+	// has its own (empty) sets, so every country must be reloaded.
+	if gen := Generation(); gen != g.appliedGen {
+		g.activeCountries = make(map[string]bool)
+		g.appliedGen = gen
 	}
+
+	b := current()
 
 	// Build desired set (uppercase, deduplicated)
 	desired := make(map[string]bool, len(countries))
@@ -85,113 +92,153 @@ func (g *GeoBlocker) ApplyCountryBlocks(countries []string) {
 		}
 	}
 
-	// Load sets for countries that are newly blocked
-	for cc := range desired {
-		if !g.activeCountries[cc] {
-			g.addCountry(cc)
+	if !b.GeoSupported() {
+		if len(desired) > 0 {
+			log.Printf("[geoblock] WARNING: %d countries configured for blocking but the %s backend cannot load country sets — country blocks NOT applied at kernel level (falling back to reactive per-IP blocking)", len(desired), b.Name())
+			g.unapplied = len(desired)
+			g.unappliedReason = "country blocks need ipset or nftables; active backend: " + b.Name()
+		} else {
+			g.unapplied = 0
+			g.unappliedReason = ""
+		}
+		g.enforced = false
+		return
+	}
+
+	// nftables (and any future GeoSupported backend without an exemption
+	// mechanism) has no way to exempt a CIDR or a port from a country block
+	// yet: nft_script.go's geo DROP rule is unconditional
+	// (`ip saddr @geo_xx drop`), unlike the ipset branch below, whose
+	// DEFENSIA-GEO iptables chain already refuses to enforce rather than
+	// cut off a customer's configured exemptions (crawlers, CDN edges,
+	// mail ports) when the exemption set itself fails to sync. Mirror that
+	// same "lesser harm" decision here instead of silently blocking with
+	// the exemptions ignored (phase 17 independent review, WARN-03,
+	// 2026-11-18): treat every desired country as unenforceable — same
+	// outcome as if nothing were configured to block — until the backend
+	// can actually honor the configured exemptions.
+	if b.Name() != "ipset" && len(desired) > 0 && (len(g.exemptCIDRs) > 0 || len(g.exemptPorts) > 0) {
+		log.Printf("[geoblock] WARNING: %d exempt CIDRs / %d exempt ports configured but the %s backend has no exemption mechanism yet — country blocks NOT enforced (enforcing anyway would also block the configured exemptions: crawlers/CDN/mail)", len(g.exemptCIDRs), len(g.exemptPorts), b.Name())
+		for cc := range g.activeCountries {
+			g.removeCountry(b, cc)
+		}
+		g.enforced = false
+		g.unapplied = len(desired)
+		g.unappliedReason = fmt.Sprintf("%s backend has no exemption mechanism for the configured CIDR/port exemptions", b.Name())
+		return
+	}
+
+	g.unapplied = 0
+	g.unappliedReason = ""
+
+	// Ensure protected IPs have ACCEPT rules before any geo DROP
+	if len(desired) > 0 {
+		if err := b.EnsureAccept(g.protectedIPs); err != nil {
+			log.Printf("[geoblock] failed to add ACCEPT rule(s) for protected IPs: %v", err)
 		}
 	}
 
-	// Point the chain at what is actually loaded
-	var sets []string
+	// Load sets for countries that are newly blocked
 	for cc := range desired {
-		if g.activeCountries[cc] {
-			sets = append(sets, ipsetSetName(cc))
+		if !g.activeCountries[cc] {
+			g.addCountry(b, cc)
 		}
 	}
-	sort.Strings(sets)
-	if len(sets) == 0 {
-		teardownGeoChain()
-		g.dropExemptSet()
-	} else if exemptOK := g.syncExemptSet(); len(g.exemptCIDRs) > 0 && !exemptOK {
-		// Blocking without the exemptions would cut off search engines and CDN
-		// edges; leaving countries unblocked until the next sync is the lesser harm.
-		teardownGeoChain()
-		g.enforced = false
-	} else if err := ensureGeoChain(); err != nil {
-		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
-		g.enforced = false
-	} else if err := rebuildGeoChain(g.protectedIPs, exemptOK, g.exemptPorts, sets); err != nil {
-		log.Printf("[geoblock] %v — country blocks NOT enforced", err)
-		g.enforced = false
+
+	// geochain.go's DEFENSIA-GEO iptables chain references ipset sets by
+	// name via `-m set --match-set` — that only ever resolves on the ipset
+	// backend. Every other GeoSupported backend (nftables) wires its own
+	// per-country DROP rule directly inside Backend.GeoReplace/GeoRemove
+	// (backend_nft.go's `geo` chain), so there is no separate chain-rebuild
+	// step for it — rebuilding geoChain against a backend without matching
+	// ipset sets fails with "Set ... doesn't exist", not a no-op.
+	if b.Name() == "ipset" {
+		// Point the chain at what is actually loaded
+		var sets []string
+		for cc := range desired {
+			if g.activeCountries[cc] {
+				sets = append(sets, ipsetSetName(cc))
+			}
+		}
+		sort.Strings(sets)
+		if len(sets) == 0 {
+			teardownGeoChain()
+			g.dropExemptSet()
+		} else if exemptOK := g.syncExemptSet(); len(g.exemptCIDRs) > 0 && !exemptOK {
+			// Blocking without the exemptions would cut off search engines and CDN
+			// edges; leaving countries unblocked until the next sync is the lesser harm.
+			teardownGeoChain()
+			g.enforced = false
+		} else if err := ensureGeoChain(); err != nil {
+			log.Printf("[geoblock] %v — country blocks NOT enforced", err)
+			g.enforced = false
+		} else if err := rebuildGeoChain(g.protectedIPs, exemptOK, g.exemptPorts, sets); err != nil {
+			log.Printf("[geoblock] %v — country blocks NOT enforced", err)
+			g.enforced = false
+		} else {
+			g.enforced = true
+		}
+		if len(sets) == 0 {
+			g.enforced = false
+		}
 	} else {
-		g.enforced = true
-	}
-	if len(sets) == 0 {
-		g.enforced = false
+		// No exemptions configured — the early return above already
+		// handles the case where there are any. Just report whether every
+		// desired country actually loaded at the kernel level.
+		enforcedCount := 0
+		for cc := range desired {
+			if g.activeCountries[cc] {
+				enforcedCount++
+			}
+		}
+		g.enforced = enforcedCount > 0 && enforcedCount == len(desired)
 	}
 
 	// Destroy sets for countries that are no longer blocked
 	for cc := range g.activeCountries {
 		if !desired[cc] {
-			g.removeCountry(cc)
+			g.removeCountry(b, cc)
 		}
 	}
 }
 
-// addCountry creates an ipset set for the country and loads its CIDRs. The
-// iptables side is geoChain's job.
-func (g *GeoBlocker) addCountry(cc string) {
-	setName := ipsetSetName(cc)
-
-	// Get CIDRs from provider
+// addCountry asks the backend to load the country's CIDRs into its set. The
+// iptables-level DROP rule is geoChain's job, rebuilt by the caller.
+func (g *GeoBlocker) addCountry(b Backend, cc string) {
 	cidrs, err := g.cidrProvider(cc)
 	if err != nil {
 		log.Printf("[geoblock] error getting CIDRs for %s: %v", cc, err)
+		g.unapplied++
+		g.unappliedReason = err.Error()
 		return
 	}
 	if len(cidrs) == 0 {
 		log.Printf("[geoblock] no CIDRs found for %s — skipping", cc)
+		g.unapplied++
+		g.unappliedReason = fmt.Sprintf("no CIDRs found for %s", cc)
 		return
 	}
 
-	// An older agent may have left a per-country DROP in INPUT for this set
-	removeLegacyGeoRule(setName)
-
-	// Create the ipset set. A set left by an older agent with the smaller
-	// maxelem cannot be re-created in place, so drop it and try once more.
-	if err := createIpsetHashNet(setName); err != nil {
-		_ = flushIpset(setName)
-		_ = destroyIpset(setName)
-		if err := createIpsetHashNet(setName); err != nil {
-			log.Printf("[geoblock] failed to create set %s: %v", setName, err)
-			return
-		}
-	}
-
-	// Flush any stale entries
-	if err := flushIpset(setName); err != nil {
-		log.Printf("[geoblock] failed to flush set %s: %v", setName, err)
-	}
-
-	// Populate with CIDRs using batch restore (fast)
-	if err := populateIpsetBatch(setName, cidrs); err != nil {
-		log.Printf("[geoblock] failed to populate set %s with %d CIDRs: %v", setName, len(cidrs), err)
-		// A set geoChain does not reference yet can be destroyed safely
-		_ = destroyIpset(setName)
+	loaded, err := b.GeoReplace(cc, cidrs)
+	if err != nil {
+		log.Printf("[geoblock] failed to load country set for %s: %v", cc, err)
+		g.unapplied++
+		g.unappliedReason = err.Error()
 		return
 	}
 
 	g.activeCountries[cc] = true
-	count := ipsetEntryCount(setName)
-	log.Printf("[geoblock] ✓ loaded %s: %d CIDRs in %s", cc, count, setName)
+	log.Printf("[geoblock] ✓ blocked %s: %d CIDRs loaded (%s)", cc, loaded, b.Name())
 }
 
-// removeCountry destroys the ipset set for a country. Callers must rebuild
-// geoChain without it first.
-func (g *GeoBlocker) removeCountry(cc string) {
-	setName := ipsetSetName(cc)
-
-	removeLegacyGeoRule(setName)
-
-	// Flush and destroy the set
-	_ = flushIpset(setName)
-	if err := destroyIpset(setName); err != nil {
-		log.Printf("[geoblock] warning: failed to destroy set %s: %v", setName, err)
+// removeCountry asks the backend to destroy the country's set. Callers must
+// rebuild geoChain without it first.
+func (g *GeoBlocker) removeCountry(b Backend, cc string) {
+	if err := b.GeoRemove(cc); err != nil {
+		log.Printf("[geoblock] warning: failed to remove country set for %s: %v", cc, err)
 	}
-
 	delete(g.activeCountries, cc)
-	log.Printf("[geoblock] ✓ unblocked %s: set %s removed", cc, setName)
+	log.Printf("[geoblock] ✓ unblocked %s", cc)
 }
 
 // Invalidate forgets which sets are loaded, so the next ApplyCountryBlocks
@@ -211,6 +258,15 @@ func (g *GeoBlocker) Enforced() (bool, int) {
 		return false, 0
 	}
 	return true, len(g.activeCountries)
+}
+
+// Unapplied reports how many desired countries were NOT enforced at the
+// kernel level on the last ApplyCountryBlocks call, and why. (0, "") means
+// everything desired is enforced (or nothing was desired).
+func (g *GeoBlocker) Unapplied() (int, string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.unapplied, g.unappliedReason
 }
 
 // ActiveCountries returns the list of currently blocked countries.
@@ -248,32 +304,15 @@ func (g *GeoBlocker) SetWhitelistedIPs(ips []string) {
 	}
 }
 
-// ensureProtectedIPs inserts iptables ACCEPT rules for all protected IPs.
-// These ACCEPT rules are inserted at position 1, before any geo DROP rules.
-func (g *GeoBlocker) ensureProtectedIPs() {
-	for _, ip := range g.protectedIPs {
-		// Check if ACCEPT rule already exists
-		if exec.Command("iptables", "-C", "INPUT", "-s", ip, "-j", "ACCEPT").Run() == nil {
-			continue // already exists
-		}
-		// Insert at position 1 (before any DROP rules)
-		out, err := exec.Command("iptables", "-I", "INPUT", "1", "-s", ip, "-j", "ACCEPT").CombinedOutput()
-		if err != nil {
-			log.Printf("[geoblock] failed to add ACCEPT rule for protected IP %s: %s", ip, strings.TrimSpace(string(out)))
-		} else {
-			log.Printf("[geoblock] ✓ protected IP %s: ACCEPT rule added (immune to geoblocking)", ip)
-		}
-	}
-}
-
-// Cleanup removes all geoblock ipset sets and iptables rules (used on shutdown).
+// Cleanup removes all geoblock sets and iptables rules (used on shutdown).
 func (g *GeoBlocker) Cleanup() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	teardownGeoChain()
 	g.dropExemptSet()
+	b := current()
 	for cc := range g.activeCountries {
-		g.removeCountry(cc)
+		g.removeCountry(b, cc)
 	}
 	g.enforced = false
 }

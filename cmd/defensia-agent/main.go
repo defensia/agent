@@ -173,6 +173,9 @@ func runAgent() {
 
 	// Initialize firewall backend (detects ipset, falls back to iptables)
 	firewall.Init()
+	if firewall.Mode() == "none" {
+		reportFirewallUnavailable(apiClient, "bans", firewall.SelectionReason(), 0)
+	}
 
 	// Initialize ModSecurity engine (auto-detects if Apache + mod_security installed)
 	modsecEngine = modsecurity.New()
@@ -302,6 +305,10 @@ func runAgent() {
 
 		if err := firewall.BanIP(ip); err != nil {
 			log.Printf("[firewall] error: %v", err)
+			if !shouldReportBan(err) {
+				log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
+				return
+			}
 		}
 
 		if err := apiClient.ReportBan(api.BanRequest{
@@ -380,6 +387,10 @@ func runAgent() {
 				log.Printf("[webwatcher] banning %s: %s (count=%d)", ip, reason, count)
 				if err := firewall.BanIP(ip); err != nil {
 					log.Printf("[firewall] error: %v", err)
+					if !shouldReportBan(err) {
+						log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
+						return
+					}
 				}
 				if err := apiClient.ReportBan(api.BanRequest{
 					IPAddress: ip,
@@ -407,6 +418,10 @@ func runAgent() {
 			log.Printf("[webwatcher] scored ban %s: %s (score=%d, duration=%s)", ip, reason, score, duration)
 			if err := firewall.BanIP(ip); err != nil {
 				log.Printf("[firewall] error: %v", err)
+				if !shouldReportBan(err) {
+					log.Printf("[firewall] scored ban of %s not reported to the panel: no usable firewall backend", ip)
+					return
+				}
 			}
 			// banExpiry is nil unless a duration is configured, which leaves the
 			// expiry to the backend's escalation (1st=24h, 2nd=7d, 3rd=30d,
@@ -486,6 +501,10 @@ func runAgent() {
 			log.Printf("[mailwatcher] banning %s: %s (count=%d)", ip, reason, count)
 			if err := firewall.BanIP(ip); err != nil {
 				log.Printf("[firewall] error: %v", err)
+				if !shouldReportBan(err) {
+					log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
+					return
+				}
 			}
 			if err := apiClient.ReportBan(api.BanRequest{
 				IPAddress: ip,
@@ -522,6 +541,10 @@ func runAgent() {
 			log.Printf("[dbwatcher] banning %s: %s (count=%d)", ip, reason, count)
 			if err := firewall.BanIP(ip); err != nil {
 				log.Printf("[firewall] error: %v", err)
+				if !shouldReportBan(err) {
+					log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
+					return
+				}
 			}
 			if err := apiClient.ReportBan(api.BanRequest{
 				IPAddress: ip,
@@ -558,6 +581,10 @@ func runAgent() {
 			log.Printf("[ftpwatcher] banning %s: %s (count=%d)", ip, reason, count)
 			if err := firewall.BanIP(ip); err != nil {
 				log.Printf("[firewall] error: %v", err)
+				if !shouldReportBan(err) {
+					log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
+					return
+				}
 			}
 			if err := apiClient.ReportBan(api.BanRequest{
 				IPAddress: ip,
@@ -778,6 +805,26 @@ func runAgent() {
 		go ftpW.Run()
 	}
 
+	// triggerFirewallResync re-applies bans and country blocks right away
+	// (instead of waiting for the next scheduled sync) after the firewall
+	// backend self-heals mid-run — e.g. its table/sets were recreated after a
+	// csf -r flush, or the detected backend changed entirely. Also used by
+	// OnSyncRequested below, so a panel-requested sync and a self-heal resync
+	// never run concurrently.
+	var fwSyncInFlight atomic.Bool
+	triggerFirewallResync := func(why string) {
+		if !fwSyncInFlight.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer fwSyncInFlight.Store(false)
+			log.Printf("[firewall] %s — re-applying bans and country blocks now", why)
+			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
+				log.Printf("[sync] firewall resync failed: %v", err)
+			}
+		}()
+	}
+
 	// Start Reverb WebSocket listener
 	wsClient := ws.New(
 		cfg.ReverbURL,
@@ -823,11 +870,7 @@ func runAgent() {
 			},
 			OnSyncRequested: func(p ws.SyncRequestedPayload) {
 				log.Printf("[reverb] sync.requested: agent_id=%d", p.AgentID)
-				go func() {
-					if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
-						log.Printf("[sync] sync.requested failed: %v", err)
-					}
-				}()
+				triggerFirewallResync("panel requested a sync")
 			},
 			OnAuditRequested: func(p ws.AuditRequestedPayload) {
 				log.Printf("[reverb] audit.requested: audit_id=%d", p.AuditID)
@@ -898,6 +941,13 @@ func runAgent() {
 			var reqAnalyzed uint64
 			if webW != nil {
 				reqAnalyzed = webW.RequestsAnalyzed()
+			}
+
+			prevGen := firewall.Generation()
+			if err := firewall.Ensure(); err != nil {
+				reportFirewallUnavailable(apiClient, "bans", firewall.SelectionReason(), 0)
+			} else if firewall.Generation() != prevGen {
+				triggerFirewallResync("firewall backend " + firewall.Mode() + " (re)initialised")
 			}
 
 			fwStatus := firewall.FirewallStatus()
@@ -1117,6 +1167,15 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		webW.UpdateWhitelist(wlIPs, wlCIDRs)
 	}
 
+	// Self-heal the firewall backend before applying anything: if the table
+	// (ipset sets / nft table) was recreated or the detected backend changed
+	// since the last sync, the heartbeat's own Ensure()+Generation() check
+	// will have already triggered this resync — Ensure() here is cheap and
+	// idempotent, so it is always safe to call again.
+	if err := firewall.Ensure(); err != nil {
+		log.Printf("[firewall] ensure: %v", err)
+	}
+
 	// Apply geoblocking from config (blocked_countries field)
 	blockedCountries := sync.Config.BlockedCountries
 	// Fallback: also check rules with country_code for backward compatibility
@@ -1132,9 +1191,12 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	geoBlocker.SetWhitelistedIPs(wlIPs)
 	geoBlocker.SetExemptions(sync.Config.GeoExemptCIDRs, sync.Config.GeoExemptPorts)
 
-	// Apply proactive country blocks via ipset hash:net (kernel-level, all CIDRs)
+	// Apply proactive country blocks via the active backend (kernel-level, all CIDRs)
 	if !sync.Config.MonitorMode {
 		geoBlocker.ApplyCountryBlocks(blockedCountries)
+		if n, why := geoBlocker.Unapplied(); n > 0 {
+			reportFirewallUnavailable(client, "geoblock", why, n)
+		}
 	} else if len(blockedCountries) > 0 {
 		log.Printf("[geoblock] monitor mode — country blocks not applied at kernel level")
 	}
@@ -1142,13 +1204,18 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 	// Apply bans (skipped in monitor mode)
 	activeBanIPs := make(map[string]bool, len(sync.Bans))
 	banIPs := make([]string, 0, len(sync.Bans))
+	entries := make([]firewall.BanEntry, 0, len(sync.Bans))
 	for _, b := range sync.Bans {
 		activeBanIPs[b.IPAddress] = true
 		banIPs = append(banIPs, b.IPAddress)
+		entries = append(entries, firewall.BanEntry{IP: b.IPAddress, TTL: banTTL(b.ExpiresAt, time.Now())})
 	}
 	bansApplied := 0
 	if !sync.Config.MonitorMode {
-		bansApplied = firewall.ApplyBans(banIPs)
+		bansApplied = firewall.ApplyBanEntries(entries)
+		if firewall.Mode() == "none" {
+			reportFirewallUnavailable(client, "bans", firewall.SelectionReason(), 0)
+		}
 	}
 
 	// Write web server IP deny rules when behind a proxy (Cloudflare, etc.).
@@ -1170,8 +1237,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}(banIPs)
 	}
 
-	// Apply threat feed blocks (IPs + CIDRs from Spamhaus, Feodo, etc.)
-	if !sync.Config.MonitorMode && len(sync.ThreatFeed) > 0 {
+	// Apply threat feed blocks (IPs + CIDRs from Spamhaus, Feodo, etc.) —
+	// skipped with no usable backend, same as the sync bans above.
+	if !sync.Config.MonitorMode && len(sync.ThreatFeed) > 0 && firewall.Mode() != "none" {
 		go applyThreatFeed(sync.ThreatFeed)
 		saveThreatFeedCache(sync.ThreatFeed)
 	}
@@ -1472,6 +1540,10 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 
 // importExistingRules reads current iptables INPUT rules and sends them to the server.
 func importExistingRules(client *api.Client) {
+	if m := firewall.Mode(); m != "ipset" && m != "iptables" {
+		log.Printf("[import] rule import reads iptables rules and is not available with the %s backend", m)
+		return
+	}
 	rules, err := firewall.ListRules()
 	if err != nil {
 		log.Printf("[import] failed to list iptables rules: %v", err)

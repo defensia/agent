@@ -134,6 +134,21 @@ for vm in $vms; do
   RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
   vm_push "$vm" "$BINARY" /root/integration.test
 
+  # Every agent VM registers with monitor_mode=true (AgentService::register
+  # safety default) — `make lab-reset` re-registers from scratch, so this
+  # must run before every single VM here, not just the dedicated attack
+  # target. Without it, TestLabDaemonPanelBanEnforced/
+  # TestLabDaemonCSFRestartKeepsBans only ever see monitor-mode events and
+  # time out waiting for a kernel ban that syncAndApply's own
+  # `if !sync.Config.MonitorMode` guard deliberately never applies. The
+  # suite's own restartAgent(t) picks up the new value — no restart needed
+  # here (same ordering lab/attack.sh and lab/diagnose-firewall.sh rely on).
+  ap_out="$(ensure_active_protection "$vm")"
+  case "$ap_out" in
+    toggled-off | already-off) log "$vm: active protection: $ap_out" ;;
+    *) die "test.sh: ensure_active_protection($vm) failed: $ap_out" ;;
+  esac
+
   fork="$(vm_fork "$vm")"
   expect_csf="$(csf_expect "$vm")"
   csf_version="$(expect_or_empty "$(vm_csf_version "$vm")")"
@@ -143,6 +158,7 @@ for vm in $vms; do
   csf_fork_expect="$(expect_or_empty "$(vm_csf_fork "$vm")")"
   dl_configserver_expect="$(expect_or_empty "$(vm_dl_configserver "$vm")")"
   csf_ipv6_test="$(expect_or_empty "$(vm_csf_ipv6_test "$vm")")"
+  fw_variant="$(expect_or_empty "$(vm_fw_variant "$vm")")"
 
   start=$(date +%s)
   vm_root "$vm" env \
@@ -157,10 +173,12 @@ for vm in $vms; do
     LAB_EXPECT_CSF_FORK="$csf_fork_expect" \
     LAB_EXPECT_DL_CONFIGSERVER="$dl_configserver_expect" \
     LAB_CSF_IPV6_TEST="$csf_ipv6_test" \
+    LAB_FW_VARIANT="$fw_variant" \
     LAB_PANEL_URL="$PANEL_URL_VM" \
     LAB_PANEL_TOKEN="$TOKEN" \
     LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
-    /root/integration.test -test.v -test.count=1 -test.timeout 12m -test.run '^TestLab' >"$RAW" 2>&1
+    LAB_CAPTURE_NFT_FIXTURES="${LAB_CAPTURE_NFT_FIXTURES:-}" \
+    /root/integration.test -test.v -test.count=1 -test.timeout "${LAB_TEST_TIMEOUT:-30m}" -test.run '^TestLab' >"$RAW" 2>&1
   rc=$?
   seconds=$(($(date +%s) - start))
 

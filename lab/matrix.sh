@@ -4,8 +4,8 @@
 # bash 3.2 safe: case tables instead of associative arrays.
 set -euo pipefail
 
-LAB_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf lab-attacker"
-LAB_AGENT_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf"
+LAB_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset alma10-noiptables alma10-ipset-broken debian12-nocsf lab-attacker"
+LAB_AGENT_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset alma10-noiptables alma10-ipset-broken debian12-nocsf"
 LAB_CSF_VMS="alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset"
 
 # The three lists above are consumed, never checked — so dropping a VM from
@@ -29,9 +29,9 @@ _matrix_expect() {
   [ "$_got" = "$_want" ] || die "lab matrix drift: $_name is [${_got% }], want [${_want% }] (see REQUIREMENTS.md LAB-01)"
 }
 _matrix_expect LAB_VMS "$LAB_VMS" \
-  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf lab-attacker"
+  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset alma10-noiptables alma10-ipset-broken debian12-nocsf lab-attacker"
 _matrix_expect LAB_AGENT_VMS "$LAB_AGENT_VMS" \
-  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset debian12-nocsf"
+  "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset alma10-noiptables alma10-ipset-broken debian12-nocsf"
 _matrix_expect LAB_CSF_VMS "$LAB_CSF_VMS" \
   "alma9-csf-orig alma9-csf-aetherinox debian12-csf-sentinel alma9-csf-da alma8-csf-cwp-orphan alma10-noipset"
 unset -f _matrix_sorted _matrix_expect
@@ -43,7 +43,7 @@ vm_distro() {
     alma9-csf-orig|alma9-csf-aetherinox|alma9-csf-da|lab-attacker) echo "alma:9" ;;
     debian12-csf-sentinel|debian12-nocsf) echo "debian:bookworm" ;;
     alma8-csf-cwp-orphan) echo "alma:8" ;;
-    alma10-noipset) echo "alma:10" ;;
+    alma10-noipset|alma10-noiptables|alma10-ipset-broken) echo "alma:10" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -51,7 +51,7 @@ vm_distro() {
 # vm_family VM -> alma|debian
 vm_family() {
   case "$1" in
-    alma9-csf-orig|alma9-csf-aetherinox|alma9-csf-da|alma8-csf-cwp-orphan|alma10-noipset|lab-attacker) echo "alma" ;;
+    alma9-csf-orig|alma9-csf-aetherinox|alma9-csf-da|alma8-csf-cwp-orphan|alma10-noipset|alma10-noiptables|alma10-ipset-broken|lab-attacker) echo "alma" ;;
     debian12-csf-sentinel|debian12-nocsf) echo "debian" ;;
     *) die "unknown VM $1" ;;
   esac
@@ -64,18 +64,19 @@ vm_fork() {
     alma9-csf-aetherinox) echo "aetherinox-15.10" ;;
     debian12-csf-sentinel) echo "sentinel-15.13" ;;
     alma9-csf-da) echo "directadmin-15.12" ;;
-    debian12-nocsf|lab-attacker) echo "none" ;;
+    debian12-nocsf|lab-attacker|alma10-noiptables|alma10-ipset-broken) echo "none" ;;
     *) die "unknown VM $1" ;;
   esac
 }
 
-# vm_role VM -> csf|csf-orphan|attack-target|attacker
+# vm_role VM -> csf|csf-orphan|attack-target|attacker|fw-variant
 vm_role() {
   case "$1" in
     alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma10-noipset) echo "csf" ;;
     alma8-csf-cwp-orphan) echo "csf-orphan" ;;
     debian12-nocsf) echo "attack-target" ;;
     lab-attacker) echo "attacker" ;;
+    alma10-noiptables|alma10-ipset-broken) echo "fw-variant" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -85,7 +86,7 @@ vm_testing() {
   case "$1" in
     alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma10-noipset) echo "0" ;;
     alma8-csf-cwp-orphan) echo "1" ;;
-    debian12-nocsf|lab-attacker) echo "-" ;;
+    debian12-nocsf|lab-attacker|alma10-noiptables|alma10-ipset-broken) echo "-" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -95,7 +96,7 @@ vm_lfd() {
   case "$1" in
     alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma10-noipset) echo "active" ;;
     alma8-csf-cwp-orphan) echo "inactive" ;;
-    debian12-nocsf|lab-attacker) echo "-" ;;
+    debian12-nocsf|lab-attacker|alma10-noiptables|alma10-ipset-broken) echo "-" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -103,8 +104,8 @@ vm_lfd() {
 # vm_ipset VM -> yes|no (whether the ipset package is installed)
 vm_ipset() {
   case "$1" in
-    alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|debian12-nocsf) echo "yes" ;;
-    alma10-noipset|lab-attacker) echo "no" ;;
+    alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|debian12-nocsf|alma10-ipset-broken) echo "yes" ;;
+    alma10-noipset|lab-attacker|alma10-noiptables) echo "no" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -116,7 +117,7 @@ vm_csfv_regex() {
     alma9-csf-aetherinox) echo 'v15\.10 \(generic\)' ;;
     debian12-csf-sentinel) echo 'v15\.11 \(generic\)' ;;
     alma9-csf-da) echo 'v15\.12 \(DirectAdmin\)' ;;
-    debian12-nocsf|lab-attacker) echo "-" ;;
+    debian12-nocsf|lab-attacker|alma10-noiptables|alma10-ipset-broken) echo "-" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -128,15 +129,19 @@ vm_csf_version() {
     alma9-csf-aetherinox) echo "15.10" ;;
     debian12-csf-sentinel) echo "15.11" ;;
     alma9-csf-da) echo "15.12" ;;
-    debian12-nocsf|lab-attacker) echo "-" ;;
+    debian12-nocsf|lab-attacker|alma10-noiptables|alma10-ipset-broken) echo "-" ;;
     *) die "unknown VM $1" ;;
   esac
 }
 
-# vm_fw_mode VM -> ipset|iptables|"-"
+# vm_fw_mode VM -> ipset|iptables|nftables|"-" (TARGET mode after phase 17
+# plan 17-04's nftables backend: alma10-noipset/alma10-noiptables/
+# alma10-ipset-broken select nftables because ipset is unusable there
+# (missing kernel module, missing binary, or a broken ipset shim) and nft
+# >= 1.0.0 is; every other agent VM still selects ipset, unchanged)
 vm_fw_mode() {
   case "$1" in
-    alma10-noipset) echo "iptables" ;;
+    alma10-noipset|alma10-noiptables|alma10-ipset-broken) echo "nftables" ;;
     alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|debian12-nocsf) echo "ipset" ;;
     lab-attacker) echo "-" ;;
     *) die "unknown VM $1" ;;
@@ -147,7 +152,7 @@ vm_fw_mode() {
 vm_has_agent() {
   case "$1" in
     lab-attacker) echo "no" ;;
-    alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|alma10-noipset|debian12-nocsf) echo "yes" ;;
+    alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|alma10-noipset|alma10-noiptables|alma10-ipset-broken|debian12-nocsf) echo "yes" ;;
     *) die "unknown VM $1" ;;
   esac
 }
@@ -165,7 +170,7 @@ vm_csf_fork() {
     alma9-csf-aetherinox) echo "aetherinox" ;;
     debian12-csf-sentinel) echo "sentinel" ;;
     alma9-csf-da) echo "directadmin" ;;
-    debian12-nocsf) echo "none" ;;
+    debian12-nocsf|alma10-noiptables|alma10-ipset-broken) echo "none" ;;
     lab-attacker) echo "-" ;;
     *) die "unknown VM $1" ;;
   esac
@@ -180,7 +185,20 @@ vm_dl_configserver() {
   case "$1" in
     alma8-csf-cwp-orphan) echo "1" ;;
     alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma10-noipset) echo "0" ;;
-    debian12-nocsf|lab-attacker) echo "-" ;;
+    debian12-nocsf|lab-attacker|alma10-noiptables|alma10-ipset-broken) echo "-" ;;
+    *) die "unknown VM $1" ;;
+  esac
+}
+
+# vm_fw_variant VM -> nft-a|nft-b|nft-c|"-" (phase 17 RHEL 10 firewall
+# variant provisioned by lab/provision/fw-variant.sh; "-" = not a variant
+# VM, no fw-variant.sh run, no scope decision needed for it)
+vm_fw_variant() {
+  case "$1" in
+    alma10-noipset) echo "nft-a" ;;
+    alma10-noiptables) echo "nft-b" ;;
+    alma10-ipset-broken) echo "nft-c" ;;
+    alma9-csf-orig|alma9-csf-aetherinox|debian12-csf-sentinel|alma9-csf-da|alma8-csf-cwp-orphan|debian12-nocsf|lab-attacker) echo "-" ;;
     *) die "unknown VM $1" ;;
   esac
 }

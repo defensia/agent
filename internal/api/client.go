@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +26,10 @@ type Client struct {
 	// throughput from API latency and bounds goroutine count under flood.
 	eventCh      chan EventRequest
 	eventDropped uint64
+
+	// legacyFwModeWarned: logged once per process, not once per fallback
+	// heartbeat (phase 17 NFT-03) — see Heartbeat.
+	legacyFwModeWarned atomic.Bool
 }
 
 const (
@@ -458,12 +463,32 @@ func (c *Client) Register(req RegisterRequest) (*RegisterResponse, error) {
 	return &resp, nil
 }
 
-func (c *Client) Heartbeat(req HeartbeatRequest) (*HeartbeatResponse, error) {
+// heartbeatOnce posts the heartbeat exactly once.
+func (c *Client) heartbeatOnce(req HeartbeatRequest) (*HeartbeatResponse, error) {
 	var resp HeartbeatResponse
 	if err := c.post("/api/v1/agent/heartbeat", c.token, req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// Heartbeat posts the heartbeat. Panels older than agent phase 17 validate
+// firewall_mode as in:ipset,iptables and reject the WHOLE heartbeat with 422
+// when the agent reports nftables or none; in that case resend once without
+// the firewall fields so the server never looks offline.
+func (c *Client) Heartbeat(req HeartbeatRequest) (*HeartbeatResponse, error) {
+	resp, err := c.heartbeatOnce(req)
+	var he *HTTPError
+	if err != nil && errors.As(err, &he) && he.Status == http.StatusUnprocessableEntity &&
+		(req.FirewallMode == "nftables" || req.FirewallMode == "none") &&
+		strings.Contains(he.Body, "firewall_mode") {
+		if c.legacyFwModeWarned.CompareAndSwap(false, true) {
+			log.Printf("[api] panel rejected firewall_mode=%q (panel predates nftables support) — sending heartbeat without firewall fields", req.FirewallMode)
+		}
+		req.FirewallMode, req.BanCapacity, req.ActiveBans = "", 0, 0
+		return c.heartbeatOnce(req)
+	}
+	return resp, err
 }
 
 func (c *Client) Sync() (*SyncResponse, error) {

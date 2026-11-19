@@ -1,0 +1,18 @@
+add table inet defensia
+add chain inet defensia input { type filter hook input priority -10; policy accept; }
+add chain inet defensia protected
+add chain inet defensia portrules
+add chain inet defensia geo
+add set inet defensia bans4 { type ipv4_addr; flags timeout; size 65536; }
+add set inet defensia bans6 { type ipv6_addr; flags timeout; size 65536; }
+add set inet defensia protected4 { type ipv4_addr; }
+add set inet defensia protected6 { type ipv6_addr; }
+flush chain inet defensia input
+add rule inet defensia input jump protected comment "defensia:protected"
+add rule inet defensia input jump portrules comment "defensia:rules"
+add rule inet defensia input ip saddr @bans4 drop comment "defensia:bans4"
+add rule inet defensia input ip6 saddr @bans6 drop comment "defensia:bans6"
+add rule inet defensia input jump geo comment "defensia:geo"
+flush chain inet defensia protected
+add rule inet defensia protected ip saddr @protected4 accept comment "defensia:protected4"
+add rule inet defensia protected ip6 saddr @protected6 accept comment "defensia:protected6"

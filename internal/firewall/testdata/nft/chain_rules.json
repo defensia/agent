@@ -1,0 +1,27 @@
+{
+  "nftables": [
+    {"metainfo": {"version": "1.0.6", "release_name": "Lester Gooch #5", "json_schema_version": 1}},
+    {"rule": {
+      "family": "inet",
+      "table": "defensia",
+      "chain": "portrules",
+      "handle": 4,
+      "expr": [
+        {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 8080}},
+        {"drop": null}
+      ],
+      "comment": "defensia-rule:block:tcp:-:8080"
+    }},
+    {"rule": {
+      "family": "inet",
+      "table": "defensia",
+      "chain": "geo",
+      "handle": 7,
+      "expr": [
+        {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": "@geo_cn"}},
+        {"drop": null}
+      ],
+      "comment": "defensia-geo:cn"
+    }}
+  ]
+}
