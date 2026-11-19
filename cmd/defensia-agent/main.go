@@ -806,6 +806,11 @@ func runAgent() {
 	// the first sync — a port action or a paused kill switch may already
 	// be waiting on this very first sync response.
 	startCSFRuntime(context.Background(), apiClient, cfg.ServerURL)
+	startCSFSot(context.Background(), apiClient, cfg.ServerURL, func() {
+		if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
+			log.Printf("[csf-sot] triggered sync failed: %v", err)
+		}
+	})
 
 	// Initial sync (applies config, whitelists, rules, bans)
 	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
@@ -1046,6 +1051,7 @@ func runAgent() {
 				},
 			}
 			hbReq.CSFHeartbeatFields, hbReq.CSFPaused = buildCSFHeartbeat(csfSnap, firewall.CSFPaused())
+			hbReq.Capabilities, hbReq.CSFSot = csfSotHeartbeatFields()
 
 			resp, err := apiClient.Heartbeat(hbReq)
 			if err != nil {
@@ -1053,6 +1059,7 @@ func runAgent() {
 				continue
 			}
 			onHeartbeatSuccess(csfSnap)
+			onHeartbeatResponseCSFSot(resp.CSFSot)
 
 			// Check for agent update
 			if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
@@ -1102,6 +1109,7 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		return err
 	}
 	applyCSFIntegrationFlag(sync.CSFIntegrationDisabled)
+	onSyncCSFSot(sync.Config.CSFSot)
 
 	// Handle suspension: when suspended, stop all active protection but keep heartbeat alive.
 	// The agent stays installed — upgrading the plan automatically lifts the suspension.
