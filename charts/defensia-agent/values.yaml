@@ -24,7 +24,16 @@ dockerSocket:
   enabled: false
   path: /var/run/docker.sock
 
+# containerd is off by default too, for a stronger reason than Docker's: nothing
+# in the agent reads this socket. Mounting it with type: Socket requires the path
+# to exist, and the path below is containerd's upstream default — k3s uses
+# /run/k3s/containerd/containerd.sock, and RKE2, MicroK8s and CRI-O differ again.
+# On those the pod never leaves ContainerCreating, and because it never starts it
+# never sends a heartbeat, so the failed install is invisible to us.
+#
+# Turn it on, with the right path, only once there is something that reads it.
 containerdSocket:
+  enabled: false
   path: /run/containerd/containerd.sock
 
 # Defensia server URL (change only for self-hosted)

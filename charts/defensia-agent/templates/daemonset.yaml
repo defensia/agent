@@ -89,9 +89,11 @@ spec:
               mountPath: /var/run/docker.sock
               readOnly: true
             {{- end }}
+            {{- if .Values.containerdSocket.enabled }}
             - name: containerd-sock
               mountPath: {{ .Values.containerdSocket.path }}
               readOnly: true
+            {{- end }}
             - name: agent-config
               mountPath: /etc/defensia
       volumes:
@@ -116,10 +118,22 @@ spec:
             path: {{ .Values.dockerSocket.path }}
             type: Socket
         {{- end }}
+        {{- if .Values.containerdSocket.enabled }}
+        # Off by default, and the reason is not symmetry with the Docker socket
+        # above: nothing in the agent reads this socket. There is no CRI client in
+        # the codebase at all, so the mount bought nothing and cost installations.
+        #
+        # type: Socket requires the path to exist, and the path is hard-coded to
+        # containerd's upstream default. k3s puts its socket at
+        # /run/k3s/containerd/containerd.sock, and RKE2, MicroK8s and CRI-O differ
+        # again — so on any of those the pod never leaves ContainerCreating. That
+        # failure is invisible to us: an agent that never starts never sends a
+        # heartbeat, so a broken install leaves no trace in our own telemetry.
         - name: containerd-sock
           hostPath:
             path: {{ .Values.containerdSocket.path }}
             type: Socket
+        {{- end }}
         - name: agent-config
           hostPath:
             path: /etc/defensia
