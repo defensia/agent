@@ -168,8 +168,11 @@
     },
     "containerdSocket": {
       "type": "object",
-      "description": "containerd socket path. Mounted with type: Socket, so a node without it fails loudly instead of growing a stray directory.",
+      "description": "containerd socket mount. Disabled by default: nothing in the agent reads it, and type: Socket with a hard-coded path makes the pod hang in ContainerCreating on k3s, RKE2, MicroK8s and CRI-O, where the socket lives elsewhere.",
       "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
         "path": {
           "type": "string"
         }

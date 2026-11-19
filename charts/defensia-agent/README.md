@@ -138,7 +138,14 @@ extraEnv:
 |---|---|---|
 | Logs | `/var/log` | read-only |
 | Docker socket | `/var/run/docker.sock` | read-only |
-| Containerd socket | `/run/containerd/containerd.sock` | read-only |
+| Containerd socket | `/run/containerd/containerd.sock` | read-only, **off by default** |
+
+The containerd socket is not mounted unless you ask for it with
+`containerdSocket.enabled=true`, because nothing in the agent reads it yet. It is
+mounted with `type: Socket`, which requires the path to exist, and the default
+path is containerd's upstream one — k3s uses `/run/k3s/containerd/containerd.sock`,
+and RKE2, MicroK8s and CRI-O differ again. Mounting it on a cluster that keeps the
+socket elsewhere leaves the pod in `ContainerCreating` indefinitely.
 | Agent config | `/etc/defensia` | read-write (keeps the node registered across pod restarts) |
 
 ## Agent capabilities
