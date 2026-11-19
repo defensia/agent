@@ -30,7 +30,24 @@ func withLookPathMissing(t *testing.T, missing string) {
 	t.Cleanup(func() { lookPath = prev })
 }
 
+// withLookPathFound makes lookPath(name) succeed (returning a fake path)
+// regardless of what is actually installed on the machine running the
+// test — used so tests can exercise the "ss is available" branch on a
+// CI/dev box (e.g. this Mac) that has no real ss/sshd binary.
+func withLookPathFound(t *testing.T, name, fakePath string) {
+	t.Helper()
+	prev := lookPath
+	lookPath = func(n string) (string, error) {
+		if n == name {
+			return fakePath, nil
+		}
+		return prev(n)
+	}
+	t.Cleanup(func() { lookPath = prev })
+}
+
 func TestSSHSessionIPsFromSS(t *testing.T) {
+	withLookPathFound(t, "ss", "/usr/sbin/ss")
 	withRunCmd(t, func(ctx context.Context, d time.Duration, name string, args ...string) ([]byte, error) {
 		out := "ESTAB 0 0 10.0.0.5:22 203.0.113.7:51234\n" +
 			"ESTAB 0 0 10.0.0.5:22 [::ffff:198.51.100.4]:40000\n" +
