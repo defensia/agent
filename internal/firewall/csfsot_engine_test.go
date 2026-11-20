@@ -342,6 +342,125 @@ func TestEngineIntentionalRetries(t *testing.T) {
 	}
 }
 
+// TestEngineApplyingReportSurfacesProblemsAndError locks in a real bug
+// found live (phase 16.1, 2026-11-20): buildApplyingReport (the report
+// sent while an intentional change is waiting on backoff or has
+// exhausted its retries) never included obs.Problems or the last
+// attempt's error, so a rollout item stuck on an out-of-scope key (a
+// duplicate_key csf.conf, or any other precheck problem) reported
+// "applying" with an EMPTY problems/refused/error forever once retries
+// ran out -- nothing (panel eligibility check, template rollout
+// failure detection, a human reading the heartbeat) could ever learn
+// why. Confirmed live: a 3-VM template rollout's middle item never
+// resolved to failed/duplicate_key and stayed "dispatched" past a
+// 10-minute wait.
+func TestEngineApplyingReportSurfacesProblemsAndError(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	e := newTestEngine(t, clock)
+
+	observeWithProblem := func() (sotObservation, error) {
+		return sotObservation{
+			Managed:  csfsotwire.Managed{Ports: map[string]string{}, Allow: []csfsotwire.Entry{}, Deny: []csfsotwire.Entry{}},
+			Problems: []csfsotwire.Problem{{Reason: "duplicate_key", Detail: "TCP_IN"}},
+		}, nil
+	}
+	refusingApply := func(ctx context.Context, want map[string]string, obs sotObservation) SotApplyResult {
+		return SotApplyResult{Result: "refused", Refusals: []csfsotwire.Refusal{{Reason: "duplicate_key", Detail: "TCP_IN"}}}
+	}
+	withSotSeams(t, observeWithProblem, refusingApply, noopApplyLists)
+
+	e.SetConfig(&csfsotwire.Config{Mode: "defensia", Generation: 1})
+	e.Cycle(context.Background())
+
+	cfg := &csfsotwire.Config{Mode: "defensia", Generation: 2, Desired: &csfsotwire.Managed{
+		Ports: map[string]string{"TCP_IN": "20,21,22,48611"}, Allow: []csfsotwire.Entry{}, Deny: []csfsotwire.Entry{},
+	}}
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+
+	// The first attempt runs immediately and reports status "error"
+	// directly (Refused/Error already populated by that path). The
+	// bug this test locks in is about the NEXT cycle -- while waiting
+	// on backoff before attempt 2 -- which used to report "applying"
+	// with NOTHING in it.
+	clock.advance(30 * time.Second)
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+
+	report := e.Report()
+	if report.Status != "applying" {
+		t.Fatalf("status = %q, want applying (waiting on backoff before attempt 2)", report.Status)
+	}
+	if len(report.Problems) != 1 || report.Problems[0].Reason != "duplicate_key" {
+		t.Fatalf("Problems = %+v, want [{duplicate_key TCP_IN}]", report.Problems)
+	}
+	if report.Error == nil || report.Error.Reason != "duplicate_key" {
+		t.Fatalf("Error = %+v, want {duplicate_key ...}", report.Error)
+	}
+
+	// Exhaust all 3 retries: the SAME diagnostic must still be visible
+	// once retries are permanently stopped, not just during one
+	// in-flight attempt.
+	clock.advance(1000 * time.Second)
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+	clock.advance(1000 * time.Second)
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+	clock.advance(10000 * time.Second)
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+
+	exhausted := e.Report()
+	if exhausted.Status != "applying" {
+		t.Fatalf("exhausted status = %q, want applying", exhausted.Status)
+	}
+	if len(exhausted.Problems) != 1 || exhausted.Problems[0].Reason != "duplicate_key" {
+		t.Fatalf("exhausted Problems = %+v, want [{duplicate_key TCP_IN}] (retries exhausted must not blank this out)", exhausted.Problems)
+	}
+	if exhausted.Error == nil || exhausted.Error.Reason != "duplicate_key" {
+		t.Fatalf("exhausted Error = %+v, want {duplicate_key ...} (retries exhausted must not blank this out)", exhausted.Error)
+	}
+}
+
+// TestEngineRefusalGenerationTagged locks in a second real bug found
+// alongside the one above: the refusal-tagging loop used
+// `for _, r := range allRefusals { r.Generation = cfg.Generation; ... }`
+// -- a range loop's `r` is a COPY of each slice element, so that
+// assignment only ever mutated the copy and never touched
+// allRefusals itself, leaving every refusal's Generation at its zero
+// value. The panel's own refusalAtGeneration($state,
+// $item->target_generation) matches a refusal to a dispatched rollout
+// item by this EXACT field, and target_generation is never 0 in
+// practice, so a refused intentional change could never be matched
+// back to the item that caused it.
+func TestEngineRefusalGenerationTagged(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	e := newTestEngine(t, clock)
+	withSotSeams(t, noopObserve, noopApplyPorts, noopApplyLists)
+	e.SetConfig(&csfsotwire.Config{Mode: "defensia", Generation: 1})
+	e.Cycle(context.Background())
+
+	refusingApply := func(ctx context.Context, want map[string]string, obs sotObservation) SotApplyResult {
+		return SotApplyResult{Result: "refused", Refusals: []csfsotwire.Refusal{{Reason: "ssh_port_in_use", Detail: "22"}}}
+	}
+	withSotSeams(t, noopObserve, refusingApply, noopApplyLists)
+
+	cfg := &csfsotwire.Config{Mode: "defensia", Generation: 9, Desired: &csfsotwire.Managed{
+		Ports: map[string]string{"TCP_IN": "80"}, Allow: []csfsotwire.Entry{}, Deny: []csfsotwire.Entry{},
+	}}
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+
+	report := e.Report()
+	if len(report.Refused) != 1 {
+		t.Fatalf("Refused = %+v, want exactly 1 entry", report.Refused)
+	}
+	if report.Refused[0].Generation != 9 {
+		t.Fatalf("Refused[0].Generation = %d, want 9 (cfg.Generation) -- got the zero value, the range-loop-copy bug", report.Refused[0].Generation)
+	}
+}
+
 func TestEngineRefusedNotRetriedAsEvent(t *testing.T) {
 	clock := &fakeClock{t: time.Now()}
 	e := newTestEngine(t, clock)

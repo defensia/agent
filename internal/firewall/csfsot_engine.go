@@ -311,7 +311,7 @@ func (e *SotEngine) applyIntentional(ctx context.Context, cfg *csfsotwire.Config
 	}
 
 	if !e.st.IntentNextAt.IsZero() && now.Before(e.st.IntentNextAt) {
-		e.buildApplyingReport(cfg)
+		e.buildApplyingReport(cfg, obs)
 		e.persist()
 
 		return nil
@@ -321,7 +321,7 @@ func (e *SotEngine) applyIntentional(ctx context.Context, cfg *csfsotwire.Config
 	// generation or an explicit retry_token resets the counter (handled
 	// above, in Cycle, when a new retry_token arrives).
 	if e.st.IntentAttempts >= len(sotTiming().IntentBackoff) {
-		e.buildApplyingReport(cfg)
+		e.buildApplyingReport(cfg, obs)
 		e.persist()
 
 		return nil
@@ -340,11 +340,20 @@ func (e *SotEngine) applyIntentional(ctx context.Context, cfg *csfsotwire.Config
 	e.st.IntentAttempts++
 
 	allRefusals := append(append([]csfsotwire.Refusal{}, portsResult.Refusals...), listsResult.Refusals...)
-	for _, r := range allRefusals {
-		r.Generation = cfg.Generation
+	// Indexed, not `for _, r := range` -- a range loop's `r` is a COPY of
+	// each element, so `r.Generation = ...` silently mutated only the
+	// copy and never touched allRefusals itself. Confirmed live (phase
+	// 16.1, 2026-11-20): every refusal's Generation stayed its zero
+	// value, so the panel's own refusalAtGeneration($state,
+	// $item->target_generation) -- which matches on this exact field --
+	// could never find it (target_generation is never 0 in practice),
+	// and a rollout item stuck on a refused intentional change never
+	// resolved to failed.
+	for i := range allRefusals {
+		allRefusals[i].Generation = cfg.Generation
 		events = append(events, SotEvent{
 			Type: "csf_sot_refused", Severity: "warning",
-			Details: map[string]string{"reason": r.Reason, "detail": r.Detail, "generation": fmt.Sprintf("%d", cfg.Generation)},
+			Details: map[string]string{"reason": allRefusals[i].Reason, "detail": allRefusals[i].Detail, "generation": fmt.Sprintf("%d", cfg.Generation)},
 		})
 	}
 
@@ -606,11 +615,27 @@ func (e *SotEngine) buildSteadyReport(cfg *csfsotwire.Config, obs sotObservation
 	e.report.Store(r)
 }
 
-func (e *SotEngine) buildApplyingReport(cfg *csfsotwire.Config) {
+// buildApplyingReport reports the "applying" (intentional-change retry)
+// state. Surfaces obs.Problems (read-only precheck, always current --
+// unlike Refused/Error below, this costs nothing to recompute every
+// cycle) AND e.st.LastError (the last ATTEMPT's actual failure reason,
+// e.g. duplicate_key/reload_failed) persisted from the last cycle that
+// actually ran applyPortsFn/applyListsFn -- without this, every cycle
+// spent waiting for backoff or stuck at the retry ceiling reported
+// "applying" with NO diagnostic information at all, even though the
+// engine's own already-committed exhaustion comment ("stop trying until
+// a new generation or an explicit retry_token") makes that silence
+// permanent: a rollout item dispatched against an out-of-scope key
+// (e.g. a duplicate_key csf.conf) stayed "applying" forever with an
+// empty refused/problems/error, so nothing could ever tell the panel
+// (or a human) why -- confirmed live, phase 16.1, 2026-11-20.
+func (e *SotEngine) buildApplyingReport(cfg *csfsotwire.Config, obs sotObservation) {
 	e.report.Store(&csfsotwire.Report{
 		Active: true, Status: "applying",
 		GenerationSeen: e.st.GenerationSeen, GenerationAcked: e.st.GenerationAcked,
-		Retry: &csfsotwire.RetryInfo{Count: e.st.IntentAttempts, NextAt: timePtr(e.st.IntentNextAt)},
+		Retry:    &csfsotwire.RetryInfo{Count: e.st.IntentAttempts, NextAt: timePtr(e.st.IntentNextAt)},
+		Problems: obs.Problems,
+		Error:    e.st.LastError,
 	})
 }
 
