@@ -181,32 +181,40 @@ func runAgent() {
 	// Initialize ModSecurity engine (auto-detects if Apache + mod_security installed)
 	modsecEngine = modsecurity.New()
 	if modsecEngine.IsAvailable() {
-		if err := modsecEngine.Setup(); err != nil {
+		setupErr := modsecEngine.Setup()
+		if setupErr != nil {
+			log.Printf("[modsec] setup failed: %v", setupErr)
+		}
 
-			// A ModSecurity that cannot see the traffic is worth telling the customer
-			// about, because they have already done the work and it is guarding the
-			// wrong door. Reported once at startup rather than on every heartbeat:
-			// it is a configuration fact, not an event stream.
-			if m := modsecurity.Mismatch(modsecEngine); m != "" {
-				log.Printf("[modsec] %s", m)
-				apiClient.QueueEvent(api.EventRequest{
-					Type:     "waf_disabled",
-					Severity: "warning",
-					SourceIP: "0.0.0.0",
-					Details: map[string]string{
-						"reason": "modsecurity_not_on_serving_webserver",
-						"detail": m,
-						"hint":   "Load ModSecurity into the server that holds ports 80/443, or put the protected server behind it as a backend",
-					},
-					OccurredAt: time.Now().UTC().Format(time.RFC3339),
-				})
-			}
-			log.Printf("[modsec] setup failed: %v", err)
-		} else {
+		// The mismatch check runs whether or not Setup succeeded, which is the
+		// whole point. It used to live inside the error branch, and Setup only
+		// fails on I/O — so on a host where Apache carries the module and nginx
+		// serves the public ports, Setup succeeded, the mismatch was never
+		// reported, and this block told the customer their WAF was "active".
+		// DecideStartupEvent owns that ordering now, and a test pins it.
+		switch ev := modsecurity.DecideStartupEvent(modsecurity.Mismatch(modsecEngine), setupErr); ev.Type {
+		case modsecurity.EventMismatch:
+			// Worth telling the customer about: they have already done the work
+			// and it is guarding the wrong door. Reported once at startup rather
+			// than on every heartbeat — it is a configuration fact, not a stream.
+			log.Printf("[modsec] %s", ev.Detail)
+			apiClient.QueueEvent(api.EventRequest{
+				Type:     string(ev.Type),
+				Severity: "warning",
+				SourceIP: "0.0.0.0",
+				Details: map[string]string{
+					"reason": ev.Reason,
+					"detail": ev.Detail,
+					"hint":   "Load ModSecurity into the server that holds ports 80/443, or put the protected server behind it as a backend",
+				},
+				OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			})
+
+		case modsecurity.EventEnabled:
 			_ = apiClient.ReportEvents([]api.EventRequest{{
-				Type:       "modsecurity_enabled",
+				Type:       string(ev.Type),
 				Severity:   "info",
-				Details:    map[string]string{"status": "active"},
+				Details:    map[string]string{"status": ev.Detail},
 				OccurredAt: time.Now().UTC().Format(time.RFC3339),
 			}})
 		}
