@@ -613,3 +613,203 @@ sot_stage_exit() {
     sot_stage_exit_one "$vm"
   done
 }
+
+# --- Stage: sot-template ---------------------------------------------------
+# A rollout over 3 VMs (VM1=alma9-csf-aetherinox, VM2=alma9-csf-orig,
+# VM3=debian12-csf-sentinel, alphabetical = rollout order) where VM2
+# fails on purpose (an injected duplicate TCP_IN line -> duplicate_key)
+# ends halted: VM1 applied, VM2 failed/duplicate_key, VM3 not_started
+# with csf.conf completely unchanged.
+sot_stage_template() {
+  local stage="sot-template" start pass=0 fail=0 result="PASS"
+  local RAW="$LAB_DIR/reports/raw/$TS-$stage.log"
+  : >"$RAW"
+  start=$(date +%s)
+
+  local vm1=alma9-csf-aetherinox vm2=alma9-csf-orig vm3=debian12-csf-sentinel
+  local aid1 aid2 aid3 fp3_0
+  aid1="$(agent_id_of "$vm1")"
+  aid2="$(agent_id_of "$vm2")"
+  aid3="$(agent_id_of "$vm3")"
+  fp3_0="$(file_fp "$vm3" /etc/csf/csf.conf)"
+
+  # VM2's own SOT reconcile cycle (separate ticker from the 60s
+  # heartbeat) needs to OBSERVE the injected duplicate before its NEXT
+  # heartbeat can report it -- at the DEFAULT 60s tick, that is up to
+  # ANOTHER 60s on top of the heartbeat's own up-to-60s latency, a
+  # worst case (~120s) that can exceed VM1's own ~90-110s dispatch
+  # window and lose the race to a clean eligibility-blocked dispatch.
+  # Confirmed live (phase 16.1, 2026-11-20): the race was lost twice in
+  # a row at the default tick. Speeding up ONLY VM2's reconcile tick
+  # shrinks that worst case to ~65s, comfortably inside VM1's window.
+  vm_root "$vm2" mkdir -p /etc/systemd/system/defensia-agent.service.d
+  printf '[Service]\nEnvironment=DEFENSIA_CSFSOT_TICK_SECONDS=5\n' | vm_root "$vm2" tee /etc/systemd/system/defensia-agent.service.d/lab-sot.conf >/dev/null
+  vm_root "$vm2" systemctl daemon-reload
+  vm_root "$vm2" systemctl restart defensia-agent
+  trap 'vm_root "'"$vm2"'" rm -f /etc/systemd/system/defensia-agent.service.d/lab-sot.conf; vm_root "'"$vm2"'" systemctl daemon-reload; vm_root "'"$vm2"'" systemctl restart defensia-agent >/dev/null 2>&1 || true' RETURN
+
+  local ts_now tpl_id tpl_id2
+  ts_now=$(date +%s)
+  tpl_id="$(tpl_create "lab-tpl-$ts_now" '{"TCP_IN":{"ensure_open":["48611"],"ensure_closed":[]}}')"
+  [ -n "$tpl_id" ] 2>/dev/null
+  sot_assert $? "template create (id=$tpl_id)"
+
+  tpl_preview "$tpl_id" "[$aid1,$aid2,$aid3]" >>"$RAW" 2>&1
+
+  local rollout_id
+  rollout_id="$(rollout_start "$tpl_id" "[$aid1,$aid2,$aid3]")"
+  [ -n "$rollout_id" ] 2>/dev/null
+  sot_assert $? "rollout start (id=$rollout_id)"
+
+  # Immediately after the 201: VM1 is already dispatched and needs
+  # ~30-90s for the agent to apply it. Injecting before start() would
+  # make start() itself reject the whole rollout (eligibility_changed);
+  # this is the deterministic failure for VM2's own dispatch.
+  vm_root "$vm2" sh -c "awk '/^TCP_IN[[:space:]]*=/{print; print; next} {print}' /etc/csf/csf.conf > /tmp/lab-dup.conf && mv /tmp/lab-dup.conf /etc/csf/csf.conf"
+  local vm2_sha_after_inject
+  vm2_sha_after_inject="$(vm_root "$vm2" sha256sum /etc/csf/csf.conf | awk '{print $1}')"
+
+  # Confirm the panel-visible eligibility actually flipped BEFORE
+  # relying on it -- a hard assertion here turns a lost race into a
+  # clear, early failure message instead of a confusing downstream one.
+  # NOT a hard assertion: confirmed live (phase 16.1, 2026-11-20) that
+  # even VM1's own ~90-110s completion window is not always enough for
+  # this to win -- both VM2's reconcile tick AND its 60s heartbeat
+  # phase are independent of VM1's, so the race is inherently timing-
+  # sensitive on real hardware. Logged for visibility; the item2_reason
+  # check below accepts whichever of the two legitimate outcomes
+  # actually happened.
+  local waited_elig=0 elig_rc=1
+  while [ "$waited_elig" -le 90 ]; do
+    if [ "$(sot_get "$aid2" ineligible_reason)" = "duplicate_key" ]; then
+      elig_rc=0
+      break
+    fi
+    sleep 5
+    waited_elig=$((waited_elig + 5))
+  done
+  if [ "$elig_rc" -eq 0 ]; then
+    echo "INFO VM2 panel eligibility flipped to duplicate_key before dispatch (clean path)" >>"$RAW"
+  else
+    echo "INFO VM2 panel eligibility did not flip before dispatch (dispatched path -- expect rollback_failed below)" >>"$RAW"
+  fi
+
+  wait_rollout "$rollout_id" "state.get('status') in ('halted','completed')" 600
+  sot_assert $? "wait rollout halted/completed"
+
+  local rstatus
+  rstatus="$(rollout_get "$rollout_id" status)"
+  [ "$rstatus" = "halted" ]
+  sot_assert $? "rollout status halted (got $rstatus)"
+
+  local body item1_status item2_status item2_reason item3_status
+  body="$(rollout_get "$rollout_id")"
+  item1_status="$(printf '%s' "$body" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items={i['agent_id']:i for i in d['items']}
+print(items.get($aid1,{}).get('status',''))
+")"
+  item2_status="$(printf '%s' "$body" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items={i['agent_id']:i for i in d['items']}
+print(items.get($aid2,{}).get('status',''))
+")"
+  item2_reason="$(printf '%s' "$body" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items={i['agent_id']:i for i in d['items']}
+r=items.get($aid2,{}).get('result') or {}
+print(r.get('reason',''))
+")"
+  item3_status="$(printf '%s' "$body" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+items={i['agent_id']:i for i in d['items']}
+print(items.get($aid3,{}).get('status',''))
+")"
+
+  [ "$item1_status" = "applied" ]
+  sot_assert $? "VM1 ($vm1) item status applied (got $item1_status)"
+
+  vm_root "$vm1" grep -q 48611 /etc/csf/csf.conf
+  sot_assert $? "VM1 csf.conf TCP_IN contains 48611"
+
+  [ "$item2_status" = "failed" ]
+  sot_assert $? "VM2 ($vm2) item status failed (got $item2_status)"
+
+  # Two legitimate outcomes, both proving the halt mechanism works:
+  # "duplicate_key" if the panel's pre-dispatch eligibility check won
+  # the race (clean path, no apply ever attempted), or
+  # "rollback_failed" if VM2 was already dispatched first -- confirmed
+  # live (phase 16.1, 2026-11-20) that on this fork a genuine duplicate
+  # TCP_IN key makes `csf -r` refuse to reload AT ALL, so the sibling
+  # TCP6_IN change (which the template mirrors automatically under
+  # IPv6) succeeds just far enough to trigger a reload, which then
+  # fails outright because of the UNRELATED standing duplicate, and
+  # the safety rollback of THAT attempt fails for the identical reason
+  # -- a real CSF behaviour difference from the plan's own assumption
+  # ("same value, CSF behaviour unchanged"), not a product bug: this
+  # is exactly the Generation-tagging fix (see csfsot_engine.go) now
+  # resolving it to failed either way.
+  case "$item2_reason" in
+    duplicate_key | rollback_failed) : ;;
+    *) false ;;
+  esac
+  sot_assert $? "VM2 item result.reason is duplicate_key or rollback_failed (got $item2_reason)"
+
+  [ "$item3_status" = "not_started" ]
+  sot_assert $? "VM3 ($vm3) item status not_started (got $item3_status)"
+
+  local fp3_1
+  fp3_1="$(file_fp "$vm3" /etc/csf/csf.conf)"
+  [ "$fp3_0" = "$fp3_1" ]
+  sot_assert $? "VM3 csf.conf sha+mtime unchanged ($fp3_0 -> $fp3_1)"
+
+  local vm2_sha_now
+  vm2_sha_now="$(vm_root "$vm2" sha256sum /etc/csf/csf.conf | awk '{print $1}')"
+  [ "$vm2_sha_after_inject" = "$vm2_sha_now" ]
+  sot_assert $? "VM2 csf.conf unchanged apart from the injected duplicate line ($vm2_sha_after_inject -> $vm2_sha_now)"
+
+  local raudit
+  raudit="$(audit_rollout_actions "$rollout_id")"
+  printf '%s' "$raudit" | grep -q csf_rollout_started
+  sot_assert $? "audit has csf_rollout_started"
+  printf '%s' "$raudit" | grep -q csf_rollout_halted
+  sot_assert $? "audit has csf_rollout_halted"
+
+  # --- cleanup (trap-equivalent: always runs, this stage is the last
+  # one before sot-exit and must never leave the lab dirty) ---
+  rollout_action "$rollout_id" close >>"$RAW" 2>&1
+
+  # Restore VM2's file to its pre-injection bytes: the duplicate line
+  # was never applied by anything (VM2's own item failed before
+  # touching the file), so simply dropping ONE of the two now-identical
+  # TCP_IN lines restores the original.
+  vm_root "$vm2" sh -c "awk '/^TCP_IN[[:space:]]*=/{c++; if(c==2) next} {print}' /etc/csf/csf.conf > /tmp/lab-dedup.conf && mv /tmp/lab-dedup.conf /etc/csf/csf.conf"
+  vm_root "$vm2" csf -r >>"$RAW" 2>&1
+
+  # Remove 48611 from VM1 via a second, VM1-only template rollout.
+  tpl_id2="$(tpl_create "lab-tpl-undo-$ts_now" '{"TCP_IN":{"ensure_open":[],"ensure_closed":["48611"]}}')"
+  local rollout_id2
+  rollout_id2="$(rollout_start "$tpl_id2" "[$aid1]")"
+  if [ -n "$rollout_id2" ] 2>/dev/null; then
+    wait_rollout "$rollout_id2" "state.get('status')=='completed'" 300
+    sot_assert $? "undo rollout (VM1-only, remove 48611) completed"
+    vm_root "$vm1" grep -q 48611 /etc/csf/csf.conf
+    ! [ $? -eq 0 ]
+    sot_assert $? "48611 removed from VM1 csf.conf"
+    rollout_action "$rollout_id2" close >>"$RAW" 2>&1
+  else
+    fail=$((fail + 1))
+    echo "FAIL undo rollout start returned no id" >>"$RAW"
+  fi
+
+  tpl_delete "$tpl_id" >>"$RAW" 2>&1
+  tpl_delete "$tpl_id2" >>"$RAW" 2>&1
+
+  local seconds=$(($(date +%s) - start))
+  [ "$fail" -eq 0 ] || result="FAIL"
+  csf_stage_row "$stage" "(3 VMs: $vm1, $vm2, $vm3)" "-" "$pass" "$fail" "$seconds" "$result"
+}

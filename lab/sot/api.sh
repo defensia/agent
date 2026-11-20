@@ -240,6 +240,19 @@ wait_audit_grep() {
   done
 }
 
+# audit_rollout_actions ROLLOUT_ID — the audit_logs rows for a rollout
+# itself (csf_rollout_started/halted/completed/stopped/resumed/closed
+# are logged with subject_type=CsfTemplateRollout, agent_id=null --
+# NOT reachable via audit_actions, which filters by agent_id).
+audit_rollout_actions() {
+  local rollout_id=$1
+  panel_tinker "
+\$rows = App\Models\AuditLog::where('subject_type', 'CsfTemplateRollout')->where('subject_id', $rollout_id)
+  ->oldest('id')->take(50)->get(['action', 'properties']);
+echo json_encode(\$rows);
+" 2>&1 | tail -1
+}
+
 # audit_count AGENT_ID ACTION SINCE_EPOCH — counts audit_logs rows for
 # AGENT_ID with this exact ACTION created at or after SINCE_EPOCH (unix
 # seconds) -- used by sot-auto to count automatic corrections without
