@@ -461,6 +461,42 @@ func TestEngineRefusalGenerationTagged(t *testing.T) {
 	}
 }
 
+// TestEngineHardErrorGenerationTagged locks in a third real bug found
+// alongside the two above: a hard error (reload_failed/
+// rollback_failed/csf_not_installed, reported via Report.Error rather
+// than Report.Refused) never had its Generation set either. The
+// panel's onAgentReport checks
+// ($state->last_error['generation'] ?? null) === $item->target_generation
+// BEFORE it ever looks at $state->refused, so a hard error (e.g. a
+// rollback that itself failed) could never resolve a dispatched
+// rollout item back to failed.
+func TestEngineHardErrorGenerationTagged(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	e := newTestEngine(t, clock)
+	withSotSeams(t, noopObserve, noopApplyPorts, noopApplyLists)
+	e.SetConfig(&csfsotwire.Config{Mode: "defensia", Generation: 1})
+	e.Cycle(context.Background())
+
+	erroringApply := func(ctx context.Context, want map[string]string, obs sotObservation) SotApplyResult {
+		return SotApplyResult{Result: "error", Err: &csfsotwire.Refusal{Reason: "rollback_failed"}}
+	}
+	withSotSeams(t, noopObserve, erroringApply, noopApplyLists)
+
+	cfg := &csfsotwire.Config{Mode: "defensia", Generation: 12, Desired: &csfsotwire.Managed{
+		Ports: map[string]string{"TCP_IN": "80"}, Allow: []csfsotwire.Entry{}, Deny: []csfsotwire.Entry{},
+	}}
+	e.SetConfig(cfg)
+	e.Cycle(context.Background())
+
+	report := e.Report()
+	if report.Error == nil || report.Error.Reason != "rollback_failed" {
+		t.Fatalf("Error = %+v, want {rollback_failed ...}", report.Error)
+	}
+	if report.Error.Generation != 12 {
+		t.Fatalf("Error.Generation = %d, want 12 (cfg.Generation) -- got the zero value", report.Error.Generation)
+	}
+}
+
 func TestEngineRefusedNotRetriedAsEvent(t *testing.T) {
 	clock := &fakeClock{t: time.Now()}
 	e := newTestEngine(t, clock)

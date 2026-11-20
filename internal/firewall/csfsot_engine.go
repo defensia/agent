@@ -395,6 +395,16 @@ func (e *SotEngine) applyIntentional(ctx context.Context, cfg *csfsotwire.Config
 		errRef = &allRefusals[0]
 	}
 
+	// Same generation-tagging gap as allRefusals above, for the single
+	// hard-error case (reload_failed/rollback_failed/csf_not_installed):
+	// the panel's onAgentReport checks
+	// ($state->last_error['generation'] ?? null) === $item->target_generation
+	// BEFORE it ever looks at $state->refused, so a hard error with no
+	// Generation would never resolve a dispatched rollout item either.
+	if errRef != nil {
+		errRef.Generation = cfg.Generation
+	}
+
 	e.st.LastError = errRef
 	e.persist()
 
