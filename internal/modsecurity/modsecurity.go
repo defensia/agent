@@ -248,6 +248,14 @@ func Mismatch(e *Engine) string {
 	nginx := detectNginxModSecurity()
 	lite := detectLiteSpeedModSecurity()
 
+	// Owning the public ports is not the same as being in the request path.
+	// nginx in front of Apache — what cPanel and Plesk build by default — runs
+	// every request through Apache's ModSecurity without Apache holding a
+	// public port at all. See proxy.go.
+	if proxiedToInspector(serving, apache) {
+		return ""
+	}
+
 	return describeMismatch(serving, apache, nginx, lite)
 }
 
