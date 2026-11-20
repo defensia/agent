@@ -215,8 +215,9 @@ sot_stage_revert_one() {
   local aid pre_sha
   aid="$(agent_id_of "$vm")"
   pre_sha="$(vm_root "$vm" sha256sum /root/lab-sot/csf.conf.pre-drift | awk '{print $1}')"
-  local shim_before
+  local shim_before since
   shim_before="$(bash "$LAB_DIR/sot/csf-shim.sh" calls "$vm")"
+  since=$(date +%s)
 
   sot_post "$aid" revert >>"$RAW" 2>&1
   sot_assert $? "$vm: revert POST"
@@ -236,8 +237,17 @@ sot_stage_revert_one() {
   before_calls="$(printf '%s\n' "$shim_before" | wc -l)"
   [ "$((new_calls - before_calls))" -ge 1 ]
   sot_assert $? "$vm: shim log gained at least one call (restart)"
-  ! sot_shim_has_forbidden "$shim_after"
-  sot_assert $? "$vm: shim log has no forbidden flag"
+  # The shim log is a single append-only file for the VM's whole lab
+  # lifetime (install is a no-op if already installed, and nothing ever
+  # truncates it between separate `make lab-test` runs on the same
+  # day) -- checking the FULL $shim_after for a forbidden flag would
+  # permanently fail this assertion forever after any unrelated call
+  # (e.g. an hourly cron on the fork) anywhere in that history. Scope
+  # to lines timestamped since this stage's own $since instead.
+  local new_only
+  new_only="$(printf '%s\n' "$shim_after" | awk -v since="$since" '$1 >= since')"
+  ! sot_shim_has_forbidden "$new_only"
+  sot_assert $? "$vm: shim log has no forbidden flag since this revert started"
 
   wait_audit "$aid" csf_sot_revert_requested 30
   sot_assert $? "$vm: audit has csf_sot_revert_requested"
@@ -392,9 +402,15 @@ sot_guard_ssh_port() {
   [ "${refused_count:-0}" -le 3 ] 2>/dev/null
   sot_assert $? "$vm: refusal attempts <= 3 since correction=auto was set (got $refused_count)"
 
-  local shim_log
+  # Same reasoning as sot-revert: the shim log accumulates across the
+  # VM's whole lab lifetime, so scope the forbidden-flag check to
+  # calls made since this stage started ($start, set by the caller
+  # sot_stage_guard_one and visible here via bash's dynamic scoping)
+  # rather than scanning the entire history.
+  local shim_log shim_log_scoped
   shim_log="$(bash "$LAB_DIR/sot/csf-shim.sh" calls "$vm")"
-  ! sot_shim_has_forbidden "$shim_log"
+  shim_log_scoped="$(printf '%s\n' "$shim_log" | awk -v since="${start:-0}" '$1 >= since')"
+  ! sot_shim_has_forbidden "$shim_log_scoped"
   sot_assert $? "$vm: shim log has no forbidden flag across sot-guard"
 
   vm_root "$vm" rm -f /etc/ssh/sshd_config.d/lab-sot.conf
