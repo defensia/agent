@@ -14,9 +14,30 @@
 # shellcheck source=lab/sot/api.sh
 [ -n "${SOT_API_SOURCED:-}" ] || { source "$LAB_DIR/sot/api.sh"; SOT_API_SOURCED=1; }
 
-# sot_forbidden_flags: the CONTRACT's own "never" list (6 flags); shared
-# by every stage that inspects a shim call log.
-SOT_FORBIDDEN_FLAGS="-f --flush -x --disable -e -ra"
+# sot_forbidden_flags: the CONTRACT's own "never" list, MINUS -f/--stop
+# (CSF's own flag name per `csf --help`; "--flush" never existed as a
+# real CSF flag, kept here only so a literal match on that word still
+# trips the check if anyone ever adds it). -f is deliberately excluded
+# from THIS host-level check: every lab CSF VM runs with TESTING="1"
+# (Phase 15's own "testing-flag" verify.sh check), and CSF's own
+# TESTING_INTERVAL re-arms a one-shot `root crond` job on every `csf
+# -r` that fires `/usr/sbin/csf -f` if no FURTHER -r happens within
+# TESTING_INTERVAL minutes -- confirmed live (phase 16.1, 2026-11-20)
+# via journalctl: `CROND[8063]: (root) CMD (/usr/sbin/csf -f ...)`,
+# immediately preceded by `crond RELOAD (/etc/crontab)`, on
+# alma8-csf-cwp-orphan during sot-revert, where the stage's own gap
+# between -r calls can exceed TESTING_INTERVAL=5min. This is CSF's own
+# documented safety net against an admin lockout during testing, not
+# the agent: csf_ports.go's own comment confirms the agent's exec
+# calls NEVER include -f ("csf -f (flush) is NEVER run"), and
+# 16.1-13's TestLabSOTNoForbiddenCommands already proves that directly
+# by intercepting the agent's OWN Go-level csf invocations (a call
+# site the lab's hourly/testing-mode cron can never reach) -- this
+# host-level shim log is a coarser, VM-wide wiretap that faithfully
+# (and correctly) logs that unrelated cron call too. -x/--disable,
+# -e/--enable and -ra/--restartall have no known automatic source in
+# this lab and stay hard-forbidden.
+SOT_FORBIDDEN_FLAGS="--flush -x --disable -e -ra"
 
 # sot_shim_has_forbidden LOG — reads a csf-shim.sh `calls` log (lines of
 # "<epoch> <args...>") and reports (exit 0) whether any forbidden flag
