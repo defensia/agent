@@ -17,6 +17,14 @@ LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$LAB_DIR/lib.sh"
 # shellcheck source=lab/matrix.sh
 source "$LAB_DIR/matrix.sh"
+# csf-stages.sh is sourced here (function definitions only, no
+# top-level execution) rather than deeper in this script, because
+# lab/sot-stages.sh's own `sot_row` reuses its `csf_stage_row` writer
+# unconditionally -- including on the LAB_SOT_ONLY=1 path, which skips
+# calling csf_stage_ingest/killswitch/compat_old_agent themselves but
+# must NOT skip making csf_stage_row available.
+# shellcheck source=lab/csf-stages.sh
+source "$LAB_DIR/csf-stages.sh"
 # lib.sh/matrix.sh each `set -euo pipefail` when sourced, and `source`
 # runs in this same shell — silently re-enabling `-e` here. Explicitly
 # turn it back off: a single VM's non-zero test exit must not abort the
@@ -25,6 +33,10 @@ set +e
 
 vms="$*"
 [ -n "$vms" ] || vms="$LAB_AGENT_VMS"
+
+# LAB_SOT_ONLY=1 implies skipping the attack stage too (not part of
+# what it exists to debug, and it alone costs ~3min).
+[ "${LAB_SOT_ONLY:-}" != "1" ] || LAB_SKIP_ATTACK=1
 
 preflight_orb
 
@@ -130,7 +142,21 @@ printf '|----|------|--------|-------|------|------|------|---------|--------|\n
 
 failed_vms=""
 
+# LAB_SOT_ONLY=1 is a local-debugging-only switch (phase 16.1): skips
+# the whole per-VM Go-suite loop below (the slow part) but still pushes
+# lab/sot/*.sh to every CSF VM, since lab/sot-stages.sh's own stages
+# (sourced further down) depend on them already being there -- the
+# per-VM loop is normally what pushes them. Never a substitute for a
+# real gate run: marked loudly in the report.
 for vm in $vms; do
+  if [ "${LAB_SOT_ONLY:-}" = "1" ]; then
+    if [ "$(csf_expect "$vm")" = "1" ]; then
+      vm_push_dir "$vm" "$LAB_DIR/sot" /root/lab-sot
+      vm_root "$vm" chmod +x /root/lab-sot/ui-saveconf.sh /root/lab-sot/loop-rewrite.sh /root/lab-sot/reinstall-sim.sh
+    fi
+    continue
+  fi
+
   RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
   vm_push "$vm" "$BINARY" /root/integration.test
 
@@ -236,18 +262,53 @@ done
 # debugging of the in-VM suite above; the phase gate must always run these
 # three, so skipping them is loudly logged AND marks the whole run FAIL —
 # it must never look like a quieter, still-green run.
-if [ "${LAB_SKIP_CSF_STAGES:-}" = "1" ]; then
+if [ "${LAB_SOT_ONLY:-}" = "1" ]; then
+  log "LAB_SOT_ONLY=1: csf-ingest/csf-killswitch/compat-old-agent skipped (debug run, not a gate run -- no FAIL penalty)"
+elif [ "${LAB_SKIP_CSF_STAGES:-}" = "1" ]; then
   log "*** LAB_SKIP_CSF_STAGES=1: csf-ingest/csf-killswitch/compat-old-agent SKIPPED — this run counts as FAIL, these stages are required for the phase gate ***"
   failed_vms="$failed_vms csf-stages-skipped"
   mkdir -p "$LAB_DIR/reports/raw"
   printf 'LAB_SKIP_CSF_STAGES=1: csf-ingest/csf-killswitch/compat-old-agent were not run.\nThis is a local-debugging-only escape hatch; the phase gate requires all three.\n' >"$LAB_DIR/reports/raw/$TS-csf-stages-skipped.log"
   printf '| (skipped) | - | - | csf-stages-skipped | 0 | 1 | 0 | 0 | FAIL |\n' >>"$REPORT"
 else
-  # shellcheck source=lab/csf-stages.sh
-  source "$LAB_DIR/csf-stages.sh"
   csf_stage_ingest
   csf_stage_compat_old_agent
   csf_stage_killswitch
+fi
+
+# --- SOT end-to-end stages (phase 16.1) ---
+# sot-snapshot/drift/revert/reinstall/guard/auto/template/exit: every
+# SOT requirement proven against the real agent daemon talking to the
+# real lab panel over the Sanctum API (see lab/sot-stages.sh's own file
+# header). Runs after Phase 15's csf-stages (which already restored
+# alma9-csf-aetherinox's binary if compat-old-agent ran) and before the
+# attack stage. LAB_SKIP_SOT_STAGES=1 exists ONLY for local debugging
+# and marks the whole run FAIL with a loud warning -- same posture as
+# LAB_SKIP_CSF_STAGES above, and distinct from LAB_SOT_ONLY (which is
+# the opposite switch: skip everything EXCEPT these stages).
+if [ "${LAB_SKIP_SOT_STAGES:-}" = "1" ]; then
+  log "*** LAB_SKIP_SOT_STAGES=1: sot-snapshot/drift/revert/reinstall/guard/auto/template/exit SKIPPED — this run counts as FAIL, these stages are required for the phase gate ***"
+  failed_vms="$failed_vms sot-stages-skipped"
+  mkdir -p "$LAB_DIR/reports/raw"
+  printf 'LAB_SKIP_SOT_STAGES=1: the sot-* stages were not run.\nThis is a local-debugging-only escape hatch; the phase gate requires all of them.\n' >"$LAB_DIR/reports/raw/$TS-sot-stages-skipped.log"
+  printf '| (skipped) | - | - | sot-stages-skipped | 0 | 1 | 0 | 0 | FAIL |\n' >>"$REPORT"
+else
+  # shellcheck source=lab/sot-stages.sh
+  source "$LAB_DIR/sot-stages.sh"
+  sot_stage_snapshot
+  sot_stage_drift
+  sot_stage_revert
+  sot_stage_reinstall
+  sot_stage_guard
+  sot_stage_auto
+  if type sot_stage_template >/dev/null 2>&1; then
+    sot_stage_template
+  fi
+  sot_stage_exit
+fi
+
+if [ "${LAB_SOT_ONLY:-}" = "1" ]; then
+  printf '\n_(sot-only run: the per-VM Go suites above were skipped; not a gate run)_\n' >>"$REPORT"
 fi
 
 # --- attack stage (plan 08) ---
