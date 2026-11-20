@@ -318,29 +318,49 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 	// 5. PRE-FLIGHT CHECK: run the new binary with "check" to verify it works.
 	//
-	// The timeout was 30s, and a customer's host hit it 63 times in a row. That
-	// machine watches 37 web roots with the malware scanner, so the new binary's
-	// own startup — which builds the same inventory — ran past 30 seconds while
-	// the live agent was doing it too. Go's CommandContext kills on timeout with
-	// SIGKILL, which surfaces as "signal: killed" and reads like an OOM kill.
-	// It was our own clock.
+	// A correction to what an earlier version of this comment claimed. It said
+	// the 30s timeout was the cause of a customer host's repeated failures, and
+	// that the new binary's startup was slow because the host watches 37 web
+	// roots with the malware scanner. Both halves were wrong: "check" is a
+	// Printf and an exit, there is no init() or go:embed anywhere in the tree,
+	// and the host's own log shows the kill arriving 3 and 7 seconds after the
+	// download — nowhere near any timeout of ours.
 	//
-	// 120s because the cost of waiting is one slow check per hour, and the cost
-	// of being too strict is a host that can never update at all.
+	// What that host actually reported: load average 26.6, RAM 77% used, disk
+	// 89% full, and "signal: killed" with no output at all. Something outside
+	// this process killed the child, and we still do not know what. The timeout
+	// stays at 120s because it costs nothing, but it is not a fix for that host.
+	//
+	// So the real change here is diagnostic. exec reports our own cancellation
+	// and an external SIGKILL with the identical string "signal: killed", which
+	// is what let a wrong cause look confirmed for a whole day. Asking ctx.Err()
+	// separates them, and the next occurrence will say which one it was instead
+	// of leaving it to be guessed.
 	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
 	defer cancel()
+
+	started := time.Now()
 	out, err := exec.CommandContext(ctx, tmpPath, "check").CombinedOutput()
+	elapsed := time.Since(started)
+
 	if err != nil || !strings.Contains(string(out), "OK") {
 		errMsg := ""
 		if err != nil {
 			errMsg = err.Error()
 		}
-		log.Printf("[updater] pre-flight check FAILED (err=%v, output=%q) — aborting update", err, string(out))
+
+		killedBy := describePreflightKill(ctx.Err(), err, elapsed)
+
+		log.Printf("[updater] pre-flight check FAILED after %s (err=%v, killed_by=%s, output=%q) — aborting update",
+			elapsed.Round(time.Millisecond), err, killedBy, string(out))
 		os.Remove(tmpPath)
 		reportFailure(reportEvent, "critical", mergeDetails(versionDetails, map[string]string{
-			"reason": "preflight_failed",
-			"error":  errMsg,
-			"output": strings.TrimSpace(string(out)),
+			"reason":     "preflight_failed",
+			"error":      errMsg,
+			"output":     strings.TrimSpace(string(out)),
+			"killed_by":  killedBy,
+			"elapsed_ms": strconv.FormatInt(elapsed.Milliseconds(), 10),
+			"timeout_s":  strconv.FormatInt(int64(preflightTimeout.Seconds()), 10),
 		}))
 		return
 	}
@@ -445,6 +465,38 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 // retryDue reports whether enough time has passed since the marker was last written
 // to retry a failed update.
+// describePreflightKill says who ended the pre-flight check.
+//
+// It exists because "signal: killed" is the string exec returns BOTH when our
+// own context deadline fires and when something on the host sends SIGKILL, and
+// those two have opposite fixes: ours means raise the timeout, theirs means the
+// timeout is irrelevant and the host is the problem. A day was spent fixing the
+// first when the evidence — a kill 3 seconds into a 30 second budget — said the
+// second.
+//
+// "elapsed" is reported alongside because it is the cheapest check on this
+// function's own answer: a kill far inside the budget cannot be our deadline,
+// whatever the context says.
+func describePreflightKill(ctxErr, runErr error, elapsed time.Duration) string {
+	switch {
+	case runErr == nil:
+		// Ran to completion but did not print OK.
+		return "none_bad_output"
+	case errors.Is(ctxErr, context.DeadlineExceeded):
+		return "our_timeout"
+	case strings.Contains(runErr.Error(), "signal: killed"):
+		// Not our deadline, so the signal came from the host: an OOM kill, a
+		// cgroup limit, or something on the machine policing processes.
+		return "external_sigkill"
+	case strings.Contains(runErr.Error(), "signal:"):
+		return "external_signal"
+	case errors.Is(runErr, exec.ErrNotFound) || os.IsPermission(runErr):
+		return "could_not_execute"
+	default:
+		return "exited_nonzero"
+	}
+}
+
 func retryDue(markerPath string, now time.Time, attempts int) bool {
 	info, err := os.Stat(markerPath)
 	if err != nil {

@@ -1,6 +1,8 @@
 package updater
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -281,5 +283,68 @@ func TestASuccessfulUpdateResetsTheCounter(t *testing.T) {
 
 	if v, attempts := readAttemptMarker(marker); v != "1.4.111" || attempts != 1 {
 		t.Fatalf("after a success the next target starts from one attempt: got (%q, %d)", v, attempts)
+	}
+}
+
+// TestDescribePreflightKillSeparatesOurTimeoutFromTheHost is the test that would
+// have stopped a wrong diagnosis from shipping.
+//
+// exec returns the identical string "signal: killed" whether our own context
+// deadline fired or the host sent SIGKILL, and the two have opposite fixes:
+// ours means the timeout is too tight, theirs means the timeout is irrelevant.
+// A customer host was killed 3 and 7 seconds into a 30 second budget and it was
+// read as our timeout for a full day.
+func TestDescribePreflightKillSeparatesOurTimeoutFromTheHost(t *testing.T) {
+	killed := errors.New("signal: killed")
+
+	for _, c := range []struct {
+		name    string
+		ctxErr  error
+		runErr  error
+		elapsed time.Duration
+		want    string
+	}{
+		{
+			name:    "our deadline fired",
+			ctxErr:  context.DeadlineExceeded,
+			runErr:  killed,
+			elapsed: 120 * time.Second,
+			want:    "our_timeout",
+		},
+		{
+			// The farma009 shape: same error string, no deadline, 3 seconds in.
+			name:    "the host killed it long before our deadline",
+			ctxErr:  nil,
+			runErr:  killed,
+			elapsed: 3 * time.Second,
+			want:    "external_sigkill",
+		},
+		{
+			name:    "a different signal",
+			ctxErr:  nil,
+			runErr:  errors.New("signal: segmentation fault"),
+			elapsed: time.Second,
+			want:    "external_signal",
+		},
+		{
+			name:    "ran fine but printed the wrong thing",
+			ctxErr:  nil,
+			runErr:  nil,
+			elapsed: 40 * time.Millisecond,
+			want:    "none_bad_output",
+		},
+		{
+			name:    "exited non-zero",
+			ctxErr:  nil,
+			runErr:  errors.New("exit status 1"),
+			elapsed: 50 * time.Millisecond,
+			want:    "exited_nonzero",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := describePreflightKill(c.ctxErr, c.runErr, c.elapsed); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
 	}
 }
