@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,12 +24,29 @@ var updateMu sync.Mutex
 const targetPath = "/usr/local/bin/defensia-agent"
 const backupPath = "/usr/local/bin/defensia-agent.bak"
 const crashMarkerPath = "/tmp/defensia-agent-crash-count"
-const updateAttemptMarker = "/etc/defensia/.last-update-attempt"
+
+var updateAttemptMarker = "/etc/defensia/.last-update-attempt"
+
 const maxCrashesBeforeRollback = 3
 
-// failedUpdateRetryInterval is how long to wait before retrying an update to the same
-// version after a previous attempt didn't take effect.
+// failedUpdateRetryInterval is the wait before retrying an update to the same
+// version after a previous attempt didn't take effect. It doubles with each
+// consecutive failure — see retryBackoff.
 var failedUpdateRetryInterval = time.Hour
+
+// maxUpdateAttempts is how many consecutive failures at the same version the
+// agent will tolerate before it stops trying and reports that it is stuck.
+const maxUpdateAttempts = 6
+
+// fallbackDownloadBase is the mirror used when the release host is unreachable.
+// A var so a test can point it somewhere that is not production — it is tried
+// automatically on any primary failure, so a test serving 404s from a local
+// server would otherwise reach for the real mirror and download from it.
+var fallbackDownloadBase = "https://defensia.cloud/downloads"
+
+// preflightTimeout bounds the new binary's self-check. A var so a test can
+// shorten it.
+var preflightTimeout = 120 * time.Second
 
 // errNoInitSystem is returned by restartService when no service manager is available
 // (e.g. the agent runs directly as a Docker container's main process).
@@ -129,29 +147,76 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		return
 	}
 
-	// Clear the update marker if the previous update succeeded (current == marker).
-	// If marker matches target but we're still on old version, the previous attempt
-	// failed — clear the marker and retry (the download source may have been fixed).
-	if data, err := os.ReadFile(updateAttemptMarker); err == nil {
-		markerVersion := strings.TrimSpace(string(data))
-		if markerVersion == currentVersion {
-			os.Remove(updateAttemptMarker)
-			log.Printf("[updater] cleared update marker (successfully running %s)", currentVersion)
-		} else if markerVersion == latestVersion {
-			// Previous attempt to this version failed. Retry, but at most once per
-			// interval so a failure that keeps repeating doesn't loop every check.
-			if !retryDue(updateAttemptMarker, time.Now()) {
-				return
+	// Decide whether this attempt is allowed, based on what the last one did.
+	markerVersion, attempts := readAttemptMarker(updateAttemptMarker)
+
+	switch markerVersion {
+	case "":
+		// No record of an attempt. Proceed.
+	case currentVersion:
+		// We are running the version the marker was written for: the previous
+		// attempt worked. Clear it so the next upgrade starts from zero.
+		os.Remove(updateAttemptMarker)
+		log.Printf("[updater] cleared update marker (successfully running %s)", currentVersion)
+		attempts = 0
+	case latestVersion:
+		// The previous attempt to this exact version did not take effect.
+		if attempts >= maxUpdateAttempts {
+			// Stop. A host that has failed this many times in a row is not
+			// going to succeed on the next heartbeat, and each attempt costs
+			// it a 9.3 MB download and a process spawn. Say so once — loudly,
+			// so it shows up in the panel as a host needing attention — and
+			// then stay quiet until the panel offers a different version.
+			if attempts == maxUpdateAttempts {
+				writeAttemptMarker(updateAttemptMarker, latestVersion, attempts+1)
+				log.Printf("[updater] giving up on %s after %d consecutive failures — staying on %s", latestVersion, attempts, currentVersion)
+				reportFailure(reportEvent, "critical", map[string]string{
+					"current_version": currentVersion,
+					"target_version":  latestVersion,
+					"reason":          "attempts_exhausted",
+					"attempts":        strconv.Itoa(attempts),
+				})
 			}
-			os.Remove(updateAttemptMarker)
-			log.Printf("[updater] previous attempt to %s failed (still on %s) — retrying", latestVersion, currentVersion)
+
+			return
 		}
+
+		if !retryDue(updateAttemptMarker, time.Now(), attempts) {
+			return
+		}
+
+		log.Printf("[updater] previous attempt to %s failed (still on %s, attempt %d of %d) — retrying", latestVersion, currentVersion, attempts+1, maxUpdateAttempts)
+	default:
+		// The marker is about some other version — the panel has moved on.
+		// This target gets a clean slate.
+		attempts = 0
 	}
 
 	if !updateMu.TryLock() {
 		return // another update already in progress
 	}
 	defer updateMu.Unlock()
+
+	// Record the attempt BEFORE doing any of it.
+	//
+	// This used to be written at the very end, just before the restart, with the
+	// stated reason that "a failed update never blocks a later retry". The
+	// intention was right — a mirror that was briefly broken should be retried
+	// as soon as it is fixed — but the effect was that nothing early could ever
+	// be recorded: a failure in the download, the checksum or the pre-flight
+	// check returned before the write, so the next cycle found no marker and
+	// tried again immediately.
+	//
+	// Measured on a customer's host on 19-20 Nov 2026: 63 failed attempts in
+	// twelve hours, the shortest gap SIX SECONDS apart, each one downloading
+	// 9.3 MB and spawning a process that was then killed. The retry interval
+	// existed the whole time and was simply unreachable for the failures that
+	// actually happen.
+	//
+	// Written here, a failure still does not block a later retry — retryDue()
+	// lets the next one through after a wait that doubles each time. It just
+	// stops the loop.
+	writeAttemptMarker(updateAttemptMarker, latestVersion, attempts+1)
 
 	log.Printf("[updater] new version available: %s -> %s", currentVersion, latestVersion)
 
@@ -162,8 +227,8 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	binaryURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), binaryName)
 	checksumURL := fmt.Sprintf("%s/%s", strings.TrimRight(downloadBaseURL, "/"), checksumName)
 
-	// Fallback mirror when GitHub is unreachable
-	fallbackBase := "https://defensia.cloud/downloads"
+	// Fallback mirror when GitHub is unreachable.
+	fallbackBase := fallbackDownloadBase
 	fallbackBinaryURL := fmt.Sprintf("%s/%s", fallbackBase, binaryName)
 	fallbackChecksumURL := fmt.Sprintf("%s/%s", fallbackBase, checksumName)
 
@@ -200,7 +265,16 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 	// which prevents the pre-flight check from running the downloaded binary.
 	tmpFile, err := os.CreateTemp("/etc/defensia", "defensia-agent-update-*")
 	if err != nil {
+		// Reported, not just logged. A missing /etc/defensia or a full disk
+		// stops every update this host will ever attempt, and until now it did
+		// so in a local log file nobody reads — the panel saw a host that
+		// simply never upgraded, with no failure to explain it.
 		log.Printf("[updater] failed to create temp file: %v", err)
+		reportFailure(reportEvent, "high", mergeDetails(versionDetails, map[string]string{
+			"reason": "staging_file_failed",
+			"error":  err.Error(),
+		}))
+
 		return
 	}
 	tmpPath := tmpFile.Name()
@@ -242,10 +316,18 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 		return
 	}
 
-	// 5. PRE-FLIGHT CHECK: run the new binary with "check" to verify it works
-	// Use a 30s timeout — on resource-constrained servers (VPN, low RAM),
-	// Go binary startup can take 10-15s due to heavy imports (YARA, malware, etc.)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 5. PRE-FLIGHT CHECK: run the new binary with "check" to verify it works.
+	//
+	// The timeout was 30s, and a customer's host hit it 63 times in a row. That
+	// machine watches 37 web roots with the malware scanner, so the new binary's
+	// own startup — which builds the same inventory — ran past 30 seconds while
+	// the live agent was doing it too. Go's CommandContext kills on timeout with
+	// SIGKILL, which surfaces as "signal: killed" and reads like an OOM kill.
+	// It was our own clock.
+	//
+	// 120s because the cost of waiting is one slow check per hour, and the cost
+	// of being too strict is a host that can never update at all.
+	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, tmpPath, "check").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "OK") {
@@ -340,12 +422,6 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 	log.Printf("[updater] updated to v%s, restarting service...", latestVersion)
 
-	// Remember this attempt so we don't loop if the filesystem is non-persistent.
-	// Written to /etc/defensia/ which survives service restarts. Only reached once the
-	// installed binary has confirmed its version, so a failed update never blocks a
-	// later retry.
-	os.WriteFile(updateAttemptMarker, []byte(latestVersion), 0644)
-
 	// 9. Report success BEFORE restart (restart kills the current process)
 	// Enrich with checksum for audit trail
 	versionDetails["checksum_sha256"] = expectedHash
@@ -369,12 +445,63 @@ func CheckAndUpdate(currentVersion, latestVersion, downloadBaseURL string, repor
 
 // retryDue reports whether enough time has passed since the marker was last written
 // to retry a failed update.
-func retryDue(markerPath string, now time.Time) bool {
+func retryDue(markerPath string, now time.Time, attempts int) bool {
 	info, err := os.Stat(markerPath)
 	if err != nil {
 		return true
 	}
-	return now.Sub(info.ModTime()) >= failedUpdateRetryInterval
+
+	return now.Sub(info.ModTime()) >= retryBackoff(attempts)
+}
+
+// retryBackoff is how long to wait before the next attempt at a version that
+// has already failed `attempts` times: 1h, 2h, 4h, 8h, then 16h for the rest.
+//
+// It doubles because the failures worth retrying soon and the failures worth
+// giving up on look identical from here — a broken mirror and a host that
+// cannot run the new binary both just fail. Doubling costs a fixed delay in
+// the first case and bounds the damage in the second.
+func retryBackoff(attempts int) time.Duration {
+	shift := attempts - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 4 {
+		shift = 4
+	}
+
+	return failedUpdateRetryInterval << shift
+}
+
+// readAttemptMarker reads the version the last attempt targeted and how many
+// consecutive times it has failed.
+//
+// A marker holding only a version is one written by an agent before the
+// attempt counter existed, and counts as a single failure — which is what it
+// recorded: it was only ever written once a download had succeeded.
+func readAttemptMarker(path string) (version string, attempts int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0
+	}
+
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return "", 0
+	}
+
+	attempts = 1
+	if len(fields) > 1 {
+		if n, err := strconv.Atoi(fields[1]); err == nil && n > 0 {
+			attempts = n
+		}
+	}
+
+	return fields[0], attempts
+}
+
+func writeAttemptMarker(path, version string, attempts int) {
+	os.WriteFile(path, []byte(fmt.Sprintf("%s %d\n", version, attempts)), 0644)
 }
 
 // reportFailure is a convenience wrapper that attaches recent service logs

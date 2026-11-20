@@ -909,7 +909,13 @@ func runAgent() {
 					return
 				}
 				if resp.LatestAgentVersion != nil && resp.AgentDownloadBaseURL != nil {
-					updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
+					// In a goroutine, like every other handler in this block.
+					// CheckAndUpdate downloads, verifies and runs the new binary's
+					// own self-check, and blocking here stalls the websocket event
+					// loop for as long as that takes — up to two minutes on a busy
+					// host. CheckAndUpdate holds a TryLock, so a concurrent call
+					// from the heartbeat path is a no-op rather than a second update.
+					go updater.CheckAndUpdate(version, *resp.LatestAgentVersion, *resp.AgentDownloadBaseURL, reportUpdateEvent)
 				}
 			},
 			OnMalwareScanRequested: func(p ws.MalwareScanRequestedPayload) {
