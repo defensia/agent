@@ -2,6 +2,7 @@ package modsecurity
 
 import (
 	"fmt"
+	"github.com/defensia/agent/internal/webserver"
 	"log"
 	"os"
 	"os/exec"
@@ -183,12 +184,116 @@ var modSecOnPattern = regexp.MustCompile(`\bmodsecurity\s+on\b`)
 // stays Apache-only. The panel needs the first question answered: telling an
 // OpenLiteSpeed operator that ModSecurity is missing — and handing them an Apache
 // install command — is wrong in a way that costs them trust and time.
+// IsActive reports whether ModSecurity can actually inspect this host's public
+// traffic.
+//
+// Three questions had been collapsed into one, and each collapse hid the next.
+//
+// The detection used to fall back to os.Stat on /etc/modsecurity/modsecurity.conf,
+// so any host where the package had ever been installed reported ModSecurity
+// active for ever after. That is the obvious bug. The subtler one is that even a
+// genuinely loaded module proves nothing on its own: measured on one of our own
+// servers on 19 Nov 2026, Apache had security2_module loaded and the agent had
+// written its rules correctly — while nginx held :80 and :443 and nginx carried
+// no ModSecurity at all. Module present, rules present, traffic unprotected.
+//
+// So the question is asked of the server that actually serves: whatever holds
+// the public ports is the one that has to carry the module. Across the fleet,
+// 15 of 127 agents reported ModSecurity active and only 5 had ever intercepted
+// anything — and this is why.
+//
+// A container holding the port answers false: the module would live inside an
+// image we cannot inspect from here, and claiming protection we cannot see is
+// the failure this whole function exists to stop.
 func (e *Engine) IsActive() bool {
+	serving := webserver.OnPublicPorts()
+	if serving != "" {
+		return decideActive(serving, e != nil && e.IsAvailable(), detectNginxModSecurity(), detectLiteSpeedModSecurity())
+	}
+
+	// Nothing is serving the public ports — a box mid-provision, or with the
+	// server stopped. There is no traffic to protect and no server to ask, so
+	// fall back to whether any installed server carries the module. Never to
+	// whether a configuration file exists.
 	if e != nil && e.IsAvailable() {
 		return true
 	}
 
+	if detectNginxModSecurity() {
+		return true
+	}
+
 	return detectLiteSpeedModSecurity()
+}
+
+// Mismatch describes a ModSecurity that is loaded and configured correctly but
+// sits in front of a server nobody reaches.
+//
+// Measured on one of our own hosts on 19 Nov 2026, and it explains the fleet-wide
+// silence on its own: Apache had security2_module loaded, SecRuleEngine On,
+// SecRequestBodyAccess On, and our rules included and working — a SQL injection
+// against it returns 403 — while Apache listened on :8080 and :8443 and nginx
+// served the public :80 and :443 with no ModSecurity at all. Everything was
+// right except which door it was guarding.
+//
+// Empty string means no mismatch worth reporting: either the serving server
+// carries the module, or there is nothing to compare.
+func Mismatch(e *Engine) string {
+	serving := webserver.OnPublicPorts()
+	if serving == "" || serving == webserver.ContainerPublished {
+		return ""
+	}
+
+	apache := e != nil && e.IsAvailable()
+	nginx := detectNginxModSecurity()
+	lite := detectLiteSpeedModSecurity()
+
+	return describeMismatch(serving, apache, nginx, lite)
+}
+
+// describeMismatch is Mismatch's wording, separated from the probing so it can
+// be tested without a web server.
+//
+// Naming the server that DOES have the module is the whole point of the message:
+// the customer has already done the work, and telling them "no WAF" would be
+// both wrong and insulting.
+func describeMismatch(serving string, apache, nginx, lite bool) string {
+	if serving == "" || serving == webserver.ContainerPublished {
+		return ""
+	}
+
+	if decideActive(serving, apache, nginx, lite) {
+		return ""
+	}
+
+	switch {
+	case apache && serving != "apache":
+		return "ModSecurity is loaded in Apache, but " + serving + " serves the public ports"
+	case nginx && serving != "nginx":
+		return "ModSecurity is loaded in nginx, but " + serving + " serves the public ports"
+	case lite && serving != "litespeed":
+		return "ModSecurity is loaded in LiteSpeed, but " + serving + " serves the public ports"
+	}
+
+	return ""
+}
+
+// decideActive is IsActive's rule, separated from the probing so it can be
+// tested: OnPublicPorts reads live sockets and cannot be faked in a unit test,
+// but the decision it feeds is the part worth pinning.
+func decideActive(serving string, apacheHasModule, nginxHasModule, liteSpeedHasModule bool) bool {
+	switch serving {
+	case "apache":
+		return apacheHasModule
+	case "nginx":
+		return nginxHasModule
+	case "litespeed":
+		return liteSpeedHasModule
+	case webserver.ContainerPublished:
+		return false
+	}
+
+	return false
 }
 
 func (e *Engine) detectModSecurity() bool {
@@ -208,19 +313,79 @@ func (e *Engine) detectModSecurity() bool {
 		return false
 	}
 
-	output := string(out)
-	if strings.Contains(output, "security2_module") || strings.Contains(output, "security_module") {
+	return ParseApacheModules(string(out))
+}
+
+// ParseApacheModules reports whether `apachectl -M` lists a ModSecurity module.
+func ParseApacheModules(output string) bool {
+	return strings.Contains(output, "security2_module") || strings.Contains(output, "security_module")
+}
+
+// nginxModSecurityPaths are the configuration files to search for a dynamic
+// module load, when `nginx -V` does not name the module as compiled in.
+var nginxModSecurityPaths = []string{
+	"/etc/nginx/nginx.conf",
+	"/usr/local/nginx/conf/nginx.conf",
+	"/opt/nginx/conf/nginx.conf",
+}
+
+// detectNginxModSecurity reports whether the host's nginx can actually run
+// ModSecurity rules.
+//
+// Two ways it can: compiled in, which `nginx -V` names on stderr, or loaded
+// dynamically, which needs a load_module line in the configuration. Both are
+// checked because distributions differ and because a module file sitting on
+// disk is not a module that is loaded.
+func detectNginxModSecurity() bool {
+	return nginxModSecurityAt(nginxVersionOutput, nginxModSecurityPaths)
+}
+
+// nginxVersionOutput runs `nginx -V`, which writes to stderr.
+func nginxVersionOutput() string {
+	path, err := exec.LookPath("nginx")
+	if err != nil {
+		return ""
+	}
+
+	out, err := exec.Command(path, "-V").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+
+	return string(out)
+}
+
+// nginxModSecurityAt is detectNginxModSecurity with its inputs injected, so the
+// decision can be tested without an nginx install.
+func nginxModSecurityAt(version func() string, configPaths []string) bool {
+	if strings.Contains(strings.ToLower(version()), "modsecurity") {
 		return true
 	}
 
-	modsecConfs := []string{
-		"/etc/modsecurity/modsecurity.conf",
-		"/etc/httpd/conf.d/mod_security.conf",
-		"/etc/apache2/mods-enabled/security2.conf",
-		"/usr/local/apache/conf/modsec2.conf",
+	for _, conf := range configPaths {
+		data, err := os.ReadFile(conf)
+		if err != nil {
+			continue
+		}
+
+		if HasModSecurityLoadModule(string(data)) {
+			return true
+		}
 	}
-	for _, conf := range modsecConfs {
-		if _, err := os.Stat(conf); err == nil {
+
+	return false
+}
+
+// HasModSecurityLoadModule reports whether an nginx configuration loads the
+// ModSecurity module dynamically, ignoring commented-out lines.
+func HasModSecurityLoadModule(config string) bool {
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "load_module") && strings.Contains(strings.ToLower(line), "modsecurity") {
 			return true
 		}
 	}

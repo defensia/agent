@@ -182,6 +182,25 @@ func runAgent() {
 	modsecEngine = modsecurity.New()
 	if modsecEngine.IsAvailable() {
 		if err := modsecEngine.Setup(); err != nil {
+
+			// A ModSecurity that cannot see the traffic is worth telling the customer
+			// about, because they have already done the work and it is guarding the
+			// wrong door. Reported once at startup rather than on every heartbeat:
+			// it is a configuration fact, not an event stream.
+			if m := modsecurity.Mismatch(modsecEngine); m != "" {
+				log.Printf("[modsec] %s", m)
+				apiClient.QueueEvent(api.EventRequest{
+					Type:     "waf_disabled",
+					Severity: "warning",
+					SourceIP: "0.0.0.0",
+					Details: map[string]string{
+						"reason": "modsecurity_not_on_serving_webserver",
+						"detail": m,
+						"hint":   "Load ModSecurity into the server that holds ports 80/443, or put the protected server behind it as a backend",
+					},
+					OccurredAt: time.Now().UTC().Format(time.RFC3339),
+				})
+			}
 			log.Printf("[modsec] setup failed: %v", err)
 		} else {
 			_ = apiClient.ReportEvents([]api.EventRequest{{
