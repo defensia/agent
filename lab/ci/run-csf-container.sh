@@ -94,6 +94,17 @@ docker exec "$NAME" sh -c 'csf -v; systemctl is-active csf lfd; grep ^LF_IPSET /
 echo "[run-csf-container] ipset/xt_set diagnostic (non-blocking, resolves 14-RESEARCH.md Open Q1):"
 docker exec "$NAME" sh -c 'ipset create lab-diag hash:ip && ipset destroy lab-diag && echo IPSET_OK || echo IPSET_UNAVAILABLE' || true
 
+# phase 16.1 CSF source-of-truth primitives (TestLabSOT*): only
+# TestLabSOTSaveconfReplay reaches into /root/lab-sot (ui-saveconf.sh),
+# so push the whole directory here too, same as lab/test.sh does for the
+# real OrbStack lab. No lab-attacker exists in this container, so
+# LAB_SOT_SSH_PEER_IP is deliberately left unset below: with
+# LAB_ALLOW_SKIP=1 already set, that is exactly what makes
+# TestLabSOTGuardSessionIP the one TestLabSOT* test that SKIPs here
+# instead of being required to PASS.
+docker cp "$LAB_DIR/sot" "$NAME:/root/lab-sot"
+docker exec "$NAME" chmod +x /root/lab-sot/ui-saveconf.sh /root/lab-sot/loop-rewrite.sh /root/lab-sot/reinstall-sim.sh
+
 docker cp "$TEST_BIN" "$NAME:/root/it.test"
 
 echo "[run-csf-container] running integration tests (^TestLab)"
@@ -118,7 +129,9 @@ set -e
 echo "[run-csf-container] hard gate: these tests must PASS, not SKIP or FAIL"
 for t in TestLabCSFDetection TestLabCSFVersion TestLabCSFTestingFlag TestLabLFDState TestLabCSFListsReadable \
   TestLabCSFCollectorFork TestLabCSFCollectorState TestLabCSFPortAddRemove TestLabCSFPortSSHGuard \
-  TestLabCSFPortRollback TestLabNoCSFNoExec; do
+  TestLabCSFPortRollback TestLabNoCSFNoExec \
+  TestLabSOTObserveReadOnly TestLabSOTSaveconfReplay TestLabSOTApplyPortsMultiKey TestLabSOTGuardSSHPort \
+  TestLabSOTListOps TestLabSOTNoForbiddenCommands; do
   if ! grep -q -- "--- PASS: $t " "$LOG"; then
     echo "ERROR: $t did not PASS (missing, skipped or failed) — see $LOG" >&2
     exit 1

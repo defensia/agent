@@ -132,12 +132,18 @@ jobs:
   # diagnostic step is non-blocking: GitHub-hosted runner kernel support
   # for those modules inside a container is unverified, so
   # LAB_EXPECT_FW_MODE is left empty and that one check is allowed to
-  # skip — the 11 CSF assertions in lab/ci/run-csf-container.sh's own hard
+  # skip — the 17 CSF assertions in lab/ci/run-csf-container.sh's own hard
   # gate (TestLabCSFDetection, TestLabCSFVersion, TestLabCSFTestingFlag,
   # TestLabLFDState, TestLabCSFListsReadable, TestLabCSFCollectorFork,
   # TestLabCSFCollectorState, TestLabCSFPortAddRemove, TestLabCSFPortSSHGuard,
-  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..05) must
-  # PASS, never SKIP or FAIL.
+  # TestLabCSFPortRollback, TestLabNoCSFNoExec — phase 15 COL-01..05 — plus
+  # TestLabSOTObserveReadOnly, TestLabSOTSaveconfReplay,
+  # TestLabSOTApplyPortsMultiKey, TestLabSOTGuardSSHPort, TestLabSOTListOps,
+  # TestLabSOTNoForbiddenCommands — phase 16.1 SOT-02/03/04/07) must PASS,
+  # never SKIP or FAIL. TestLabSOTGuardSessionIP is deliberately NOT in that
+  # list: it needs a real lab-attacker SSH session this container has no
+  # equivalent of, so it SKIPs here (LAB_ALLOW_SKIP=1) and is only ever
+  # hard-gated by the real OrbStack lab (lab/test.sh).
   #
   # COL-06 is NOT in that list, despite TestLabNoCSFNoExec appearing in it:
   # on a host that HAS CSF that test takes its other branch, where the only

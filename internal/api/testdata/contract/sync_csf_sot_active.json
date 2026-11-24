@@ -1,0 +1,52 @@
+{
+  "config": {
+    "suspended": false,
+    "bf_threshold": 5,
+    "bf_window": 600,
+    "bf_ban_duration": null,
+    "monitor_mode": false,
+    "waf_config": null,
+    "blocked_countries": [],
+    "monitor_config": null,
+    "malware_scan_config": null,
+    "sigma_config": null,
+    "session_config": null,
+    "csf_sot": {
+      "mode": "defensia",
+      "correction": "warn",
+      "generation": 7,
+      "snapshot_requested": false,
+      "desired": {
+        "ports": {
+          "TCP_IN": "20,21,22,25,53,80,443",
+          "TCP_OUT": "20,21,25,53,80,443",
+          "UDP_IN": "53",
+          "UDP_OUT": "53"
+        },
+        "allow": [
+          {"value": "203.0.113.5", "comment": "defensia:sot"}
+        ],
+        "deny": [
+          {"value": "198.51.100.0/24", "comment": "defensia:tpl-web"}
+        ]
+      },
+      "revert_token": null,
+      "resume_token": null,
+      "retry_token": null
+    }
+  },
+  "rules": [],
+  "bans": [],
+  "whitelists": [],
+  "detection_rules": [],
+  "bot_fingerprints": [],
+  "waf_rules": [],
+  "threat_feed": [],
+  "malware_allowlist": [],
+  "malware_signatures": [],
+  "yara_install_requested": false,
+  "malware_scan_requested": false,
+  "quarantine_pending": [],
+  "csf_port_actions": [],
+  "csf_integration_disabled": false
+}
