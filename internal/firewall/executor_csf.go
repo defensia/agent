@@ -335,6 +335,19 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 			CSFLimit: conf.TempLimit, CSFTempbanTotal: len(temp.Entries), DefensiaInCSF: len(oursNow),
 			Deferred: deferred, UpdatedAt: e.now().UTC().Format(time.RFC3339),
 		})
+		// While degraded, nothing else wakes this worker again except an
+		// external ApplySync or the 60s ticker — far slower than
+		// csfProbeEvery (as short as 5s in the lab), so recovery (which
+		// needs csfRecoverAfter consecutive good probes, each gated by
+		// csfProbeEvery) could take minutes even once CSF is genuinely
+		// healthy again. Schedule a real-time wake so the next pass lands
+		// close to the configured probe cadence instead. Harmless if a
+		// pass already happened sooner for some other reason (e.wake has
+		// cap 1; an extra send here is simply dropped) — lab-measured,
+		// alma9-csf-orig, phase 18-10: TestLabBanSyncFakeBinary/garbage's
+		// own 30s recovery window never saw a second probe in time without
+		// this.
+		time.AfterFunc(csfProbeEvery, e.wakeUp)
 		return
 	}
 

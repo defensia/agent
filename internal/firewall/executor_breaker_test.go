@@ -164,6 +164,44 @@ func TestBreakerRecovery(t *testing.T) {
 	}
 }
 
+// TestDegradedPassSchedulesProbeWake is the regression test for the
+// lab-measured recovery stall (phase 18-10, alma9-csf-orig): a degraded
+// pass must schedule a real-time self-wake near csfProbeEvery so recovery
+// (which needs csfRecoverAfter consecutive good probes, each gated by
+// csfProbeEvery) actually happens at that cadence — without this, nothing
+// woke the worker again except an external ApplySync or the 60s ticker,
+// so TestLabBanSyncFakeBinary/garbage's own 30s recovery window in the lab
+// never saw a second probe in time despite CSF having genuinely recovered.
+func TestDegradedPassSchedulesProbeWake(t *testing.T) {
+	now := time.Now()
+	execFakeEnv(t)
+	e := newTestExecutor(t, &now)
+	e.breaker.degradeNow("unknown_line")
+	withExecRun(t, func(args []string) (string, int) { return "garbage", 0 }) // probe fails, stays degraded
+
+	oldProbeEvery := csfProbeEvery
+	csfProbeEvery = 20 * time.Millisecond
+	t.Cleanup(func() { csfProbeEvery = oldProbeEvery })
+
+	// Drain any pending wake from construction/setup so the assertion below
+	// only reflects runOnce's own scheduled wake.
+	select {
+	case <-e.wake:
+	default:
+	}
+
+	e.runOnce(context.Background())
+	if e.breaker.state != "degraded" {
+		t.Fatalf("state = %q, want still degraded (probe fails)", e.breaker.state)
+	}
+
+	select {
+	case <-e.wake:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("degraded pass did not schedule a real-time self-wake near csfProbeEvery")
+	}
+}
+
 func TestUnavailableStates(t *testing.T) {
 	cases := []struct {
 		name string
