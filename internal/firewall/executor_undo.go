@@ -80,7 +80,18 @@ func (e *csfExecutor) runUndoPass(ctx context.Context, desired SyncInput, u *und
 		if e.onUndoComplete != nil {
 			e.onUndoComplete(u.token, u.removed, oursLeft)
 		}
+		return
 	}
+
+	// Not done yet (oursLeft > 0, attempts still under undoAttemptsMax):
+	// self-wake so the next attempt runs promptly instead of waiting for
+	// the next external ApplySync or the 60s ticker — same rationale as
+	// the normal CSF-add pass's OpsCapped self-wake (executor_csf.go).
+	// Lab-measured, alma9-csf-orig, phase 18-10: a pass that converged
+	// everything but needed the "done" confirmation on a later read missed
+	// the test's 30s window waiting on onUndoComplete, since nothing woke
+	// the worker again until the 60s ticker.
+	e.wakeUp()
 }
 
 func boolState(cond bool, ifTrue, ifFalse string) string {

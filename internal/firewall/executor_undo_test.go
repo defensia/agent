@@ -213,6 +213,42 @@ func TestUndoConflictsReported(t *testing.T) {
 	}
 }
 
+// TestUndoPassSelfWakesWhenNotDone is the regression test for the
+// lab-measured convergence stall (phase 18-10, alma9-csf-orig): a pass that
+// leaves work pending (oursLeft > 0, attempts still under undoAttemptsMax)
+// must self-wake so the next attempt runs promptly instead of waiting for
+// the next external ApplySync or the 60s ticker — TestLabBanSyncUndoAll's
+// own LastUndoToken/LastUndoRemoved poll missed its 30s window without
+// this, since nothing else woke the worker again.
+func TestUndoPassSelfWakesWhenNotDone(t *testing.T) {
+	w := newFakeWorld(t)
+	clock := time.Now()
+	path := t.TempDir() + "/ban_executor.json"
+	m, _ := newMigrateManager(t, &clock, path)
+
+	ip := "203.0.113.61"
+	w.seedTemp(map[string]tempEntry{ip: {ttl: time.Hour, comment: "defensia:r", ours: true}})
+	w.setExtraForeign(ip, true) // never resolves within this test — forces "not done" on every pass
+
+	desired := []DesiredBan{{IP: ip, Reason: "r", TTL: time.Hour, ExpiresAt: mustTime(clock, time.Hour)}}
+	m.csf.requestUndo("T1", desired)
+
+	// requestUndo's own wakeUp() already queued one signal; drain it so the
+	// assertion below only reflects runOnce's OWN self-wake, not that one.
+	select {
+	case <-m.csf.wake:
+	default:
+	}
+
+	m.csf.runOnce(context.Background())
+
+	select {
+	case <-m.csf.wake:
+	default:
+		t.Fatal("runOnce left the undo pass not done (unresolved conflict, attempts < max) but did not self-wake")
+	}
+}
+
 func TestUndoNoBackend(t *testing.T) {
 	w := newFakeWorld(t)
 	clock := time.Now()
