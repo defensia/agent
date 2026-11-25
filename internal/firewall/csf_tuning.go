@@ -82,3 +82,27 @@ func defaultCSFProbeEvery() time.Duration {
 // MaxDefensiaTemp is a read-only accessor for integration tests asserting
 // the hard cap on our own tagged temp entries is never exceeded.
 func MaxDefensiaTemp() int { return csfMaxDefensiaTemp }
+
+// SetCSFProbeInterval overrides csfProbeEvery at runtime, clamped the same
+// way defaultCSFProbeEvery() clamps the env var — for the lab only. A
+// DEFENSIA_CSF_PROBE_SECONDS env var is read exactly once, at package
+// initialization (before any test function ever runs), so a test's own
+// t.Setenv call has no effect on it whatsoever — every chaos/recovery test
+// that needs a short probe cadence must call this instead (confirmed live
+// in the lab, alma9-csf-orig, phase 18-10: a test that only called
+// t.Setenv("DEFENSIA_CSF_PROBE_SECONDS", ...) silently kept the real
+// 5-minute default the whole time, and recovery that needs
+// csfRecoverAfter consecutive good probes never completed within any
+// test's own short poll window). Returns a restore func so callers can
+// t.Cleanup it back to whatever was active before.
+func SetCSFProbeInterval(d time.Duration) (restore func()) {
+	if d < 5*time.Second {
+		d = 5 * time.Second
+	}
+	if d > time.Hour {
+		d = time.Hour
+	}
+	old := csfProbeEvery
+	csfProbeEvery = d
+	return func() { csfProbeEvery = old }
+}
