@@ -29,6 +29,13 @@ func resetGuardState(t *testing.T) {
 	sshSessionCacheData = nil
 	sshSessionCacheMu.Unlock()
 
+	// Ban-skipped dedupe state is package-level and otherwise leaks between
+	// tests (e.g. an earlier test's BanIP("203.0.113.5") call would make a
+	// later test's identical IP look "already notified within the window").
+	banSkippedMu.Lock()
+	banSkippedLastAt = map[string]time.Time{}
+	banSkippedMu.Unlock()
+
 	t.Cleanup(func() {
 		guardHasCSF = prevHasCSF
 		activeSSHSessionIPs = prevSSH

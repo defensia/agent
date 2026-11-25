@@ -2,6 +2,9 @@ package firewall
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -289,4 +292,81 @@ func cachedSSHSessionIPs() []netip.Addr {
 	sshSessionCacheAt = time.Now()
 
 	return sshSessionCacheData
+}
+
+// --- Chokepoint enforcement (phase 18-04 Task 3) ----------------------------
+
+// ErrProtectedIP is returned when a ban is refused because the guard
+// protects the IP (whitelist, csf.allow, csf.ignore, or an active SSH
+// session) — distinct from ErrNoBackend, which means there was simply no
+// backend to apply the ban to.
+var ErrProtectedIP = errors.New("refusing to ban protected IP")
+
+// admitBan is the single admission point every ban passes through before it
+// reaches a backend's Ban/BanBatch (wired into backend.go's BanIPFor and
+// ApplyBanEntries — the Phase 17 choke point BanIP/ApplyBans already
+// delegate to). On nftables hosts the Defensia drop runs at input hook
+// priority -10, BEFORE CSF's own ACCEPT rules, so this is what actually
+// protects csf.allow/csf.ignore/whitelist/SSH-session IPs on every
+// executor: a ban refused here never becomes an nft/ipset/iptables command.
+func admitBan(ip string, path string) error {
+	ok, reason := guardCheck(ip)
+	if ok || reason == "safe" || reason == "invalid" {
+		// "safe"/"invalid" are already handled by BanIPFor/ApplyBanEntries
+		// with Phase 17's own existing semantics (refusing to ban safe IP /
+		// invalid IP address) — admitBan must not duplicate or override them.
+		return nil
+	}
+
+	notifyBanSkipped(ip, reason, path)
+
+	return fmt.Errorf("%w (%s): %s", ErrProtectedIP, reason, ip)
+}
+
+// guardNow is a test seam; production value is time.Now.
+var guardNow = time.Now
+
+const banSkippedDedupeWindow = time.Hour
+
+const banSkippedMaxTracked = 10_000
+
+var (
+	banSkippedHandler func(ip, reason, path string)
+	banSkippedMu      sync.Mutex
+	banSkippedLastAt  = map[string]time.Time{}
+)
+
+// SetBanSkippedHandler registers fn to be called (at most once per
+// ip+reason per hour) whenever admitBan refuses a ban. Plan 09 wires this to
+// emit a ban_skipped_protected event. Passing nil disables it.
+func SetBanSkippedHandler(fn func(ip, reason, path string)) {
+	banSkippedMu.Lock()
+	banSkippedHandler = fn
+	banSkippedMu.Unlock()
+}
+
+func notifyBanSkipped(ip, reason, path string) {
+	key := ip + "|" + reason
+
+	banSkippedMu.Lock()
+	now := guardNow()
+	last, seen := banSkippedLastAt[key]
+	dueForLog := !seen || now.Sub(last) >= banSkippedDedupeWindow
+	if dueForLog {
+		banSkippedLastAt[key] = now
+		if len(banSkippedLastAt) > banSkippedMaxTracked {
+			banSkippedLastAt = map[string]time.Time{key: now}
+		}
+	}
+	handler := banSkippedHandler
+	banSkippedMu.Unlock()
+
+	if !dueForLog {
+		return
+	}
+
+	log.Printf("[firewall] refusing to ban %s: protected (%s)", ip, reason)
+	if handler != nil {
+		handler(ip, reason, path)
+	}
 }
