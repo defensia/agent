@@ -19,7 +19,9 @@ func TestShouldReportBan(t *testing.T) {
 	}{
 		{"nil error", nil, true},
 		{"wrapped ErrNoBackend", fmt.Errorf("ban 1.2.3.4: %w", firewall.ErrNoBackend), false},
+		{"wrapped ErrProtectedIP", fmt.Errorf("%w (whitelist): 1.2.3.4", firewall.ErrProtectedIP), false},
 		{"safe-IP refusal (origin/main behaviour kept)", errors.New("refusing to ban safe IP: 127.0.0.1"), true},
+		{"other error", errors.New("boom"), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

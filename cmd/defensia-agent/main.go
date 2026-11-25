@@ -178,6 +178,20 @@ func runAgent() {
 		reportFirewallUnavailable(apiClient, "bans", firewall.SelectionReason(), 0)
 	}
 
+	// Ban executor (phase 18 SYNC-01..07): dispatches every ban/unban to
+	// Phase 17's defensia path (unchanged) or to the CSF reconcile worker,
+	// per the panel's config.ban_executor. Started before the first sync so
+	// a persisted "csf" mode from a prior run is already in effect.
+	banMgr := newBanManager(apiClient)
+	banMgr.Start(context.Background())
+	firewall.SetBanSkippedHandler(func(ip, reason, path string) {
+		go apiClient.ReportEvents([]api.EventRequest{{
+			Type: "ban_skipped_protected", Severity: "warning", SourceIP: ip,
+			Details:    map[string]string{"reason": reason, "path": path},
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	})
+
 	// Initialize ModSecurity engine (auto-detects if Apache + mod_security installed)
 	modsecEngine = modsecurity.New()
 	if modsecEngine.IsAvailable() {
@@ -331,7 +345,7 @@ func runAgent() {
 	w := watcher.New(func(ip, reason string, count int) {
 		log.Printf("[watcher] banning %s: %s (count=%d)", ip, reason, count)
 
-		if err := firewall.BanIP(ip); err != nil {
+		if err := banMgr.Ban(ip, reason); err != nil {
 			log.Printf("[firewall] error: %v", err)
 			if !shouldReportBan(err) {
 				log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
@@ -413,7 +427,7 @@ func runAgent() {
 			domainMap,
 			func(ip, reason string, count int) {
 				log.Printf("[webwatcher] banning %s: %s (count=%d)", ip, reason, count)
-				if err := firewall.BanIP(ip); err != nil {
+				if err := banMgr.Ban(ip, reason); err != nil {
 					log.Printf("[firewall] error: %v", err)
 					if !shouldReportBan(err) {
 						log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
@@ -444,7 +458,7 @@ func runAgent() {
 		})
 		webW.SetOnScoredBan(func(ip, reason string, score int, duration time.Duration) {
 			log.Printf("[webwatcher] scored ban %s: %s (score=%d, duration=%s)", ip, reason, score, duration)
-			if err := firewall.BanIP(ip); err != nil {
+			if err := banMgr.Ban(ip, reason); err != nil {
 				log.Printf("[firewall] error: %v", err)
 				if !shouldReportBan(err) {
 					log.Printf("[firewall] scored ban of %s not reported to the panel: no usable firewall backend", ip)
@@ -527,7 +541,7 @@ func runAgent() {
 	if watcher.HasMailService() {
 		mailW = watcher.NewMailWatcher(func(ip, reason string, count int) {
 			log.Printf("[mailwatcher] banning %s: %s (count=%d)", ip, reason, count)
-			if err := firewall.BanIP(ip); err != nil {
+			if err := banMgr.Ban(ip, reason); err != nil {
 				log.Printf("[firewall] error: %v", err)
 				if !shouldReportBan(err) {
 					log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
@@ -567,7 +581,7 @@ func runAgent() {
 	if watcher.HasDBService() {
 		dbW = watcher.NewDBWatcher(func(ip, reason string, count int) {
 			log.Printf("[dbwatcher] banning %s: %s (count=%d)", ip, reason, count)
-			if err := firewall.BanIP(ip); err != nil {
+			if err := banMgr.Ban(ip, reason); err != nil {
 				log.Printf("[firewall] error: %v", err)
 				if !shouldReportBan(err) {
 					log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
@@ -607,7 +621,7 @@ func runAgent() {
 	if watcher.HasFTPService() {
 		ftpW = watcher.NewFTPWatcher(func(ip, reason string, count int) {
 			log.Printf("[ftpwatcher] banning %s: %s (count=%d)", ip, reason, count)
-			if err := firewall.BanIP(ip); err != nil {
+			if err := banMgr.Ban(ip, reason); err != nil {
 				log.Printf("[firewall] error: %v", err)
 				if !shouldReportBan(err) {
 					log.Printf("[firewall] ban of %s not reported to the panel: no usable firewall backend", ip)
@@ -807,13 +821,13 @@ func runAgent() {
 	// be waiting on this very first sync response.
 	startCSFRuntime(context.Background(), apiClient, cfg.ServerURL)
 	startCSFSot(context.Background(), apiClient, cfg.ServerURL, func() {
-		if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
+		if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName, banMgr); err != nil {
 			log.Printf("[csf-sot] triggered sync failed: %v", err)
 		}
 	})
 
 	// Initial sync (applies config, whitelists, rules, bans)
-	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
+	if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName, banMgr); err != nil {
 		log.Printf("[sync] initial sync failed: %v", err)
 	}
 
@@ -852,7 +866,7 @@ func runAgent() {
 		go func() {
 			defer fwSyncInFlight.Store(false)
 			log.Printf("[firewall] %s — re-applying bans and country blocks now", why)
-			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
+			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName, banMgr); err != nil {
 				log.Printf("[sync] firewall resync failed: %v", err)
 			}
 		}()
@@ -868,13 +882,17 @@ func runAgent() {
 		ws.Handlers{
 			OnBanCreated: func(p ws.BanCreatedPayload) {
 				log.Printf("[reverb] ban.created: %s", p.IPAddress)
-				if err := firewall.BanIP(p.IPAddress); err != nil {
+				reason := p.Reason
+				if reason == "" {
+					reason = "panel"
+				}
+				if err := banMgr.Ban(p.IPAddress, reason); err != nil {
 					log.Printf("[firewall] error: %v", err)
 				}
 			},
 			OnBanRemoved: func(p ws.BanRemovedPayload) {
 				log.Printf("[reverb] ban.removed: %s", p.IPAddress)
-				if err := firewall.UnbanIP(p.IPAddress); err != nil {
+				if err := banMgr.Unban(p.IPAddress); err != nil {
 					log.Printf("[firewall] error: %v", err)
 				}
 			},
@@ -1052,6 +1070,11 @@ func runAgent() {
 			}
 			hbReq.CSFHeartbeatFields, hbReq.CSFPaused = buildCSFHeartbeat(csfSnap, firewall.CSFPaused())
 			hbReq.Capabilities, hbReq.CSFSot = csfSotHeartbeatFields()
+			if firewall.HasCSF() {
+				if st := statusToHeartbeat(banMgr.Status()); st != nil {
+					hbReq.BanExecutorState = st
+				}
+			}
 
 			resp, err := apiClient.Heartbeat(hbReq)
 			if err != nil {
@@ -1082,13 +1105,14 @@ func runAgent() {
 	// Background security monitors (port scan, flood, file integrity)
 	go runSecurityMonitors(apiClient)
 
-	// Fallback sync ticker (every 5min, in case WS misses something)
+	// Fallback sync ticker (every 5min, in case WS misses something;
+	// DEFENSIA_SYNC_INTERVAL_SECONDS overrides it for the lab)
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(syncInterval())
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName); err != nil {
+			if err := syncAndApply(apiClient, w, webW, mailW, dbW, ftpW, geo, geoBlocker, reportUpdateEvent, wsName, banMgr); err != nil {
 				log.Printf("[sync] error: %v", err)
 			}
 		}
@@ -1103,7 +1127,7 @@ func runAgent() {
 	log.Println("Shutting down...")
 }
 
-func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, ftpW *watcher.FTPWatcher, geo *geoip.Lookup, geoBlocker *firewall.GeoBlocker, reportUpdateEvent updater.EventReporter, wsType string) error {
+func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, ftpW *watcher.FTPWatcher, geo *geoip.Lookup, geoBlocker *firewall.GeoBlocker, reportUpdateEvent updater.EventReporter, wsType string, banMgr *firewall.BanManager) error {
 	sync, err := client.Sync()
 	if err != nil {
 		return err
@@ -1211,6 +1235,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 	}
 	w.UpdateWhitelist(wlIPs, wlCIDRs)
+	// Pushed to the ban guard on every sync (phase 18 SYNC-03): a whitelisted
+	// IP must never be banned on any executor, Defensia or CSF.
+	firewall.SetWhitelist(wlIPs, wlCIDRs)
 	if mailW != nil {
 		mailW.UpdateWhitelist(wlIPs, wlCIDRs)
 	}
@@ -1258,21 +1285,18 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		log.Printf("[geoblock] monitor mode — country blocks not applied at kernel level")
 	}
 
-	// Apply bans (skipped in monitor mode)
-	activeBanIPs := make(map[string]bool, len(sync.Bans))
+	// Apply bans through the ban executor (phase 18): ApplySync performs
+	// exactly Phase 17's ApplyBanEntries+CleanupStaleBans sequence on the
+	// defensia path (skipped in monitor mode, same as before), or hands off
+	// to the CSF worker — see internal/firewall/executor.go.
 	banIPs := make([]string, 0, len(sync.Bans))
-	entries := make([]firewall.BanEntry, 0, len(sync.Bans))
 	for _, b := range sync.Bans {
-		activeBanIPs[b.IPAddress] = true
 		banIPs = append(banIPs, b.IPAddress)
-		entries = append(entries, firewall.BanEntry{IP: b.IPAddress, TTL: banTTL(b.ExpiresAt, time.Now())})
 	}
-	bansApplied := 0
-	if !sync.Config.MonitorMode {
-		bansApplied = firewall.ApplyBanEntries(entries)
-		if firewall.Mode() == "none" {
-			reportFirewallUnavailable(client, "bans", firewall.SelectionReason(), 0)
-		}
+	res := banMgr.ApplySync(buildSyncInput(sync, time.Now()))
+	bansApplied := res.Applied
+	if firewall.Mode() == "none" {
+		reportFirewallUnavailable(client, "bans", firewall.SelectionReason(), 0)
 	}
 
 	// Write web server IP deny rules when behind a proxy (Cloudflare, etc.).
@@ -1301,16 +1325,9 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		saveThreatFeedCache(sync.ThreatFeed)
 	}
 
-	// Build set of IPs managed by user firewall rules (so cleanup doesn't remove them)
-	activeRuleIPs := make(map[string]bool)
-	for _, r := range sync.Rules {
-		if r.IPAddress != nil && *r.IPAddress != "" && r.Type == "block" {
-			activeRuleIPs[*r.IPAddress] = true
-		}
-	}
-
-	// Remove iptables DROP rules for bans that expired or were removed server-side
-	cleaned := firewall.CleanupStaleBans(activeBanIPs, activeRuleIPs)
+	// Stale-ban cleanup already happened inside ApplySync above (activeBanIPs/
+	// activeRuleIPs are built from sync.Bans/sync.Rules by buildSyncInput).
+	cleaned := res.Cleaned
 
 	// Apply firewall rules that are pending or synced (skip country-only rules)
 	rulesApplied := 0
