@@ -79,6 +79,7 @@ func newTestExecutor(t *testing.T, clock *time.Time) *csfExecutor {
 		vanish:        map[string]int{},
 		keep:          map[string]bool{},
 		denyinChainOK: func(context.Context) bool { return true },
+		breaker:       newBreaker(),
 		now:           func() time.Time { return *clock },
 		sleep:         func(time.Duration) {},
 		emit:          func(ExecutorEvent) {},

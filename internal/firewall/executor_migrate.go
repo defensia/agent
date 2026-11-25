@@ -69,9 +69,14 @@ func (e *csfExecutor) migrateToDefensia(ctx context.Context, desired []DesiredBa
 		return 0, 0, ""
 	}
 
+	// "Ready" here means both the environment looks sane (testing_mode,
+	// LF_DAEMON, DENYIN) AND the breaker allows writes — a degraded breaker
+	// must hold back every removal exactly like an environment problem does
+	// (reported the same way: BanIPFor still runs, csf_cleanup_pending).
 	ready := false
 	if conf, cerr := readCSFBanConf(); cerr == nil {
-		ready, _ = e.readiness(ctx, conf)
+		envReady, _, _ := e.environmentReady(ctx, conf)
+		ready = envReady && e.breaker.allowWrite()
 	}
 
 	ops := 0

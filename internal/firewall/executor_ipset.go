@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"context"
 	"log"
 	"net/netip"
 )
@@ -24,6 +25,10 @@ var (
 	// own CSF pause, and both must force the defensia path with zero CSF
 	// commands.
 	csfPausedFn = CSFPaused
+	// lfdRunningFn wraps csf_state.go's lfdRunning(ctx) *bool as a plain
+	// bool-returning seam for the breaker's environment check: nil (unknown)
+	// is treated as "don't block on this", only an explicit false degrades.
+	lfdRunningFn = func(ctx context.Context) *bool { return lfdRunning(ctx) }
 )
 
 var banMembersLoggedOnce bool

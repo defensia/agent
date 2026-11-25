@@ -120,7 +120,33 @@ func (m *BanManager) Start(ctx context.Context) {
 	}
 	m.csf = newCSFExecutor(m.opts)
 	m.csf.onMigrationDone = m.migrationDone
+	m.csf.onDegradedChange = m.degradedChanged
+	if m.state.Degraded {
+		// Resume degraded across a restart — recovery still requires fresh
+		// evidence (csfRecoverAfter consecutive good probes), never time
+		// alone, so simply being the first pass of a new process is not by
+		// itself grounds to come back "ok".
+		m.csf.breaker.degradeNow(m.state.DegradedReason)
+	} else {
+		m.csf.checkVersionOnce(ctx)
+	}
 	go m.csf.run(ctx)
+}
+
+// degradedChanged persists the breaker's degraded/not-degraded state.
+// Idempotent, like migrationDone — safe to call on every pass.
+func (m *BanManager) degradedChanged(degraded bool, reason string) {
+	m.mu.Lock()
+	m.state.Degraded = degraded
+	m.state.DegradedReason = reason
+	m.state.UpdatedAt = m.opts.Now().UTC().Format(time.RFC3339)
+	s := m.state
+	path := m.statePath
+	m.mu.Unlock()
+
+	if err := saveBanState(path, s); err != nil {
+		log.Printf("[firewall] could not persist ban executor state: %v", err)
+	}
 }
 
 // migrationDone persists Migrating:false — called by the csfExecutor (in

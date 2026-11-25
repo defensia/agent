@@ -23,6 +23,7 @@ func newMigrateManager(t *testing.T, clock *time.Time, path string) (*BanManager
 		local: map[string]localBan{}, backoff: map[string]time.Time{},
 		prevOurs: map[string]TempBanEntry{}, vanish: map[string]int{}, keep: map[string]bool{},
 		denyinChainOK: func(context.Context) bool { return true },
+		breaker:       newBreaker(),
 		now:           func() time.Time { return *clock }, sleep: func(time.Duration) {}, emit: rec.emit,
 	}
 	e.onMigrationDone = m.migrationDone

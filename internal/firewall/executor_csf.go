@@ -3,6 +3,8 @@ package firewall
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -52,6 +54,15 @@ type csfExecutor struct {
 	migrateTarget   string
 	migrateAll      bool
 	onMigrationDone func()
+
+	// breaker is the read-only safety layer (executor_breaker.go). Its
+	// state is read/written only from the single worker goroutine (runOnce
+	// always runs sequentially), so it needs no lock of its own.
+	breaker *breaker
+	// onDegradedChange persists breaker transitions (BanManager wires this
+	// in Start, mirroring onMigrationDone) so a restart resumes degraded
+	// until fresh recovery evidence, per SYNC-07.
+	onDegradedChange func(degraded bool, reason string)
 }
 
 // newCSFExecutor constructs a worker. Resolving the CSF binary happens once,
@@ -69,6 +80,7 @@ func newCSFExecutor(opts ManagerOptions) *csfExecutor {
 		vanish:        map[string]int{},
 		keep:          map[string]bool{},
 		denyinChainOK: defaultDenyinChainOK,
+		breaker:       newBreaker(),
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -219,11 +231,68 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 		return
 	}
 
-	if ready, reason := e.readiness(ctx, conf); !ready {
+	// A malformed tempban line is unambiguous evidence CSF's own output
+	// format is not what we expect — degrade immediately, don't wait for 3
+	// write attempts to prove it.
+	if temp.Malformed > 0 && e.breaker.state == "ok" {
+		e.breaker.degradeNow("tempban_format")
+		e.persistDegraded()
+	}
+
+	ready, restarting, reason := e.environmentReady(ctx, conf)
+	if !ready {
+		if restarting {
+			// Paused, not unavailable: a restart window shorter than
+			// csfRestartPatience is expected and not counted against the
+			// breaker. Reads still happen (temp/conf above), so status
+			// counts stay current; zero writes either way.
+			e.statusPtr.Store(&ExecutorStatus{
+				Mode: "csf", EffectiveMode: "csf", State: "ok",
+				CSFTempbanTotal: len(temp.Entries), CSFLimit: conf.TempLimit,
+				UpdatedAt: e.now().UTC().Format(time.RFC3339),
+			})
+			return
+		}
 		e.statusPtr.Store(&ExecutorStatus{
 			Mode: "csf", EffectiveMode: "defensia", State: "unavailable", Reason: reason,
 			CSFLimit: conf.TempLimit, CSFTempbanTotal: len(temp.Entries),
 			UpdatedAt: e.now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
+
+	// Recovery probing while degraded: evidence only, never time alone.
+	if e.breaker.state == "degraded" {
+		if e.breaker.lastProbeAt.IsZero() || e.now().Sub(e.breaker.lastProbeAt) >= csfProbeEvery {
+			e.breaker.lastProbeAt = e.now()
+			if e.breaker.probe(ctx, e.cli) {
+				e.breaker.recovered()
+				e.persistDegraded()
+				e.emitEvent("csf_executor_recovered", map[string]string{})
+			}
+		}
+	}
+
+	if e.breaker.state != "ok" {
+		// Read-only: existing blocks are left exactly as they are, no more
+		// -td/-tr. No automatic fallback to the Defensia backend (locked
+		// decision: avoids double blocking).
+		oursNow := map[string]TempBanEntry{}
+		for _, en := range temp.Entries {
+			if en.Ours {
+				oursNow[en.IP] = en
+			}
+		}
+		deferred := 0
+		for _, b := range desired.Bans {
+			if _, ok := oursNow[b.IP]; !ok {
+				deferred++
+			}
+		}
+		e.statusPtr.Store(&ExecutorStatus{
+			Mode: "csf", EffectiveMode: "csf", State: e.breaker.state, Reason: e.breaker.reason,
+			CSFLimit: conf.TempLimit, CSFTempbanTotal: len(temp.Entries), DefensiaInCSF: len(oursNow),
+			Deferred: deferred, UpdatedAt: e.now().UTC().Format(time.RFC3339),
 		})
 		return
 	}
@@ -237,8 +306,9 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 		Backoff: backoff, MonitorMode: desired.MonitorMode, Guard: guardFn,
 	})
 
-	applied := e.executeOps(ctx, plan.Ops)
+	applied := e.executeOps(ctx, plan.Ops, restarting)
 	e.applied.Store(int64(applied))
+	e.persistDegraded()
 
 	temp2, err2 := readTempBans()
 	if err2 != nil {
@@ -260,8 +330,11 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 	if anyEvicted {
 		state = "capacity_exhausted"
 	}
+	if e.breaker.state != "ok" {
+		state = e.breaker.state
+	}
 	st := &ExecutorStatus{
-		Mode: "csf", EffectiveMode: "csf", State: state,
+		Mode: "csf", EffectiveMode: "csf", State: state, Reason: e.breaker.reason,
 		CSFReady: true, CSFLimit: conf.TempLimit, CSFTempbanTotal: len(temp2.Entries),
 		DefensiaInCSF: len(oursNow), Deferred: plan.Deferred, DeferredIPv6: plan.DeferredIPv6,
 		SkippedProtected: len(plan.Skipped),
@@ -276,10 +349,76 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 	}
 }
 
+// persistDegraded calls onDegradedChange (BanManager persists it) whenever
+// one is wired. Safe to call unconditionally — BanManager's own callback is
+// idempotent the same way onMigrationDone is.
+func (e *csfExecutor) persistDegraded() {
+	if e.onDegradedChange != nil {
+		e.onDegradedChange(e.breaker.state == "degraded", e.breaker.reason)
+	}
+}
+
+// checkVersionOnce is a single startup sanity check — NOT part of any
+// regular pass (so it never changes an existing pass's op count) — that an
+// unrecognised `csf -v` answer degrades the executor before it ever trusts
+// the binary enough to issue a single -td/-tr. BanManager.Start calls this
+// once; runOnce never calls it.
+func (e *csfExecutor) checkVersionOnce(ctx context.Context) {
+	if e.cli == nil || e.breaker.state != "ok" {
+		return
+	}
+	if _, vOut := e.cli.Version(ctx); vOut.Result == ResultUnexpected {
+		e.breaker.degradeNow("version_unrecognised")
+		e.persistDegraded()
+	}
+}
+
+// environmentReady resolves the full environment half of the read-only
+// safety layer: testing_mode/lf_daemon_off/lfd_not_running are permanent
+// until the condition is actually fixed; a restart in progress (csf.lock
+// present or DENYIN missing) is first treated as an expected pause, only
+// escalated to "unavailable" after csfRestartPatience with no recovery.
+func (e *csfExecutor) environmentReady(ctx context.Context, conf csfBanConf) (ready bool, restarting bool, reason string) {
+	if conf.Testing {
+		return false, false, "testing_mode"
+	}
+	if conf.Found["LF_DAEMON"] && !conf.LFDaemon {
+		return false, false, "lf_daemon_off"
+	}
+	if r := lfdRunningFn(ctx); r != nil && !*r {
+		return false, false, "lfd_not_running"
+	}
+
+	locked := false
+	if _, err := os.Stat(filepath.Join(csfVarDir, "csf.lock")); err == nil {
+		locked = true
+	}
+
+	denyinOK := true
+	if e.denyinChainOK != nil {
+		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		denyinOK = e.denyinChainOK(rctx)
+		cancel()
+	}
+
+	if !locked && denyinOK {
+		e.breaker.restartSince = time.Time{}
+		return true, false, ""
+	}
+
+	if e.breaker.restartSince.IsZero() {
+		e.breaker.restartSince = e.now()
+	}
+	if e.now().Sub(e.breaker.restartSince) < csfRestartPatience {
+		return false, true, ""
+	}
+	return false, false, "csf_restarting_too_long"
+}
+
 // executeOps runs plan ops in order, spaced by csfMinInterval, stopping the
 // pass early on a ResultUnexpected outcome (plan 08 wires the breaker; this
 // plan just refuses to keep hammering CSF after one unexplained result).
-func (e *csfExecutor) executeOps(ctx context.Context, ops []op) int {
+func (e *csfExecutor) executeOps(ctx context.Context, ops []op, restarting bool) int {
 	applied := 0
 	for i, o := range ops {
 		opCtx, cancel := context.WithTimeout(ctx, csfCmdTimeout)
@@ -291,6 +430,8 @@ func (e *csfExecutor) executeOps(ctx context.Context, ops []op) int {
 			outcome, _ = e.cli.TempRemove(opCtx, o.IP)
 		}
 		cancel()
+
+		e.breaker.observe(outcome, restarting)
 
 		switch outcome.Result {
 		case ResultOK, ResultBenign:
@@ -420,24 +561,6 @@ func (e *csfExecutor) detectVanished(desired SyncInput, oursNow map[string]TempB
 	e.prevOurs = newPrev
 	e.mu.Unlock()
 	return anyEvicted
-}
-
-func (e *csfExecutor) readiness(ctx context.Context, conf csfBanConf) (bool, string) {
-	if conf.Testing {
-		return false, "testing_mode"
-	}
-	if conf.Found["LF_DAEMON"] && !conf.LFDaemon {
-		return false, "lf_daemon_off"
-	}
-	if e.denyinChainOK != nil {
-		rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ok := e.denyinChainOK(rctx)
-		cancel()
-		if !ok {
-			return false, "denyin_missing"
-		}
-	}
-	return true, ""
 }
 
 func (e *csfExecutor) setBackoff(ip string, d time.Duration) {
