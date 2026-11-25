@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 # Fake `csf` binary for unit and lab chaos tests. Controlled by env vars:
-#   FAKECSF_MODE        ok|garbage|hang|exit1|huge|binary|partial|slow (default: ok)
+#   FAKECSF_MODE        ok|garbage|hang|exit1|huge|binary|partial|slow|passthrough (default: ok)
+#   FAKECSF_MODE_FILE   if set and readable, its trimmed content overrides
+#                       FAKECSF_MODE on EVERY call (lab chaos tests flip
+#                       mode mid-run without restarting the executor)
 #   FAKECSF_LOG         if set, append "$*" (the argv) as one line per call
 #   FAKECSF_TEMPBAN     if set, a file this script maintains to emulate
 #                       /var/lib/csf/csf.tempban across -td/-tr calls
+#   FAKECSF_REAL        (passthrough mode only) the real csf binary to
+#                       exec; defaults to /usr/sbin/csf
 set -uo pipefail
 
 MODE="${FAKECSF_MODE:-ok}"
+if [ -n "${FAKECSF_MODE_FILE:-}" ] && [ -r "${FAKECSF_MODE_FILE}" ]; then
+  file_mode="$(tr -d '[:space:]' < "${FAKECSF_MODE_FILE}")"
+  [ -n "$file_mode" ] && MODE="$file_mode"
+fi
 
 if [ -n "${FAKECSF_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FAKECSF_LOG"
 fi
 
 case "$MODE" in
+  passthrough)
+    exec "${FAKECSF_REAL:-/usr/sbin/csf}" "$@"
+    ;;
   hang)
     sleep 3600
     exit 0

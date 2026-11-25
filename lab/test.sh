@@ -25,6 +25,12 @@ source "$LAB_DIR/matrix.sh"
 # must NOT skip making csf_stage_row available.
 # shellcheck source=lab/csf-stages.sh
 source "$LAB_DIR/csf-stages.sh"
+# lab/ban-sync.env (phase 18): LAB_BAN_PREFIX/LAB_BAN_PREFIX6, the IPv4/IPv6
+# prefixes the ban-sync integration suites generate unique test IPs from —
+# sourced here (not inside lib.sh) since it is phase-18-specific, not part
+# of the Phase 14 harness proper.
+# shellcheck source=lab/ban-sync.env
+source "$LAB_DIR/ban-sync.env"
 # lib.sh/matrix.sh each `set -euo pipefail` when sourced, and `source`
 # runs in this same shell — silently re-enabling `-e` here. Explicitly
 # turn it back off: a single VM's non-zero test exit must not abort the
@@ -112,6 +118,7 @@ write_header() {
     printf -- '- orbstack: %s\n' "$(orb version 2>&1 | head -1)"
     printf -- '- panel: %s\n' "$PANEL_SHA"
     printf -- '- host arch: %s\n' "$(uname -m)"
+    printf -- '- LAB_TEST_RUN: %s\n' "${LAB_TEST_RUN:-^TestLab}"
     printf '\n'
   } >>"$1"
 }
@@ -159,6 +166,12 @@ for vm in $vms; do
 
   RAW="$LAB_DIR/reports/raw/$TS-$vm.log"
   vm_push "$vm" "$BINARY" /root/integration.test
+  # Fake csf binary (phase 18 SYNC-07 chaos suites): pushed to every agent
+  # VM, not just CSF ones, so DEFENSIA_CSF_BIN can point at it uniformly
+  # regardless of whether real CSF is also installed here.
+  vm_root "$vm" mkdir -p /root/fakecsf
+  vm_push "$vm" "$LAB_DIR/../internal/firewall/testdata/fakecsf/csf" /root/fakecsf/csf
+  vm_root "$vm" chmod 755 /root/fakecsf/csf
 
   # phase 16.1 CSF source-of-truth primitives (TestLabSOT*): the lab/sot
   # helper scripts (ui-saveconf.sh etc.) and a real, ESTABLISHED SSH
@@ -220,7 +233,9 @@ for vm in $vms; do
     LAB_FORCE_FAIL="${LAB_FORCE_FAIL:-}" \
     LAB_CAPTURE_NFT_FIXTURES="${LAB_CAPTURE_NFT_FIXTURES:-}" \
     LAB_SOT_SSH_PEER_IP="$sot_peer_ip" \
-    /root/integration.test -test.v -test.count=1 -test.timeout "${LAB_TEST_TIMEOUT:-30m}" -test.run '^TestLab' >"$RAW" 2>&1
+    LAB_BAN_PREFIX="$LAB_BAN_PREFIX" \
+    LAB_BAN_PREFIX6="$LAB_BAN_PREFIX6" \
+    /root/integration.test -test.v -test.count=1 -test.timeout "${LAB_TEST_TIMEOUT:-60m}" -test.run "${LAB_TEST_RUN:-^TestLab}" >"$RAW" 2>&1
   rc=$?
   seconds=$(($(date +%s) - start))
 
@@ -389,7 +404,14 @@ case " $vms " in
 esac
 
 if [ -z "${failed_vms// /}" ]; then
-  printf '\n**Overall: PASS**\n' >>"$REPORT"
+  if [ -n "${LAB_TEST_RUN:-}" ] && [ "${LAB_TEST_RUN}" != "^TestLab" ]; then
+    # A focused run (non-default LAB_TEST_RUN) never counts as the gate,
+    # even when every row is green — only plan 12's single, authoritative
+    # `make lab-test` run (default LAB_TEST_RUN) is the real gate.
+    printf '\n**Overall: PARTIAL (focused run)**\n' >>"$REPORT"
+  else
+    printf '\n**Overall: PASS**\n' >>"$REPORT"
+  fi
   overall_rc=0
 else
   printf '\n**Overall: FAIL**\n' >>"$REPORT"

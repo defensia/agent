@@ -1,6 +1,10 @@
 package firewall
 
-import "time"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
 // Ban-executor tuning constants (SYNC-02, SYNC-04). Rate constants are
 // derived from lab/reports/2026-11-25-1102-csf-td-bench.md
@@ -45,8 +49,36 @@ const (
 	csfCmdTimeout = 10 * time.Second
 	csfOutputCap  = 64 << 10 // 64 KiB
 
-	csfProbeEvery      = 5 * time.Minute
 	csfDegradeAfter    = 3
 	csfRecoverAfter    = 2
 	csfRestartPatience = 90 * time.Second
 )
+
+// csfProbeEvery is a var (not a const) so the lab can shorten the probe
+// interval (see defaultCSFProbeEvery) to prove recovery without waiting 5
+// real minutes between probes — test override for the lab; production
+// never sets the env var it reads, so it always gets the real default.
+var csfProbeEvery = defaultCSFProbeEvery()
+
+func defaultCSFProbeEvery() time.Duration {
+	const def = 5 * time.Minute
+	v := os.Getenv("DEFENSIA_CSF_PROBE_SECONDS")
+	if v == "" {
+		return def
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	if secs < 5 {
+		secs = 5
+	}
+	if secs > 3600 {
+		secs = 3600
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// MaxDefensiaTemp is a read-only accessor for integration tests asserting
+// the hard cap on our own tagged temp entries is never exceeded.
+func MaxDefensiaTemp() int { return csfMaxDefensiaTemp }
