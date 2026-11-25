@@ -14,6 +14,16 @@ var (
 	cleanupStaleBansFn = CleanupStaleBans
 	banIPFn            = BanIP
 	unbanIPFn          = UnbanIP
+	// banIPForFn/generationFn are used only by executor_migrate.go's
+	// migrateToDefensia (make-before-break csf->defensia migration, with a
+	// Generation() guard against the backend being recreated mid-flight).
+	banIPForFn   = BanIPFor
+	generationFn = Generation
+	// csfPausedFn wraps Phase 15's CSFPaused(): an emergency can be
+	// triggered either by the panel (SyncInput.Emergency) or by the agent's
+	// own CSF pause, and both must force the defensia path with zero CSF
+	// commands.
+	csfPausedFn = CSFPaused
 )
 
 var banMembersLoggedOnce bool

@@ -42,6 +42,16 @@ type csfExecutor struct {
 
 	keepMu sync.Mutex
 	keep   map[string]bool
+
+	// migrateTarget == "defensia" puts the worker in cleanup-migration mode
+	// (executor_migrate.go) instead of the normal CSF reconcile pass; "" (or
+	// "csf") means normal operation. onMigrationDone is called (by
+	// BanManager, via Start) whenever a migration in either direction
+	// finishes converging, so the persisted ban_executor.json state can be
+	// updated without the worker needing to know about persistence itself.
+	migrateTarget   string
+	migrateAll      bool
+	onMigrationDone func()
 }
 
 // newCSFExecutor constructs a worker. Resolving the CSF binary happens once,
@@ -88,6 +98,22 @@ func defaultDenyinChainOK(ctx context.Context) bool {
 func (e *csfExecutor) setDesired(in SyncInput) {
 	e.mu.Lock()
 	e.desired = in
+	e.mu.Unlock()
+	e.wakeUp()
+}
+
+// setMigrateTarget switches the worker between normal CSF-reconcile mode
+// ("" / "csf") and defensia-migration-cleanup mode ("defensia"). When
+// switching to "defensia", bans is the panel's current desired list (the
+// worker's own e.desired.Bans is not otherwise updated while migrating,
+// since setDesired is only called from the "csf" ApplySync branch).
+func (e *csfExecutor) setMigrateTarget(target string, all bool, bans []DesiredBan) {
+	e.mu.Lock()
+	e.migrateTarget = target
+	e.migrateAll = all
+	if target == "defensia" {
+		e.desired.Bans = bans
+	}
 	e.mu.Unlock()
 	e.wakeUp()
 }
@@ -160,6 +186,8 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 	desired := e.desired
 	local := cloneLocal(e.local)
 	backoff := cloneBackoff(e.backoff)
+	migrateTarget := e.migrateTarget
+	migrateAll := e.migrateAll
 	e.mu.Unlock()
 
 	if e.cli == nil {
@@ -167,6 +195,11 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 			Mode: "csf", EffectiveMode: "defensia", State: "unavailable", Reason: "csf_missing",
 			CSFLimit: -1, UpdatedAt: e.now().UTC().Format(time.RFC3339),
 		})
+		return
+	}
+
+	if migrateTarget == "defensia" {
+		e.runMigratePass(ctx, desired, migrateAll)
 		return
 	}
 
@@ -314,6 +347,14 @@ func (e *csfExecutor) confirmAndHandOver(desired SyncInput, oursNow map[string]T
 	e.keepMu.Lock()
 	e.keep = keep
 	e.keepMu.Unlock()
+
+	// A defensia->csf switch has fully converged once nothing is left to
+	// protect on the Defensia backend (every desired IP is either confirmed
+	// in CSF or was never there to begin with) — tell BanManager so it can
+	// persist Migrating:false. Harmless to call repeatedly in steady state.
+	if len(keep) == 0 && e.onMigrationDone != nil {
+		e.onMigrationDone()
+	}
 }
 
 // detectVanished implements the two-consecutive-reads eviction/external-

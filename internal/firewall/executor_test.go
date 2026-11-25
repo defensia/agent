@@ -33,7 +33,7 @@ func withManagerSeams(t *testing.T) (applyCalls *[][]BanEntry, cleanupCalls *[]s
 
 func TestManagerDefensiaModeGolden(t *testing.T) {
 	applyCalls, cleanupCalls := withManagerSeams(t)
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 
 	in := SyncInput{
 		Bans: []DesiredBan{
@@ -111,7 +111,7 @@ func TestManagerDefensiaGoldenPerBackend(t *testing.T) {
 			}
 			f.Clear()
 
-			m := NewBanManager(ManagerOptions{})
+			m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 			in := SyncInput{Bans: []DesiredBan{{IP: "203.0.113.50", TTL: time.Hour}}}
 			res := m.ApplySync(in)
 
@@ -135,7 +135,7 @@ func TestManagerNeverEnsures(t *testing.T) {
 	genBefore := Generation()
 	f.Clear()
 
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 	m.ApplySync(SyncInput{Bans: []DesiredBan{{IP: "203.0.113.60"}}})
 
 	if Generation() != genBefore {
@@ -156,7 +156,7 @@ func TestManagerDefensiaBanUnban(t *testing.T) {
 	unbanIPFn = func(ip string) error { unbanned = append(unbanned, ip); return nil }
 	t.Cleanup(func() { banIPFn = origBan; unbanIPFn = origUnban })
 
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 	if err := m.Ban("203.0.113.70", "brute_force"); err != nil {
 		t.Fatalf("Ban: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestManagerCSFBanGuardedSync(t *testing.T) {
 	Reselect()
 	f.Clear()
 
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 	m.ApplySync(SyncInput{Executor: "csf"}) // sets lastMode=csf, csf worker nil (Start not called)
 	f.Clear()
 
@@ -221,7 +221,7 @@ func TestManagerStatusNilWithoutCSF(t *testing.T) {
 	guardHasCSF = func() bool { return false }
 	t.Cleanup(func() { guardHasCSF = prev })
 
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 	if s := m.Status(); s != nil {
 		t.Errorf("Status() = %+v, want nil", s)
 	}
@@ -229,7 +229,7 @@ func TestManagerStatusNilWithoutCSF(t *testing.T) {
 
 func TestManagerUnknownExecutorIsDefensia(t *testing.T) {
 	withManagerSeams(t)
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 	res := m.ApplySync(SyncInput{Executor: "iptables", Bans: []DesiredBan{{IP: "203.0.113.90"}}})
 	if res.Applied != 1 {
 		t.Errorf("unknown executor should fall back to defensia path, Applied = %d", res.Applied)
@@ -241,9 +241,77 @@ func TestManagerStartIsIdempotent(t *testing.T) {
 	guardHasCSF = func() bool { return false }
 	t.Cleanup(func() { guardHasCSF = prev })
 
-	m := NewBanManager(ManagerOptions{})
+	m := NewBanManager(ManagerOptions{StatePath: t.TempDir() + "/ban_executor.json"})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m.Start(ctx)
 	m.Start(ctx) // must not panic or double-start
+}
+
+func TestStartupUsesPersistedMode(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/ban_executor.json"
+	if err := saveBanState(path, banState{Mode: "csf"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewBanManager(ManagerOptions{StatePath: path})
+	// Before any ApplySync call, the manager's effective mode must already
+	// reflect the persisted state — Ban()'s dispatch (csfMode := m.lastMode
+	// == "csf") relies on this being right immediately after construction,
+	// not only after the first sync.
+	if m.lastMode != "csf" {
+		t.Errorf("lastMode = %q, want csf (from persisted state)", m.lastMode)
+	}
+
+	// With a real worker up (fake CSF binary, no real exec), Ban() goes to
+	// the CSF executor, not banIPFn.
+	origBan := banIPFn
+	var fallbackCalled bool
+	banIPFn = func(ip string) error { fallbackCalled = true; return nil }
+	t.Cleanup(func() { banIPFn = origBan })
+
+	execFakeEnv(t)
+	withExecRun(t, func(args []string) (string, int) { return "", 0 })
+
+	prevHasCSF := guardHasCSF
+	guardHasCSF = func() bool { return true }
+	t.Cleanup(func() { guardHasCSF = prevHasCSF })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+
+	if err := m.Ban("203.0.113.95", "x"); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	if fallbackCalled {
+		t.Error("banIPFn (defensia path) should not have been used; persisted mode is csf")
+	}
+}
+
+func TestStartupEmergencyPersistedDefensia(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/ban_executor.json"
+	if err := saveBanState(path, banState{Mode: "defensia"}); err != nil {
+		t.Fatal(err)
+	}
+
+	origBan := banIPFn
+	var banned []string
+	banIPFn = func(ip string) error { banned = append(banned, ip); return nil }
+	t.Cleanup(func() { banIPFn = origBan })
+
+	calls := withExecRun(t, func(args []string) (string, int) { return "", 0 })
+
+	m := NewBanManager(ManagerOptions{StatePath: path})
+	if err := m.Ban("203.0.113.96", "x"); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	if len(banned) != 1 || banned[0] != "203.0.113.96" {
+		t.Errorf("banIPFn calls = %v, want [203.0.113.96]", banned)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("expected zero csf runner calls, got %v", *calls)
+	}
 }

@@ -77,13 +77,17 @@ type ManagerOptions struct {
 type BanManager struct {
 	mu                sync.Mutex
 	opts              ManagerOptions
+	statePath         string
+	state             banState
 	csf               *csfExecutor
 	unknownExecLogged bool
-	lastMode          string // last normalized SyncInput.Executor ("defensia" | "csf")
+	lastMode          string // effective executor currently in force ("defensia" | "csf")
+	emergency         bool
 }
 
-// NewBanManager constructs a BanManager. opts.Now defaults to time.Now,
-// opts.Emit to a no-op.
+// NewBanManager constructs a BanManager, loading any persisted executor
+// state from opts.StatePath (or the default banStatePath) so Ban/Unban use
+// the right path even before the first ApplySync call after a restart.
 func NewBanManager(opts ManagerOptions) *BanManager {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -91,7 +95,16 @@ func NewBanManager(opts ManagerOptions) *BanManager {
 	if opts.Emit == nil {
 		opts.Emit = func(ExecutorEvent) {}
 	}
-	return &BanManager{opts: opts}
+	path := opts.StatePath
+	if path == "" {
+		path = banStatePath
+	}
+	state := loadBanState(path)
+	mode := state.Mode
+	if mode == "" {
+		mode = "defensia"
+	}
+	return &BanManager{opts: opts, statePath: path, state: state, lastMode: mode}
 }
 
 // Start lazily brings up the CSF reconcile worker, only when HasCSF() is
@@ -106,7 +119,40 @@ func (m *BanManager) Start(ctx context.Context) {
 		return
 	}
 	m.csf = newCSFExecutor(m.opts)
+	m.csf.onMigrationDone = m.migrationDone
 	go m.csf.run(ctx)
+}
+
+// migrationDone persists Migrating:false — called by the csfExecutor (in
+// either direction) once it observes convergence. Deliberately idempotent:
+// called every steady-state pass too, which is harmless (a small JSON write
+// at most once per wake/tick, never on a hot ban path).
+func (m *BanManager) migrationDone() {
+	m.mu.Lock()
+	m.state.Migrating = false
+	m.state.UpdatedAt = m.opts.Now().UTC().Format(time.RFC3339)
+	s := m.state
+	path := m.statePath
+	m.mu.Unlock()
+
+	if err := saveBanState(path, s); err != nil {
+		log.Printf("[firewall] could not persist ban executor state: %v", err)
+	}
+}
+
+// persistSwitch records the start of a switch BEFORE the first op of it is
+// ever issued, so a crash mid-switch resumes correctly on restart (the
+// persisted Mode already reflects the new target, Migrating stays true
+// until migrationDone fires).
+func (m *BanManager) persistSwitch(target string) {
+	m.state = banState{
+		Mode: target, Migrating: true, MigrationTarget: target,
+		LastUndoToken: m.state.LastUndoToken, LastUndoRemoved: m.state.LastUndoRemoved,
+		UpdatedAt: m.opts.Now().UTC().Format(time.RFC3339),
+	}
+	if err := saveBanState(m.statePath, m.state); err != nil {
+		log.Printf("[firewall] could not persist ban executor state: %v", err)
+	}
 }
 
 // normalizeExecutor maps an unknown/empty executor string to "defensia",
@@ -138,22 +184,80 @@ func (m *BanManager) normalizeExecutor(executor string) string {
 // executor never removes).
 func (m *BanManager) ApplySync(in SyncInput) SyncResult {
 	executor := m.normalizeExecutor(in.Executor)
+	emergency := in.Emergency || csfPausedFn()
+	target := executor
+	if emergency {
+		target = "defensia"
+	}
 
 	m.mu.Lock()
 	csf := m.csf
-	m.lastMode = executor
+	prevMode := m.lastMode
+	switching := target != prevMode
+	if switching {
+		m.persistSwitch(target)
+	} else if emergency {
+		// Not a detected "switch" (e.g. already-defensia at rest, or the
+		// very first sync of this process) but still an emergency: the
+		// persisted file must always say defensia while one is active, so a
+		// restart mid-emergency also issues zero CSF commands.
+		m.state.Mode = "defensia"
+		m.state.Migrating = false
+		m.state.UpdatedAt = m.opts.Now().UTC().Format(time.RFC3339)
+		if err := saveBanState(m.statePath, m.state); err != nil {
+			log.Printf("[firewall] could not persist ban executor state: %v", err)
+		}
+	}
+	m.lastMode = target
+	m.emergency = emergency
 	m.mu.Unlock()
 
-	if executor == "csf" && csf != nil {
-		csf.setDesired(in)
-		keep := csf.ipsetKeep()
-		for ip := range in.ThreatFeedIPs {
-			keep[ip] = true
-		}
-		cleaned := cleanupStaleBansFn(keep, in.ActiveRuleIPs)
-		return SyncResult{Applied: csf.appliedCount(), Cleaned: cleaned}
+	if switching {
+		m.opts.Emit(ExecutorEvent{
+			Type: "csf_executor_switched", Severity: "info",
+			Details: map[string]string{"from": prevMode, "to": target},
+		})
 	}
 
+	if emergency {
+		// Emergency means zero CSF commands, period — not even the cleanup
+		// migration runs; whatever is in CSF stays there untouched until the
+		// emergency is lifted.
+		if csf != nil {
+			csf.setMigrateTarget("", false, nil)
+		}
+		return m.applyDefensia(in)
+	}
+
+	if target == "defensia" {
+		res := m.applyDefensia(in)
+		if csf != nil {
+			csf.setMigrateTarget("defensia", false, in.Bans)
+		}
+		return res
+	}
+
+	// target == "csf"
+	if csf == nil {
+		// Worker never started (HasCSF false on this host) — bans must
+		// still be enforced somewhere, so fall back to the defensia path
+		// rather than silently dropping them.
+		return m.applyDefensia(in)
+	}
+	csf.setMigrateTarget("", false, nil)
+	csf.setDesired(in)
+	keep := csf.ipsetKeep()
+	for ip := range in.ThreatFeedIPs {
+		keep[ip] = true
+	}
+	cleaned := cleanupStaleBansFn(keep, in.ActiveRuleIPs)
+	return SyncResult{Applied: csf.appliedCount(), Cleaned: cleaned}
+}
+
+// applyDefensia is exactly Phase 17's main.go sequence: ApplyBanEntries
+// (skipped under MonitorMode) then CleanupStaleBans — unchanged on every
+// backend (ipset, nftables, iptables, none).
+func (m *BanManager) applyDefensia(in SyncInput) SyncResult {
 	entries := make([]BanEntry, 0, len(in.Bans))
 	activeBanIPs := make(map[string]bool, len(in.Bans))
 	for _, b := range in.Bans {
@@ -214,10 +318,19 @@ func (m *BanManager) Status() *ExecutorStatus {
 
 	m.mu.Lock()
 	csf := m.csf
+	emergency := m.emergency
+	mode := m.lastMode
 	m.mu.Unlock()
 
+	if emergency {
+		return &ExecutorStatus{
+			Mode: "defensia", EffectiveMode: "defensia", State: "emergency_off",
+			CSFLimit: -1, UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+
 	if csf == nil {
-		return &ExecutorStatus{Mode: "defensia", EffectiveMode: "defensia", State: "ok", CSFLimit: -1, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+		return &ExecutorStatus{Mode: mode, EffectiveMode: mode, State: "ok", CSFLimit: -1, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
 	}
 
 	return csf.status()
