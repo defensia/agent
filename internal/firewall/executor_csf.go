@@ -361,6 +361,14 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 			"reason": "capacity", "count": strconv.Itoa(plan.Deferred), "limit": strconv.Itoa(conf.TempLimit),
 		})
 	}
+
+	// A pass capped purely by csfMaxOpsPerPass (real budget still has room)
+	// must not wait for the next external ApplySync or the 60s ticker to
+	// keep draining — self-wake so a large-but-in-budget burst converges in
+	// a handful of rate-limited passes instead of minutes.
+	if plan.OpsCapped {
+		e.wakeUp()
+	}
 }
 
 // persistDegraded calls onDegradedChange (BanManager persists it) whenever

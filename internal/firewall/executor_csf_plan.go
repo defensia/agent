@@ -48,6 +48,18 @@ type passPlan struct {
 	Skipped      map[string]string
 	Conflicts    []string
 	Budget       int
+	// OpsCapped is true when real budget (reserve/TempLimit/csfMaxDefensiaTemp)
+	// had room for more adds this pass but csfMaxOpsPerPass's per-pass rate
+	// cap is what actually truncated the candidate list — as opposed to
+	// Deferred entries that are genuinely out of budget. The worker uses
+	// this to self-wake immediately after the pass instead of waiting for
+	// the next external ApplySync or the 60s ticker, so a burst well within
+	// budget still drains in a handful of rate-limited passes rather than
+	// taking minutes (lab-measured, alma9-csf-orig, phase 18-10: a
+	// 1,000-ban burst with a 500-entry budget took over 3 minutes to
+	// reach even 79 of them without this, since only the 60s ticker woke
+	// the worker again after the first capped pass).
+	OpsCapped bool
 }
 
 // finiteRenewMargin: for a desired ban with a finite expiry, only renew an
@@ -248,6 +260,7 @@ func planCSFPass(in passInput) passPlan {
 	if addBudget < 0 {
 		addBudget = 0
 	}
+	plan.OpsCapped = remainingOps < budget && len(candidates) > addBudget
 
 	var addOps []op
 	for i, d := range candidates {

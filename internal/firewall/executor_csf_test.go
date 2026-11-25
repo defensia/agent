@@ -282,6 +282,48 @@ func TestWorkerOpsCapPerPass(t *testing.T) {
 	}
 }
 
+// TestWorkerOpsCapSelfWakes is the regression test for the lab-measured
+// convergence stall (phase 18-10, alma9-csf-orig): a burst truncated purely
+// by csfMaxOpsPerPass (real budget still has room) must self-wake so the
+// NEXT pass runs without any external setDesired call or waiting for the
+// 60s ticker — proven here by calling run()'s own wake-triggered path twice
+// in a row with nothing re-arming e.wake except the executor itself.
+func TestWorkerOpsCapSelfWakes(t *testing.T) {
+	now := time.Now()
+	execFakeEnv(t)
+	e := newTestExecutor(t, &now)
+	withExecRun(t, func(args []string) (string, int) {
+		if args[0] == "-td" {
+			return okTempDenyOutput(args[1]), 0
+		}
+		return "", 0
+	})
+
+	var bans []DesiredBan
+	for i := 0; i < 3*csfMaxOpsPerPass; i++ {
+		bans = append(bans, DesiredBan{IP: testPublicIP(i), Reason: "r", ExpiresAt: mustTime(now, time.Hour)})
+	}
+	e.desired = SyncInput{Bans: bans}
+	e.runOnce(context.Background())
+
+	select {
+	case <-e.wake:
+	default:
+		t.Fatal("pass 1 left candidates deferred purely by the ops cap but did not self-wake")
+	}
+
+	calls2 := withExecRun(t, func(args []string) (string, int) {
+		if args[0] == "-td" {
+			return okTempDenyOutput(args[1]), 0
+		}
+		return "", 0
+	})
+	e.runOnce(context.Background())
+	if len(*calls2) != csfMaxOpsPerPass {
+		t.Fatalf("pass 2 (self-woken): got %d ops, want %d", len(*calls2), csfMaxOpsPerPass)
+	}
+}
+
 func TestWorkerNonBlocking(t *testing.T) {
 	now := time.Now()
 	execFakeEnv(t)

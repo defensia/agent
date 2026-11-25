@@ -93,6 +93,57 @@ func TestPlanCapOwn(t *testing.T) {
 	}
 }
 
+// TestPlanOpsCapped is the regression test for the lab-measured convergence
+// stall (phase 18-10, alma9-csf-orig): a burst well within real budget
+// (reserve/TempLimit/csfMaxDefensiaTemp) must be reported as OpsCapped=true
+// when csfMaxOpsPerPass — not the real budget — is what truncated this
+// pass's adds, since that is what the worker uses to decide whether to
+// self-wake immediately instead of waiting for the next external ApplySync
+// or the 60s ticker (without that, a burst took minutes to fully drain).
+func TestPlanOpsCapped(t *testing.T) {
+	now := time.Now()
+
+	t.Run("ops cap is the binding constraint", func(t *testing.T) {
+		var desired []DesiredBan
+		for i := 0; i < 600; i++ {
+			desired = append(desired, DesiredBan{IP: sprintfIP(i), Reason: "r", ExpiresAt: mustTime(now, time.Hour)})
+		}
+		// TempLimit <= 0 -> budget is csfMaxDefensiaTemp (500), far above
+		// csfMaxOpsPerPass (79) — the ops cap is what truncates this pass.
+		plan := planCSFPass(passInput{Now: now, Desired: desired, Temp: TempBanList{Exists: true}, Conf: csfBanConf{TempLimit: 0}})
+		if !plan.OpsCapped {
+			t.Errorf("OpsCapped = false, want true (budget %d, ops cap %d, candidates %d)", plan.Budget, csfMaxOpsPerPass, len(desired))
+		}
+	})
+
+	t.Run("real budget is the binding constraint", func(t *testing.T) {
+		temp := TempBanList{Exists: true}
+		for i := 0; i < 10; i++ {
+			temp.Entries = append(temp.Entries, TempBanEntry{IP: sprintfIP(i), Comment: "lfd", ExpiresAt: now.Add(time.Hour)})
+		}
+		var desired []DesiredBan
+		for i := 0; i < 200; i++ {
+			desired = append(desired, DesiredBan{IP: sprintfIP(100 + i), Reason: "r", ExpiresAt: mustTime(now, time.Hour)})
+		}
+		// TempLimit 100 -> reserve-based budget (70) is well under
+		// csfMaxOpsPerPass (79) — the real budget, not the ops cap, is what
+		// truncates this pass; self-waking sooner would not help (same
+		// budget next pass) so OpsCapped must be false.
+		plan := planCSFPass(passInput{Now: now, Desired: desired, Temp: temp, Conf: csfBanConf{TempLimit: 100}})
+		if plan.OpsCapped {
+			t.Errorf("OpsCapped = true, want false (budget %d is the real constraint, not the ops cap)", plan.Budget)
+		}
+	})
+
+	t.Run("no deferral at all", func(t *testing.T) {
+		desired := []DesiredBan{{IP: "203.0.113.5", Reason: "r", ExpiresAt: mustTime(now, time.Hour)}}
+		plan := planCSFPass(passInput{Now: now, Desired: desired, Temp: TempBanList{Exists: true}, Conf: csfBanConf{TempLimit: 100}})
+		if plan.OpsCapped {
+			t.Error("OpsCapped = true for a single ban with plenty of budget, want false")
+		}
+	})
+}
+
 func TestPlanPriority(t *testing.T) {
 	now := time.Now()
 	desired := []DesiredBan{
