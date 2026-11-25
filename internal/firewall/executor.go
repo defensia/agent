@@ -117,27 +117,38 @@ func NewBanManager(opts ManagerOptions) *BanManager {
 // true on this host. Safe to call more than once (idempotent).
 func (m *BanManager) Start(ctx context.Context) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.csf != nil {
+		m.mu.Unlock()
 		return
 	}
 	if !guardHasCSF() {
+		m.mu.Unlock()
 		return
 	}
-	m.csf = newCSFExecutor(m.opts)
-	m.csf.onMigrationDone = m.migrationDone
-	m.csf.onDegradedChange = m.degradedChanged
-	m.csf.onUndoComplete = m.undoCompleted
-	if m.state.Degraded {
+	csf := newCSFExecutor(m.opts)
+	csf.onMigrationDone = m.migrationDone
+	csf.onDegradedChange = m.degradedChanged
+	csf.onUndoComplete = m.undoCompleted
+	degraded, degradedReason := m.state.Degraded, m.state.DegradedReason
+	m.csf = csf
+	m.mu.Unlock()
+
+	// checkVersionOnce (via persistDegraded) and run's own passes call back
+	// into m.degradedChanged/migrationDone/undoCompleted, each of which
+	// re-locks m.mu — so m.mu MUST be released before calling either, or a
+	// single goroutine deadlocks on its own non-reentrant mutex (caught live
+	// in the lab: TestLabBanSyncFakeBinary/garbage, an unrecognised `csf -v`
+	// answer, phase 18-10).
+	if degraded {
 		// Resume degraded across a restart — recovery still requires fresh
 		// evidence (csfRecoverAfter consecutive good probes), never time
 		// alone, so simply being the first pass of a new process is not by
 		// itself grounds to come back "ok".
-		m.csf.breaker.degradeNow(m.state.DegradedReason)
+		csf.breaker.degradeNow(degradedReason)
 	} else {
-		m.csf.checkVersionOnce(ctx)
+		csf.checkVersionOnce(ctx)
 	}
-	go m.csf.run(ctx)
+	go csf.run(ctx)
 }
 
 // degradedChanged persists the breaker's degraded/not-degraded state.
