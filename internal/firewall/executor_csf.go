@@ -112,10 +112,37 @@ func defaultDenyinChainOK(ctx context.Context) bool {
 // blocks: the channel send is a non-blocking best-effort signal (cap 1 — a
 // second wake while one is already pending is a no-op, the pending wake will
 // pick up the latest desired state anyway since setDesired already stored it).
-func (e *csfExecutor) setDesired(in SyncInput) {
+//
+// freshSwitch must be true the first time this is called right after a
+// defensia -> csf switch (BanManager.ApplySync's own "switching" flag) — it
+// seeds ipsetKeep() with every IP in in.Bans so the SYNCHRONOUS
+// cleanupStaleBansFn call ApplySync makes immediately afterward (same
+// goroutine, before the worker has had any chance to run even one pass)
+// never strips Defensia-backend protection from an IP that has not yet been
+// confirmed in CSF. Without this, ipsetKeep() started as nil/empty (nothing
+// confirmed yet, which is indistinguishable from "nothing needs keeping")
+// and that very first cleanup call removed every just-added IP from the
+// Defensia backend before CSF ever had a chance to pick any of them up —
+// lab-measured, alma9-csf-orig, phase 18-10 (TestLabBanSyncSwitchRoundTrip's
+// gap monitor caught ~2000 ticks where a desired IP was in neither place).
+// confirmAndHandOver narrows this down to the real "not yet confirmed" set
+// as soon as the worker's first pass runs; ordinary steady-state resyncs
+// (freshSwitch false) leave the worker's own refined keep set alone.
+func (e *csfExecutor) setDesired(in SyncInput, freshSwitch bool) {
 	e.mu.Lock()
 	e.desired = in
 	e.mu.Unlock()
+
+	if freshSwitch {
+		keep := make(map[string]bool, len(in.Bans))
+		for _, b := range in.Bans {
+			keep[b.IP] = true
+		}
+		e.keepMu.Lock()
+		e.keep = keep
+		e.keepMu.Unlock()
+	}
+
 	e.wakeUp()
 }
 

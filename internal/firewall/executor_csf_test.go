@@ -357,7 +357,7 @@ func TestWorkerNonBlocking(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		e.setDesired(SyncInput{})
+		e.setDesired(SyncInput{}, false)
 		e.localBanIP("203.0.113.10", "ssh")
 		e.localUnbanIP("203.0.113.10")
 		_ = e.status()
@@ -458,6 +458,58 @@ func TestWorkerKeepsThreatFeed(t *testing.T) {
 	}
 	if !e.ipsetKeep()["203.0.113.22"] {
 		t.Error("threat-feed IP should be kept on the Defensia backend")
+	}
+}
+
+// TestSetDesiredFreshSwitchSeedsKeep is the regression test for the
+// lab-measured make-before-break violation (phase 18-10, alma9-csf-orig):
+// setDesired(in, true) — the freshSwitch path BanManager.ApplySync takes
+// right after a detected defensia -> csf switch — must seed ipsetKeep()
+// with every IP in in.Bans BEFORE returning, since ApplySync calls
+// cleanupStaleBansFn synchronously (same goroutine) immediately afterward,
+// well before the worker's own goroutine has had any chance to run a pass
+// and populate a real "not yet confirmed" keep set via confirmAndHandOver.
+// Without this, that very first cleanup call used an empty keep set and
+// stripped Defensia-backend protection from every IP before CSF had ever
+// picked any of them up.
+func TestSetDesiredFreshSwitchSeedsKeep(t *testing.T) {
+	now := time.Now()
+	e := newTestExecutor(t, &now)
+
+	bans := []DesiredBan{
+		{IP: "203.0.113.30", Reason: "r", ExpiresAt: mustTime(now, time.Hour)},
+		{IP: "203.0.113.31", Reason: "r", ExpiresAt: mustTime(now, time.Hour)},
+	}
+
+	e.setDesired(SyncInput{Bans: bans}, true)
+	keep := e.ipsetKeep()
+	if !keep["203.0.113.30"] || !keep["203.0.113.31"] {
+		t.Errorf("ipsetKeep() = %v after a fresh-switch setDesired, want both bans kept", keep)
+	}
+}
+
+// TestSetDesiredOrdinaryResyncLeavesKeepAlone proves the fix is scoped to
+// freshSwitch only: an ordinary steady-state resync (freshSwitch false)
+// must not force everything back into ipsetKeep(), or every routine
+// re-sync would redundantly re-protect already-CSF-confirmed IPs on the
+// Defensia backend too, defeating confirmAndHandOver's own narrower,
+// worker-computed keep set.
+func TestSetDesiredOrdinaryResyncLeavesKeepAlone(t *testing.T) {
+	now := time.Now()
+	e := newTestExecutor(t, &now)
+	e.keep = map[string]bool{"203.0.113.32": true} // simulates confirmAndHandOver's prior, narrower result
+
+	e.setDesired(SyncInput{Bans: []DesiredBan{
+		{IP: "203.0.113.32", Reason: "r", ExpiresAt: mustTime(now, time.Hour)},
+		{IP: "203.0.113.33", Reason: "r", ExpiresAt: mustTime(now, time.Hour)},
+	}}, false)
+
+	keep := e.ipsetKeep()
+	if keep["203.0.113.33"] {
+		t.Errorf("ipsetKeep() = %v, want 203.0.113.33 NOT force-kept on an ordinary (non-switch) resync", keep)
+	}
+	if !keep["203.0.113.32"] {
+		t.Error("ipsetKeep() should still have the pre-existing entry untouched")
 	}
 }
 

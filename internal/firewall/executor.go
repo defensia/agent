@@ -322,7 +322,7 @@ func (m *BanManager) ApplySync(in SyncInput) SyncResult {
 		return m.applyDefensia(in)
 	}
 	csf.setMigrateTarget("", false, nil)
-	csf.setDesired(in)
+	csf.setDesired(in, switching)
 	keep := csf.ipsetKeep()
 	for ip := range in.ThreatFeedIPs {
 		keep[ip] = true
