@@ -1,0 +1,4 @@
+csf: 11.22.0.20 not found in temporary bans
+csf: There are no temporary IP allows
+*WARNING* TESTING mode is enabled - do not forget to disable it in the configuration
+#exit=0

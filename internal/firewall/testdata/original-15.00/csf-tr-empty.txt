@@ -1,0 +1,3 @@
+csf: There are no temporary IP bans
+csf: There are no temporary IP allows
+#exit=0

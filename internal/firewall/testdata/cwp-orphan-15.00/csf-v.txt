@@ -1,2 +1,3 @@
 csf: v15.00 (generic)
 *WARNING* TESTING mode is enabled - do not forget to disable it in the configuration
+#exit=0

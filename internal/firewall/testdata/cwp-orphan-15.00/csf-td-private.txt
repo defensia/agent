@@ -1,0 +1,4 @@
+DROP  all opt -- in !lo out *  10.0.0.5  -> 0.0.0.0/0  
+csf: 10.0.0.5 blocked on port * for 600 seconds inbound
+*WARNING* TESTING mode is enabled - do not forget to disable it in the configuration
+#exit=0

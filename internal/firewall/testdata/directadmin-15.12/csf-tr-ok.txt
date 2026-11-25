@@ -1,0 +1,4 @@
+DROP  all opt -- in !lo out *  11.22.0.20  -> 0.0.0.0/0  
+csf: 11.22.0.20 temporary block removed
+csf: There are no temporary IP allows
+#exit=0
