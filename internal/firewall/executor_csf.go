@@ -3,8 +3,6 @@ package firewall
 import (
 	"context"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -405,10 +403,13 @@ func (e *csfExecutor) environmentReady(ctx context.Context, conf csfBanConf) (re
 		return false, false, "lfd_not_running"
 	}
 
-	locked := false
-	if _, err := os.Stat(filepath.Join(csfVarDir, "csf.lock")); err == nil {
-		locked = true
-	}
+	// locked: whether CSF itself currently holds an exclusive lock on
+	// csf.lock — NOT whether the file merely exists. csf.lock is created
+	// once and never removed (confirmed live on alma9-csf-orig: unchanged
+	// mtime across a full successful `csf -r`), so existence alone would
+	// permanently misreport every real CSF host as "restarting" and never
+	// issue a single -td/-tr. See csf_lock_linux.go.
+	locked := csfRestarting()
 
 	denyinOK := true
 	if e.denyinChainOK != nil {
