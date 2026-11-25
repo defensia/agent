@@ -209,8 +209,20 @@ func withCSFConf(t *testing.T, key, value string) {
 	if out, err := sh(t, "csf", "-r"); err != nil {
 		t.Fatalf("csf -r (withCSFConf %s=%s): %v (%s)", key, value, err, out)
 	}
+
+	// csf -r already restarts lfd as part of its own normal operation, but
+	// some conf values (e.g. DENY_TEMP_IP_LIMIT) lfd caches at its own
+	// startup and does not reliably pick up from that alone — hence the
+	// extra, explicit restart below, best-effort only (never t.Fatalf):
+	// CSF's lfd has a real, documented refusal mode — "lfd will not run
+	// with TESTING enabled in /etc/csf/csf.conf" — it logs that and exits
+	// immediately, which is the CORRECT state for TESTING=1 (our own
+	// environmentReady() checks conf.Testing before ever caring whether
+	// lfd is running at all). Lab-measured, alma9-csf-orig, phase 18-10:
+	// a withCSFConf(t, "TESTING", "1") caller that treated this restart as
+	// fatal failed the whole test over an lfd exit the test itself wants.
 	if out, err := sh(t, "systemctl", "restart", "lfd"); err != nil {
-		t.Fatalf("systemctl restart lfd (withCSFConf %s=%s): %v (%s)", key, value, err, out)
+		t.Logf("systemctl restart lfd (withCSFConf %s=%s): %v (%s) — non-fatal, lfd may legitimately refuse to run for this conf value", key, value, err, out)
 	}
 }
 
@@ -296,6 +308,37 @@ func newManager(t *testing.T, statePath string, mods ...func(*firewall.ManagerOp
 	t.Cleanup(cancel)
 
 	return mgr, ev
+}
+
+// newManagerStoppable is newManager plus the context's own cancel func,
+// for the rare case where a manager must stop BEFORE the enclosing test
+// returns — e.g. a parent test that spawns a subtest sharing the same real
+// CSF host: a manager's worker goroutine otherwise keeps running (its own
+// t.Cleanup only fires once the WHOLE test, including every subtest,
+// returns) and its 60s ticker can wake it mid-subtest, tagging every
+// "defensia:"-tagged entry it doesn't recognise (including the subtest's
+// own, freshly added by a DIFFERENT manager instance) for removal — lab-
+// measured, alma9-csf-orig, phase 18-10: a forgotten parent manager wiped
+// out a sibling subtest's burst entries in large batches via real -tr
+// calls, well before the subtest's own convergence could ever complete.
+// cancel is safe to call again at the registered t.Cleanup (a context's
+// CancelFunc is idempotent).
+func newManagerStoppable(t *testing.T, statePath string, mods ...func(*firewall.ManagerOptions)) (*firewall.BanManager, *managerEvents, context.CancelFunc) {
+	t.Helper()
+	firewall.Init()
+
+	ev := &managerEvents{}
+	opts := firewall.ManagerOptions{StatePath: statePath, Emit: ev.emit}
+	for _, mod := range mods {
+		mod(&opts)
+	}
+
+	mgr := firewall.NewBanManager(opts)
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr.Start(ctx)
+	t.Cleanup(cancel)
+
+	return mgr, ev, cancel
 }
 
 // argvLog points DEFENSIA_CSF_BIN at the fake csf binary in passthrough
