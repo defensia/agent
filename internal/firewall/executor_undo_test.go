@@ -115,6 +115,41 @@ func TestUndoIdempotentByToken(t *testing.T) {
 	}
 }
 
+// TestManagerStatusSurfacesLastUndo is the regression test for the
+// lab-measured gap (phase 18-10, alma9-csf-orig): BanManager.Status() must
+// reflect LastUndoToken/LastUndoRemoved once undoCompleted has persisted
+// them, even though the CSF executor's own ExecutorStatus (what
+// csf.status() returns) never sets those two fields itself — only
+// BanManager.undoCompleted writes them, into m.state. Every pre-existing
+// undo test only ever checked loadBanState(path) (the persisted file)
+// directly, never BanManager.Status() (what the panel-facing heartbeat
+// actually reads) — which is exactly how this went unnoticed until
+// TestLabBanSyncUndoAll's own Status()-based poll never converged despite
+// the undo (and its persisted state, and its emitted event) all being
+// correct underneath.
+func TestManagerStatusSurfacesLastUndo(t *testing.T) {
+	w := newFakeWorld(t)
+	clock := time.Now()
+	path := t.TempDir() + "/ban_executor.json"
+	m, _ := newMigrateManager(t, &clock, path)
+
+	entries := map[string]tempEntry{}
+	var desired []DesiredBan
+	for i := 0; i < 5; i++ {
+		ip := testPublicIP(i)
+		entries[ip] = tempEntry{ttl: time.Hour, comment: "defensia:r", ours: true}
+		desired = append(desired, DesiredBan{IP: ip, Reason: "r", TTL: time.Hour, ExpiresAt: mustTime(clock, time.Hour)})
+	}
+	w.seedTemp(entries)
+
+	m.ApplySync(SyncInput{Executor: "defensia", UndoToken: "T1", Bans: desired})
+	m.csf.runOnce(context.Background())
+
+	if st := m.Status(); st.LastUndoToken != "T1" || st.LastUndoRemoved != 5 {
+		t.Errorf("Status() = %+v, want LastUndoToken T1 LastUndoRemoved 5", st)
+	}
+}
+
 func TestUndoPersistsOnlyWhenClean(t *testing.T) {
 	w := newFakeWorld(t)
 	clock := time.Now()

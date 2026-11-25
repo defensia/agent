@@ -398,6 +398,8 @@ func (m *BanManager) Status() *ExecutorStatus {
 	emergency := m.emergency
 	mode := m.lastMode
 	undoBlocked := m.undoBlockedByEmergency
+	lastUndoToken := m.state.LastUndoToken
+	lastUndoRemoved := m.state.LastUndoRemoved
 	m.mu.Unlock()
 
 	if emergency {
@@ -412,8 +414,25 @@ func (m *BanManager) Status() *ExecutorStatus {
 	}
 
 	if csf == nil {
-		return &ExecutorStatus{Mode: mode, EffectiveMode: mode, State: "ok", CSFLimit: -1, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+		return &ExecutorStatus{
+			Mode: mode, EffectiveMode: mode, State: "ok", CSFLimit: -1,
+			LastUndoToken: lastUndoToken, LastUndoRemoved: lastUndoRemoved,
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
 	}
 
-	return csf.status()
+	// csf.status() returns a pointer into an atomic.Pointer shared with the
+	// worker goroutine, which never sets LastUndoToken/LastUndoRemoved
+	// itself (only BanManager.undoCompleted persists those, into m.state —
+	// not into the executor's own ExecutorStatus). Copy before overlaying
+	// them so callers never see a status struct mutated out from under
+	// them. Without this overlay, Status() silently never reported a
+	// completed undo at all — lab-measured, alma9-csf-orig,
+	// TestLabBanSyncUndoAll's own LastUndoToken/LastUndoRemoved poll never
+	// converged even though the undo itself (and its persisted state, and
+	// its emitted event) were already correct.
+	st := *csf.status()
+	st.LastUndoToken = lastUndoToken
+	st.LastUndoRemoved = lastUndoRemoved
+	return &st
 }
