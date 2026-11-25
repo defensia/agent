@@ -3,6 +3,7 @@ package firewall
 import (
 	"context"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -83,6 +84,11 @@ type BanManager struct {
 	unknownExecLogged bool
 	lastMode          string // effective executor currently in force ("defensia" | "csf")
 	emergency         bool
+	// undoBlockedByEmergency is true for the duration of an emergency during
+	// which the panel has requested an undo (a new UndoToken) that cannot
+	// run yet — surfaced via Status() as a distinct reason from the generic
+	// emergency_off, so the customer knows the undo is queued, not ignored.
+	undoBlockedByEmergency bool
 }
 
 // NewBanManager constructs a BanManager, loading any persisted executor
@@ -121,6 +127,7 @@ func (m *BanManager) Start(ctx context.Context) {
 	m.csf = newCSFExecutor(m.opts)
 	m.csf.onMigrationDone = m.migrationDone
 	m.csf.onDegradedChange = m.degradedChanged
+	m.csf.onUndoComplete = m.undoCompleted
 	if m.state.Degraded {
 		// Resume degraded across a restart — recovery still requires fresh
 		// evidence (csfRecoverAfter consecutive good probes), never time
@@ -147,6 +154,31 @@ func (m *BanManager) degradedChanged(degraded bool, reason string) {
 	if err := saveBanState(path, s); err != nil {
 		log.Printf("[firewall] could not persist ban executor state: %v", err)
 	}
+}
+
+// undoCompleted persists LastUndoToken/LastUndoRemoved and emits
+// csf_undo_completed — called by the csfExecutor once an undo-all pass
+// either fully converges (remaining == 0) or exhausts its retry budget on
+// an unresolved conflict (remaining > 0, reported as-is).
+func (m *BanManager) undoCompleted(token string, removed, remaining int) {
+	m.mu.Lock()
+	m.state.LastUndoToken = token
+	m.state.LastUndoRemoved = removed
+	m.state.UpdatedAt = m.opts.Now().UTC().Format(time.RFC3339)
+	s := m.state
+	path := m.statePath
+	m.mu.Unlock()
+
+	if err := saveBanState(path, s); err != nil {
+		log.Printf("[firewall] could not persist ban executor state: %v", err)
+	}
+
+	m.opts.Emit(ExecutorEvent{
+		Type: "csf_undo_completed", Severity: "info",
+		Details: map[string]string{
+			"token": token, "removed": strconv.Itoa(removed), "remaining": strconv.Itoa(remaining),
+		},
+	})
 }
 
 // migrationDone persists Migrating:false — called by the csfExecutor (in
@@ -219,6 +251,7 @@ func (m *BanManager) ApplySync(in SyncInput) SyncResult {
 	m.mu.Lock()
 	csf := m.csf
 	prevMode := m.lastMode
+	lastUndoToken := m.state.LastUndoToken
 	switching := target != prevMode
 	if switching {
 		m.persistSwitch(target)
@@ -236,6 +269,8 @@ func (m *BanManager) ApplySync(in SyncInput) SyncResult {
 	}
 	m.lastMode = target
 	m.emergency = emergency
+	wantsUndo := in.UndoToken != "" && in.UndoToken != lastUndoToken
+	m.undoBlockedByEmergency = wantsUndo && emergency
 	m.mu.Unlock()
 
 	if switching {
@@ -247,12 +282,17 @@ func (m *BanManager) ApplySync(in SyncInput) SyncResult {
 
 	if emergency {
 		// Emergency means zero CSF commands, period — not even the cleanup
-		// migration runs; whatever is in CSF stays there untouched until the
-		// emergency is lifted.
+		// migration runs, and not even a requested undo (it is deferred
+		// until the emergency ends, reported via Status' undo_blocked_
+		// emergency reason); whatever is in CSF stays there untouched.
 		if csf != nil {
 			csf.setMigrateTarget("", false, nil)
 		}
 		return m.applyDefensia(in)
+	}
+
+	if wantsUndo && csf != nil {
+		csf.requestUndo(in.UndoToken, in.Bans)
 	}
 
 	if target == "defensia" {
@@ -346,11 +386,16 @@ func (m *BanManager) Status() *ExecutorStatus {
 	csf := m.csf
 	emergency := m.emergency
 	mode := m.lastMode
+	undoBlocked := m.undoBlockedByEmergency
 	m.mu.Unlock()
 
 	if emergency {
+		reason := ""
+		if undoBlocked {
+			reason = "undo_blocked_emergency"
+		}
 		return &ExecutorStatus{
-			Mode: "defensia", EffectiveMode: "defensia", State: "emergency_off",
+			Mode: "defensia", EffectiveMode: "defensia", State: "emergency_off", Reason: reason,
 			CSFLimit: -1, UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 	}

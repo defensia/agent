@@ -27,6 +27,8 @@ func newMigrateManager(t *testing.T, clock *time.Time, path string) (*BanManager
 		now:           func() time.Time { return *clock }, sleep: func(time.Duration) {}, emit: rec.emit,
 	}
 	e.onMigrationDone = m.migrationDone
+	e.onDegradedChange = m.degradedChanged
+	e.onUndoComplete = m.undoCompleted
 	m.csf = e
 	return m, rec
 }

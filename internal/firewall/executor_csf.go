@@ -55,6 +55,13 @@ type csfExecutor struct {
 	migrateAll      bool
 	onMigrationDone func()
 
+	// undo (executor_undo.go) is non-nil while a generation-token undo-all
+	// is in progress, checked before migrateTarget so undo works regardless
+	// of the current executor mode. onUndoComplete persists LastUndoToken/
+	// LastUndoRemoved and emits csf_undo_completed (BanManager wires both).
+	undo           *undoState
+	onUndoComplete func(token string, removed, remaining int)
+
 	// breaker is the read-only safety layer (executor_breaker.go). Its
 	// state is read/written only from the single worker goroutine (runOnce
 	// always runs sequentially), so it needs no lock of its own.
@@ -200,6 +207,7 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 	backoff := cloneBackoff(e.backoff)
 	migrateTarget := e.migrateTarget
 	migrateAll := e.migrateAll
+	undo := e.undo
 	e.mu.Unlock()
 
 	if e.cli == nil {
@@ -207,6 +215,14 @@ func (e *csfExecutor) runOnce(ctx context.Context) {
 			Mode: "csf", EffectiveMode: "defensia", State: "unavailable", Reason: "csf_missing",
 			CSFLimit: -1, UpdatedAt: e.now().UTC().Format(time.RFC3339),
 		})
+		return
+	}
+
+	// Undo-all runs regardless of the current executor mode (defensia or
+	// csf) — a prior emergency can leave CSF entries behind even while the
+	// executor is already "defensia", and undo must still clean those up.
+	if undo != nil {
+		e.runUndoPass(ctx, desired, undo)
 		return
 	}
 

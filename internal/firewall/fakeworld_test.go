@@ -26,6 +26,7 @@ type fakeWorld struct {
 	mu             sync.Mutex
 	entries        map[string]tempEntry // ip -> entry; Ours/foreign both live here
 	backendMembers map[string]bool
+	extraForeign   map[string]bool
 	opsLog         []string
 
 	// banIPForErr/unbanErr let a test force a specific error for a specific
@@ -105,6 +106,13 @@ func (w *fakeWorld) flush() {
 	for ip, e := range w.entries {
 		lines = append(lines, fmt.Sprintf("%d|%s|*|inout|%d|%s", w.clock.Unix(), ip, int(e.ttl/time.Second), e.comment))
 	}
+	// extraForeign: a synthetic, permanent foreign (non-"ours") row for an
+	// IP that also has/had an "ours" entry — used to reproduce the real
+	// "an IP with both an Ours and a foreign entry" conflict case, which a
+	// single-entry-per-IP map otherwise can't represent.
+	for ip := range w.extraForeign {
+		lines = append(lines, fmt.Sprintf("%d|%s|*|inout|%d|lfd", w.clock.Unix(), ip, int(time.Hour/time.Second)))
+	}
 	content := strings.Join(lines, "\n")
 	if len(lines) > 0 {
 		content += "\n"
@@ -112,6 +120,22 @@ func (w *fakeWorld) flush() {
 	if err := os.WriteFile(filepath.Join(w.varDir, "csf.tempban"), []byte(content), 0o644); err != nil {
 		w.t.Fatal(err)
 	}
+}
+
+// setExtraForeign marks (or unmarks) ip as always having a co-existing
+// foreign entry, re-flushing immediately.
+func (w *fakeWorld) setExtraForeign(ip string, has bool) {
+	w.mu.Lock()
+	if w.extraForeign == nil {
+		w.extraForeign = map[string]bool{}
+	}
+	if has {
+		w.extraForeign[ip] = true
+	} else {
+		delete(w.extraForeign, ip)
+	}
+	w.mu.Unlock()
+	w.flush()
 }
 
 func (w *fakeWorld) record(op string) {
