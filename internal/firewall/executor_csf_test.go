@@ -70,6 +70,22 @@ func execFakeEnv(t *testing.T) (confDir, varDir string) {
 // rate-limit spacing override sleep themselves to record calls instead).
 func newTestExecutor(t *testing.T, clock *time.Time) *csfExecutor {
 	t.Helper()
+	// lfdRunningFn is a package-level seam (its own doc comment: "nil
+	// (unknown) is treated as 'don't block on this', only an explicit
+	// false degrades") — the real lfdRunning(ctx) genuinely returns an
+	// explicit false on any real Linux machine with no lfd process
+	// running at all (never installed, as in CI), short-circuiting
+	// environmentReady() to "lfd_not_running" before these tests ever
+	// reach the breaker/worker logic they actually exercise. On a Mac
+	// (no systemd/ps-based detection even attempted) the same call
+	// returns nil, masking this locally. Lab-measured, phase 18-12:
+	// every Breaker*/Worker*/Unavailable*/RestartPatience test failed
+	// the first time this package ever ran in real Linux CI.
+	prevLFD := lfdRunningFn
+	running := true
+	lfdRunningFn = func(context.Context) *bool { return &running }
+	t.Cleanup(func() { lfdRunningFn = prevLFD })
+
 	e := &csfExecutor{
 		wake:          make(chan struct{}, 1),
 		cli:           &csfCLI{bin: "test"},
