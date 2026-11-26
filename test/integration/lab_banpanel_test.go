@@ -187,17 +187,28 @@ func TestLabBanPanelEndToEnd(t *testing.T) {
 	// Every VM: the last heartbeat was accepted (proves no lab agent's
 	// executor state is rejected by this panel, incl. its heartbeat
 	// sanitizer from 18-03/18-09).
+	//
+	// Polled, not a single read: under the default (unfiltered) `^TestLab`
+	// gate, this test runs right after the TestLabBanChaos* suite, which
+	// deliberately restarts csf/lfd/the agent itself — last_seen_at can
+	// legitimately still be catching up from that disruption the instant
+	// this test starts. 90s, not a single point-in-time check, before
+	// treating staleness as a real rejected-heartbeat signal. Lab-measured,
+	// phase 18-12, full default gate run: 10m34s stale on first read,
+	// immediately after TestLabBanChaosSwitchBothWaysCrash.
 	var srv map[string]any
-	if status := panelDo(t, "GET", "/api/v1/servers/"+id, nil, &srv); status != 200 {
-		t.Fatalf("GET /servers/%s = %d", id, status)
-	}
-	lastSeen, ok := parsePanelTime(fmt.Sprint(srv["last_seen_at"]))
-	if !ok {
-		t.Fatalf("last_seen_at = %v, could not parse", srv["last_seen_at"])
-	}
-	if age := time.Since(lastSeen); age > 2*time.Minute {
-		t.Errorf("last_seen_at age = %s, want < 2m — this lab agent's heartbeat may have been rejected", age)
-	}
+	var lastSeen time.Time
+	poll(t, 90*time.Second, 3*time.Second, func() bool {
+		if status := panelDo(t, "GET", "/api/v1/servers/"+id, nil, &srv); status != 200 {
+			return false
+		}
+		ls, ok := parsePanelTime(fmt.Sprint(srv["last_seen_at"]))
+		if !ok {
+			return false
+		}
+		lastSeen = ls
+		return time.Since(lastSeen) <= 2*time.Minute
+	}, "last_seen_at fresh (< 2m) after any prior chaos test's disruption")
 
 	execPath := "/api/v1/servers/" + id + "/ban-executor"
 
