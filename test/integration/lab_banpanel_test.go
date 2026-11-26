@@ -140,6 +140,12 @@ type panelBanResponse struct {
 // SAME gap re-opens briefly after any later agent restart (e.g. the
 // SIGKILL recovery below) — lab-measured, alma9-csf-orig, phase 18-11:
 // both the very first switch and the post-SIGKILL one hit this.
+//
+// 150s, not 90s: a cold start of the FULL lab matrix (10 VMs registering
+// and syncing against the same panel at once) measurably slows this
+// specific VM's own first few sync cycles beyond what 90s of retrying
+// absorbs — lab-measured, alma9-csf-orig, phase 18-11, full-matrix run.
+// In isolation this resolves within the first one or two retries.
 func switchExecutor(t *testing.T, execPath, executor string, timeout time.Duration) {
 	t.Helper()
 	var lastErr struct {
@@ -243,7 +249,7 @@ func TestLabBanPanelEndToEnd(t *testing.T) {
 		panelDo(t, "PUT", execPath, map[string]string{"executor": "defensia"}, nil)
 	})
 
-	switchExecutor(t, execPath, "csf", 90*time.Second)
+	switchExecutor(t, execPath, "csf", 150*time.Second)
 
 	ips := banIPs(t, 3)
 	var banIDs []int64
@@ -413,7 +419,7 @@ func TestLabBanPanelEndToEnd(t *testing.T) {
 	// The agent just restarted (SIGKILL recovery above); switchExecutor's
 	// own retry covers the same transient csf_not_ready window as the
 	// very first switch above.
-	switchExecutor(t, execPath, "csf", 90*time.Second)
+	switchExecutor(t, execPath, "csf", 150*time.Second)
 	poll(t, 120*time.Second, time.Second, func() bool {
 		tagged := taggedSet(readTempban(t))
 		for _, ip := range allDesired {
