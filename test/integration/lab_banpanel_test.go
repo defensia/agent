@@ -334,7 +334,15 @@ func TestLabBanPanelEndToEnd(t *testing.T) {
 		t.Fatalf("PUT ban-executor defensia = %d, want 200", status)
 	}
 
-	poll(t, 60*time.Second, 200*time.Millisecond, func() bool {
+	// 180s, not 60s: migrating 30 entries back to the defensia backend is a
+	// make-before-break sequence (confirm each on the defensia backend,
+	// THEN -tr it off CSF) that drains at the same ticker cadence as every
+	// other reconcile pass — under full-matrix load (10 VMs sharing one
+	// OrbStack host, csf-tuning.md's own documented constraint) a single
+	// VM's pass can legitimately take longer than a quiet single-VM run
+	// does. Lab-measured, alma10-noipset, phase 18-11: timed out at 60s
+	// under full-matrix load; passed in isolation.
+	poll(t, 180*time.Second, 200*time.Millisecond, func() bool {
 		return len(taggedSet(readTempban(t))) < 30
 	}, "tagged dropped below 30 (switch-back started)")
 
