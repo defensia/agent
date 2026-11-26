@@ -43,7 +43,15 @@ func panelDo(t *testing.T, method, path string, body any, out any) int {
 		bodyBytes = b
 	}
 
-	const maxAttempts = 5
+	// 35 attempts * 2s = up to 70s of retrying: the dashboard-api limiter
+	// (60/min) is keyed by USER ID, shared across every VM in a full
+	// matrix run using the same lab token — a VM that starts its own test
+	// right as the PREVIOUS VM's test exhausted that shared budget can see
+	// a 429 on its very FIRST panelDo call, and the rolling window can
+	// take close to a full 60s to free back up. Lab-measured, full-matrix
+	// run, phase 18-11: debian12-csf-sentinel hit this at its very first
+	// POST /bans, 5 attempts (10s) was not enough.
+	const maxAttempts = 35
 	var status int
 	var respBody []byte
 	for attempt := 0; attempt < maxAttempts; attempt++ {
