@@ -20,41 +20,69 @@ import (
 // best-effort decodes the response body into out regardless of status —
 // unlike panelGet, it never Fatals on a non-2xx status, since this suite
 // deliberately exercises 422/403 paths and needs their response bodies.
+//
+// It retries internally on 429: the panel's `dashboard-api` rate limiter
+// (60 req/min) is keyed by user ID, not per-token or per-endpoint, so it is
+// shared across every GET/POST/DELETE this test's token makes across the
+// whole run — individual call-site pacing (sleeps between POSTs, wider poll
+// intervals) kept chasing 429s to a DIFFERENT call site every time it fixed
+// the last one. Lab-measured, alma9-csf-orig, phase 18-11. A fixed per-call
+// pace can't work when the budget is shared and the call volume varies by
+// phase of the test; retrying the 429 itself is the only fix that holds
+// regardless of which call site happens to be the one that trips it.
 func panelDo(t *testing.T, method, path string, body any, out any) int {
 	t.Helper()
 	url := env("LAB_PANEL_URL") + path
 
-	var reqBody io.Reader
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			t.Fatalf("panelDo %s %s: marshal body: %v", method, path, err)
 		}
-		reqBody = bytes.NewReader(b)
+		bodyBytes = b
 	}
 
-	req, err := http.NewRequest(method, url, reqBody)
-	if err != nil {
-		t.Fatalf("panelDo %s %s: build request: %v", method, path, err)
-	}
-	req.Header.Set("Authorization", "Bearer "+requireEnv(t, "LAB_PANEL_TOKEN"))
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	const maxAttempts = 5
+	var status int
+	var respBody []byte
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var reqBody io.Reader
+		if bodyBytes != nil {
+			reqBody = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequest(method, url, reqBody)
+		if err != nil {
+			t.Fatalf("panelDo %s %s: build request: %v", method, path, err)
+		}
+		req.Header.Set("Authorization", "Bearer "+requireEnv(t, "LAB_PANEL_TOKEN"))
+		req.Header.Set("Accept", "application/json")
+		if bodyBytes != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("panelDo %s %s: %v", method, path, err)
+		}
+		status = resp.StatusCode
+		respBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if status != 429 {
+			break
+		}
+		// Rate-limited: back off and retry rather than failing the whole
+		// test — this limiter's 60/min window is shared and bursts are
+		// expected (SIGKILL-recovery polling, 30-ban batches, etc).
+		time.Sleep(2 * time.Second)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("panelDo %s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	if out != nil && len(respBody) > 0 {
 		_ = json.Unmarshal(respBody, out) // best-effort; caller decides what status means
 	}
-	return resp.StatusCode
+	return status
 }
 
 // installLabBanDropIn writes a systemd drop-in overriding the real
@@ -101,6 +129,35 @@ type banExecutorShow struct {
 // panelBanResponse is the JSON shape of a successful POST /bans response.
 type panelBanResponse struct {
 	ID int64 `json:"id"`
+}
+
+// switchExecutor retries PUT .../ban-executor until it succeeds or the
+// deadline passes, surfacing the panel's own blocker list on failure.
+// Needed every time this test asks for "csf": ban_executor_state going
+// non-null on a freshly (re)started agent does NOT mean csf_ready is
+// true yet — the panel's own preflight check ("csf_not_ready") can still
+// 422 a switch attempted the instant the state first appears, and the
+// SAME gap re-opens briefly after any later agent restart (e.g. the
+// SIGKILL recovery below) — lab-measured, alma9-csf-orig, phase 18-11:
+// both the very first switch and the post-SIGKILL one hit this.
+func switchExecutor(t *testing.T, execPath, executor string, timeout time.Duration) {
+	t.Helper()
+	var lastErr struct {
+		Errors struct {
+			Executor []string `json:"executor"`
+		} `json:"errors"`
+	}
+	lastStatus := 0
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		lastErr.Errors.Executor = nil
+		lastStatus = panelDo(t, "PUT", execPath, map[string]string{"executor": executor}, &lastErr)
+		if lastStatus == 200 {
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatalf("PUT ban-executor %s = %d after %s of retrying, want 200; last blockers: %v", executor, lastStatus, timeout, lastErr.Errors.Executor)
 }
 
 // TestLabBanPanelEndToEnd (SYNC-01/02/05/06/07, plan 11): closes the loop
@@ -186,9 +243,7 @@ func TestLabBanPanelEndToEnd(t *testing.T) {
 		panelDo(t, "PUT", execPath, map[string]string{"executor": "defensia"}, nil)
 	})
 
-	if status := panelDo(t, "PUT", execPath, map[string]string{"executor": "csf"}, nil); status != 200 {
-		t.Fatalf("PUT ban-executor csf = %d, want 200", status)
-	}
+	switchExecutor(t, execPath, "csf", 90*time.Second)
 
 	ips := banIPs(t, 3)
 	var banIDs []int64
@@ -347,9 +402,10 @@ func TestLabBanPanelEndToEnd(t *testing.T) {
 	}
 
 	// --- Undo all
-	if status := panelDo(t, "PUT", execPath, map[string]string{"executor": "csf"}, nil); status != 200 {
-		t.Fatalf("PUT ban-executor csf (for undo test) = %d, want 200", status)
-	}
+	// The agent just restarted (SIGKILL recovery above); switchExecutor's
+	// own retry covers the same transient csf_not_ready window as the
+	// very first switch above.
+	switchExecutor(t, execPath, "csf", 90*time.Second)
 	poll(t, 120*time.Second, time.Second, func() bool {
 		tagged := taggedSet(readTempban(t))
 		for _, ip := range allDesired {
