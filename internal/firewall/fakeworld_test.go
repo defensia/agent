@@ -73,6 +73,20 @@ func newFakeWorld(t *testing.T) *fakeWorld {
 	unbanIPFn = w.unbanFake
 	t.Cleanup(func() { banMembersFn, banIPForFn, unbanIPFn = origMembers, origBanIPFor, origUnban })
 
+	// banIPForFn/unbanIPFn/banMembersFn above are the CSF-mode "Defensia
+	// backend" seam csfExecutor's own make-before-break logic calls — but
+	// BanManager.ApplySync's "defensia" path (Phase 17's own, unchanged
+	// ApplyBanEntries/CleanupStaleBans sequence) calls the REAL kernel
+	// backend directly (fwRun/fwLookPath, real ipset/iptables/nftables
+	// auto-detection), entirely separate from those three. Every test here
+	// that ever switches TO or starts in "defensia" mode needs that real
+	// backend faked too, or it silently depends on whatever firewall
+	// tooling happens to be available on whichever machine runs the test —
+	// present on a real Linux dev box or lab VM, absent in an unprivileged
+	// CI sandbox. Lab-measured, phase 18-12: "no usable firewall backend"
+	// was the first real GitHub Actions CI run of this exact test file.
+	withFakeFW(t, []string{"ipset", "iptables"}, nil)
+
 	return w
 }
 
