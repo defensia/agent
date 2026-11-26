@@ -30,9 +30,18 @@ func csfWritable() bool {
 // of a test that drives its own in-process firewall.BanManager instead —
 // the two must never write csf.tempban/the Defensia backend concurrently.
 // Cleanup restarts it via the existing restartAgent helper (lab_fw_daemon_test.go).
+//
+// "Unit ... not loaded" is not a failure here: it means the unit was never
+// registered in this environment at all (the lab/ci/run-csf-container.sh CI
+// container only installs CSF itself, never the agent's own systemd unit —
+// unlike every OrbStack lab VM, which lab/provision/agent.sh always
+// registers) — nothing is running, so there is nothing to stop, and the
+// concurrency concern this function exists for is moot. Lab-measured, phase
+// 18-12: every TestLabBanSync*/TestLabBanChaos* test hard-failed CI here
+// the first time this exact test package ever ran in that container.
 func stopAgent(t *testing.T) {
 	t.Helper()
-	if out, err := sh(t, "systemctl", "stop", "defensia-agent"); err != nil {
+	if out, err := sh(t, "systemctl", "stop", "defensia-agent"); err != nil && !strings.Contains(out, "not loaded") {
 		t.Fatalf("systemctl stop defensia-agent: %v (%s)", err, out)
 	}
 	t.Cleanup(func() { restartAgent(t) })
