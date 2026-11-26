@@ -13,7 +13,7 @@ import (
 // migrateToDefensia, and reports the result as Status "migrating" until no
 // "ours" entries remain in csf.tempban.
 func (e *csfExecutor) runMigratePass(ctx context.Context, desired SyncInput, all bool) {
-	removed, pending, reason := e.migrateToDefensia(ctx, desired.Bans, all)
+	removed, pending, reason, csfReady := e.migrateToDefensia(ctx, desired.Bans, all)
 	_ = removed
 
 	temp2, err := readTempBans()
@@ -44,7 +44,7 @@ func (e *csfExecutor) runMigratePass(ctx context.Context, desired SyncInput, all
 
 	e.statusPtr.Store(&ExecutorStatus{
 		Mode: "defensia", EffectiveMode: effective, State: state, Reason: reason,
-		CSFTempbanTotal: total, DefensiaInCSF: oursLeft, PendingMigration: pending,
+		CSFReady: csfReady, CSFTempbanTotal: total, DefensiaInCSF: oursLeft, PendingMigration: pending,
 		UpdatedAt: e.now().UTC().Format(time.RFC3339),
 	})
 }
@@ -58,7 +58,19 @@ func (e *csfExecutor) runMigratePass(ctx context.Context, desired SyncInput, all
 // at all, so its CSF entry is removed regardless of backend/generation
 // state. `all` (used by plan 08's undo) widens the desired set to "every
 // ours entry", not just the panel's current desired list.
-func (e *csfExecutor) migrateToDefensia(ctx context.Context, desired []DesiredBan, all bool) (removed, pending int, reason string) {
+//
+// csfReady reports whether CSF itself is actually healthy right now
+// (environment sane AND the breaker allows writes) — independent of which
+// executor mode is currently selected. Without this, an agent that has
+// NEVER been in CSF mode could never report ExecutorStatus.CSFReady=true
+// at all (the normal CSF-add reconcile pass, the only other place that
+// sets it, never runs while still migrating/parked in defensia mode),
+// which made the panel's own preflight check ("csf_not_ready") block
+// every single first-ever switch to CSF, unconditionally — caught live
+// against the real panel in the lab (phase 18-11): `PUT .../ban-executor
+// {executor:csf}` 422'd with exactly that blocker on an agent that had
+// never once been in CSF mode.
+func (e *csfExecutor) migrateToDefensia(ctx context.Context, desired []DesiredBan, all bool) (removed, pending int, reason string, csfReady bool) {
 	desiredByIP := make(map[string]DesiredBan, len(desired))
 	for _, d := range desired {
 		desiredByIP[d.IP] = d
@@ -66,7 +78,7 @@ func (e *csfExecutor) migrateToDefensia(ctx context.Context, desired []DesiredBa
 
 	temp, err := readTempBans()
 	if err != nil {
-		return 0, 0, ""
+		return 0, 0, "", false
 	}
 
 	// "Ready" here means both the environment looks sane (testing_mode,
@@ -157,7 +169,7 @@ func (e *csfExecutor) migrateToDefensia(ctx context.Context, desired []DesiredBa
 		reason = "csf_cleanup_pending"
 	}
 
-	return removed, pending, reason
+	return removed, pending, reason, ready
 }
 
 // removeTempOwned removes ip's CSF temp ban only if no foreign (non-"ours")

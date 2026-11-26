@@ -40,7 +40,7 @@ const undoAttemptsMax = 3
 // executor mode (defensia or csf) — undo must work even if a prior
 // emergency already forced defensia while leftover CSF entries remain.
 func (e *csfExecutor) runUndoPass(ctx context.Context, desired SyncInput, u *undoState) {
-	removed, pending, reason := e.migrateToDefensia(ctx, desired.Bans, true)
+	removed, pending, reason, csfReady := e.migrateToDefensia(ctx, desired.Bans, true)
 	u.removed += removed
 	u.attempts++
 
@@ -69,7 +69,7 @@ func (e *csfExecutor) runUndoPass(ctx context.Context, desired SyncInput, u *und
 
 	e.statusPtr.Store(&ExecutorStatus{
 		Mode: "defensia", EffectiveMode: "defensia", State: boolState(done, "ok", "migrating"), Reason: statusReason,
-		CSFTempbanTotal: total, DefensiaInCSF: oursLeft, PendingMigration: oursLeft,
+		CSFReady: csfReady, CSFTempbanTotal: total, DefensiaInCSF: oursLeft, PendingMigration: oursLeft,
 		UpdatedAt: e.now().UTC().Format(time.RFC3339),
 	})
 

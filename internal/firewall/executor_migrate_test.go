@@ -377,3 +377,56 @@ func TestMigrationWhileCSFUnavailable(t *testing.T) {
 		t.Errorf("tr should be issued once CSF is ready again, ops=%v", w.ops())
 	}
 }
+
+// TestMigratePassReportsCSFReadyWhileParked is the regression test for the
+// lab-measured preflight deadlock (phase 18-11): an agent parked in
+// defensia mode (migrateTarget=="defensia", nothing to migrate) must still
+// report ExecutorStatus.CSFReady=true when the environment is genuinely
+// healthy — otherwise the panel's own preflight check ("csf_not_ready")
+// blocks every single first-ever switch to CSF, since the normal CSF-add
+// reconcile pass (the only OTHER place that used to set CSFReady) never
+// runs while parked in defensia mode. Caught live against the real panel
+// in the lab: `PUT .../ban-executor {executor:csf}` 422'd with exactly
+// that blocker on an agent that had never once been in CSF mode.
+func TestMigratePassReportsCSFReadyWhileParked(t *testing.T) {
+	w := newFakeWorld(t)
+	_ = w
+	clock := time.Now()
+	path := t.TempDir() + "/ban_executor.json"
+	m, _ := newMigrateManager(t, &clock, path)
+
+	// Default fakeWorld conf/env is healthy and nothing is seeded in
+	// csf.tempban — this is exactly "an agent that has never been in CSF
+	// mode, parked in defensia, with a healthy CSF installed".
+	m.ApplySync(SyncInput{Executor: "defensia", Bans: nil})
+	m.csf.runOnce(context.Background())
+
+	st := m.csf.status()
+	if st.State != "ok" || st.EffectiveMode != "defensia" {
+		t.Fatalf("status = %+v, want State ok EffectiveMode defensia", st)
+	}
+	if !st.CSFReady {
+		t.Error("CSFReady = false while parked in defensia with a healthy CSF environment, want true")
+	}
+}
+
+// TestUndoPassReportsCSFReady mirrors the above for the undo-all path
+// (executor_undo.go also calls migrateToDefensia and must forward the same
+// csfReady signal).
+func TestUndoPassReportsCSFReady(t *testing.T) {
+	w := newFakeWorld(t)
+	clock := time.Now()
+	path := t.TempDir() + "/ban_executor.json"
+	m, _ := newMigrateManager(t, &clock, path)
+
+	ip := "203.0.113.55"
+	w.seedTemp(map[string]tempEntry{ip: {ttl: time.Hour, comment: "defensia:r", ours: true}})
+
+	desired := []DesiredBan{{IP: ip, Reason: "r", TTL: time.Hour, ExpiresAt: mustTime(clock, time.Hour)}}
+	m.csf.requestUndo("T1", desired)
+	m.csf.runOnce(context.Background())
+
+	if !m.csf.status().CSFReady {
+		t.Errorf("CSFReady = false after a successful undo pass with a healthy CSF environment, want true (status=%+v)", m.csf.status())
+	}
+}
