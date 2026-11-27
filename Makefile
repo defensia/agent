@@ -4,7 +4,7 @@ CMD_PATH   = ./cmd/defensia-agent
 VERSION    = 0.1.0
 LDFLAGS    = -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: all build build-linux tidy test clean lab-build lab-up lab-down lab-reset lab-verify lab-test lab-attack
+.PHONY: all build build-linux tidy test clean lab-build lab-up lab-down lab-reset lab-verify lab-test lab-attack lab-load
 
 # LAB_VMS: VM name(s) for the lab-* targets; empty = all 8 fixed lab VMs
 # (lab/matrix.sh). LAB_DOWN_ARGS: extra flags for lab-down (--all also
@@ -85,3 +85,7 @@ lab-test: lab-build
 ## lab-attack: send real SSH/WordPress/IMAP brute-force traffic from lab-attacker against TARGET (default debian12-nocsf), leg LEG (default all)
 lab-attack:
 	lab/attack.sh $(TARGET) $(LEG)
+
+## lab-load: AGG-05 load proof — replay one virtual server-day (lab/load/profile.json) through debian12-nocsf aggregation off/on/burst, report in lab/reports/
+lab-load:
+	lab/load/run.sh
