@@ -22,6 +22,15 @@ import (
 // server rejected, and a batch still in flight at shutdown. See
 // ConfigureAggregation, sendWithRetry and Shutdown below.
 
+// SetClock overrides the Client's notion of "now", for replay/load
+// testing; production uses time.Now (the default set by New). A load
+// test replaying a day of recorded traffic needs event timestamps,
+// window deadlines and retry/backoff math to all advance on the
+// replayed clock, not the wall clock the replay itself runs on.
+func (c *Client) SetClock(now func() time.Time) {
+	c.now = now
+}
+
 // EventAggregationSync is the config.event_aggregation block the panel
 // advertises on every sync (plan 04's contract). Its mere presence with
 // Supported=true is the signal an old panel — which never sends this key
