@@ -587,6 +587,13 @@ type EventRequest struct {
 	Protocol   string            `json:"protocol,omitempty"`
 	Details    map[string]string `json:"details,omitempty"`
 	OccurredAt string            `json:"occurred_at"`
+	// Count, FirstSeen and LastSeen are set only on an aggregated rollup row
+	// (phase 19 AGG-02): Count is the number of occurrences merged into this
+	// row (zero/omitted for a non-aggregated event), FirstSeen/LastSeen are
+	// RFC3339 UTC timestamps bracketing the window. See internal/api/aggregator.go.
+	Count     int    `json:"count,omitempty"`
+	FirstSeen string `json:"first_seen,omitempty"`
+	LastSeen  string `json:"last_seen,omitempty"`
 }
 
 // ReportEvents sends security events to the server.
