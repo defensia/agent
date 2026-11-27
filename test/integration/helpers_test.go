@@ -56,8 +56,9 @@ func sh(t *testing.T, name string, args ...string) (string, error) {
 // written as a bare number or a quoted string depending on installer
 // version — readAgentConfig normalizes either shape.
 type agentConfig struct {
-	ServerURL string          `json:"server_url"`
-	AgentID   json.RawMessage `json:"agent_id"`
+	ServerURL  string          `json:"server_url"`
+	AgentID    json.RawMessage `json:"agent_id"`
+	AgentToken string          `json:"agent_token"`
 }
 
 // readAgentConfig reads /etc/defensia/config.json and returns the
@@ -77,6 +78,27 @@ func readAgentConfig(t *testing.T) string {
 		t.Fatalf("/etc/defensia/config.json has no agent_id")
 	}
 	return id
+}
+
+// readAgentToken reads /etc/defensia/config.json and returns agent_token —
+// the real per-agent bearer token the installed daemon itself uses, which
+// TestLoadAggregation needs to drive a second api.Client against the same
+// agent identity (phase 19 AGG-05: the load test must look, to the panel,
+// like this exact agent, not a separately-registered one).
+func readAgentToken(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("/etc/defensia/config.json")
+	if err != nil {
+		t.Fatalf("read /etc/defensia/config.json: %v", err)
+	}
+	var cfg agentConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse /etc/defensia/config.json: %v", err)
+	}
+	if cfg.AgentToken == "" {
+		t.Fatalf("/etc/defensia/config.json has no agent_token")
+	}
+	return cfg.AgentToken
 }
 
 // panelGet performs an authenticated GET against LAB_PANEL_URL+path and

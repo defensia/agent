@@ -32,6 +32,30 @@ type Client struct {
 	// legacyFwModeWarned: logged once per process, not once per fallback
 	// heartbeat (phase 17 NFT-03) — see Heartbeat.
 	legacyFwModeWarned atomic.Bool
+
+	// Event aggregation (phase 19 AGG-02/AGG-04): agg merges repeated,
+	// non-critical events into rollups behind an explicit panel capability
+	// handshake (see pipeline.go, ConfigureAggregation). now/sleep are
+	// overridden in tests for determinism; aggTick governs how often
+	// agg.FlushDue is polled by eventConsumerLoop.
+	agg     *Aggregator
+	now     func() time.Time
+	sleep   func(time.Duration)
+	aggTick time.Duration
+
+	// consumerRunning/stopCh let Shutdown flush and drain deterministically
+	// whether or not StartEventConsumer was ever called (see pipeline.go).
+	consumerRunning atomic.Bool
+	stopCh          chan shutdownRequest
+
+	// Event pipeline counters (phase 19 AGG-04): every loss is now counted
+	// instead of silently discarded. See pipeline.go EventPipelineStats.
+	droppedQueueFull  uint64
+	droppedSendFailed uint64
+	droppedRejected   uint64
+	batchesSent       uint64
+	eventsSent        uint64
+	retries           uint64
 }
 
 const (
@@ -49,18 +73,41 @@ func New(baseURL, token string) *Client {
 			Timeout: 15 * time.Second,
 		},
 		eventCh: make(chan EventRequest, eventQueueSize),
+		agg:     NewAggregator(),
+		now:     time.Now,
+		sleep:   time.Sleep,
+		aggTick: time.Second,
+		stopCh:  make(chan shutdownRequest),
 	}
 }
 
 // QueueEvent enqueues an event for async batched delivery. Non-blocking: if the
 // queue is full, the event is dropped and a counter is incremented. Use this
 // from hot paths (watchers, scorer) instead of calling ReportEvents directly.
+//
+// Every event first passes through the Aggregator (phase 19 AGG-02): when
+// aggregation is disabled (the default, and the only state possible against
+// a panel that never advertised support — see ConfigureAggregation), Add is
+// a pass-through and this behaves exactly as before. Add returns zero, one,
+// or (via FlushDue/FlushAll elsewhere) more events; QueueEvent enqueues
+// whatever it returns right now.
 func (c *Client) QueueEvent(e EventRequest) {
 	e.SourceIP = cleanSourceIP(e.Type, e.SourceIP)
+	for _, out := range c.agg.Add(e, c.now()) {
+		c.enqueue(out)
+	}
+}
+
+// enqueue is the non-blocking send QueueEvent used before aggregation
+// existed. Also used by the aggregator's own leading-edge/rollup output and
+// by ConfigureAggregation's reconfigure flush, so every path that puts an
+// event on the wire counts a full queue the same way.
+func (c *Client) enqueue(e EventRequest) {
 	select {
 	case c.eventCh <- e:
 	default:
 		atomic.AddUint64(&c.eventDropped, 1)
+		atomic.AddUint64(&c.droppedQueueFull, 1)
 	}
 }
 
@@ -95,36 +142,80 @@ func (c *Client) EventQueueStats() (depth int, dropped uint64) {
 // StartEventConsumer launches the background goroutine that drains the event
 // queue and ships events in batches. Call once at agent startup.
 func (c *Client) StartEventConsumer() {
+	// Set synchronously (not inside the goroutine) so a Shutdown called
+	// immediately after StartEventConsumer never races the "is the consumer
+	// running" check against the goroutine's own startup.
+	c.consumerRunning.Store(true)
 	go c.eventConsumerLoop()
 }
 
+// eventConsumerLoop drains c.eventCh, batches events up to eventBatchSize,
+// and ships each batch via sendWithRetry (phase 19 AGG-04: bounded retry,
+// every drop counted — see pipeline.go). A second ticker polls the
+// Aggregator for windows that have closed (FlushDue) at c.aggTick cadence,
+// feeding its output into the same batch/flush path. On Shutdown's signal
+// (stopCh) it flushes everything pending (aggregator + queue) once, within
+// the caller's deadline, and exits.
 func (c *Client) eventConsumerLoop() {
 	batch := make([]EventRequest, 0, eventBatchSize)
 	ticker := time.NewTicker(eventFlushEvery)
 	defer ticker.Stop()
 
-	flush := func(reason string) {
+	aggTicker := time.NewTicker(c.aggTick)
+	defer aggTicker.Stop()
+
+	// noShutdownDeadline bounds retry scheduling for ordinary (non-shutdown)
+	// flushes so far in the future that maxSendAttempts, not the deadline,
+	// is what actually stops retrying — Shutdown is the only caller that
+	// supplies a real, tight deadline.
+	noShutdownDeadline := func() time.Time {
+		return c.now().Add(24 * time.Hour)
+	}
+
+	flush := func(deadline time.Time) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := c.ReportEvents(batch); err != nil {
-			log.Printf("[api] event flush failed (%s, %d events): %v", reason, len(batch), err)
-		}
+		c.sendWithRetry(batch, deadline)
 		batch = batch[:0]
+	}
+
+	appendOut := func(items []EventRequest, deadline time.Time) {
+		for _, item := range items {
+			batch = append(batch, item)
+			if len(batch) >= eventBatchSize {
+				flush(deadline)
+			}
+		}
 	}
 
 	for {
 		select {
 		case e := <-c.eventCh:
-			batch = append(batch, e)
-			if len(batch) >= eventBatchSize {
-				flush("full")
-			}
+			appendOut([]EventRequest{e}, noShutdownDeadline())
+
+		case <-aggTicker.C:
+			appendOut(c.agg.FlushDue(c.now()), noShutdownDeadline())
+
 		case <-ticker.C:
-			flush("tick")
+			flush(noShutdownDeadline())
 			if dropped := atomic.SwapUint64(&c.eventDropped, 0); dropped > 0 {
 				log.Printf("[api] event queue: %d events dropped in last %s (queue cap=%d)", dropped, eventFlushEvery, eventQueueSize)
 			}
+
+		case req := <-c.stopCh:
+			appendOut(c.agg.FlushAll(c.now()), req.deadline)
+			for draining := true; draining; {
+				select {
+				case e := <-c.eventCh:
+					appendOut([]EventRequest{e}, req.deadline)
+				default:
+					draining = false
+				}
+			}
+			flush(req.deadline)
+			close(req.done)
+			return
 		}
 	}
 }
@@ -226,6 +317,10 @@ type HeartbeatRequest struct {
 	FanotifyPermMode    bool     `json:"fanotify_perm_mode,omitempty"`
 	RtFilesInspected    int64    `json:"rt_files_inspected,omitempty"`
 	RtFilesBlocked      int64    `json:"rt_files_blocked,omitempty"`
+	// EventPipeline reports the agent's own event queue/aggregation/drop
+	// counters (phase 19 AGG-04), stored by the panel and used to warn once
+	// per hour on rising drops. See EventPipelineStats in pipeline.go.
+	EventPipeline *EventPipelineStats `json:"event_pipeline,omitempty"`
 }
 
 // RuntimeStats reports the agent's own resource usage so we can detect leaks
@@ -405,6 +500,11 @@ type SyncConfig struct {
 	// An absent key (old panel) decodes as nil, which the runtime treats
 	// identically to mode "csf" (not source-of-truth managed).
 	CSFSot *csfsotwire.Config `json:"csf_sot,omitempty"`
+	// EventAggregation is the config.event_aggregation capability block
+	// (phase 19 AGG-04): its mere PRESENCE with Supported=true is part of
+	// the handshake an old panel can never send. See
+	// AggregationConfigFromSync in pipeline.go for how this is decoded.
+	EventAggregation *EventAggregationSync `json:"event_aggregation,omitempty"`
 }
 
 // MonitorConfig holds monitoring settings synced from the panel.
@@ -587,6 +687,13 @@ type EventRequest struct {
 	Protocol   string            `json:"protocol,omitempty"`
 	Details    map[string]string `json:"details,omitempty"`
 	OccurredAt string            `json:"occurred_at"`
+	// Count, FirstSeen and LastSeen are set only on an aggregated rollup row
+	// (phase 19 AGG-02): Count is the number of occurrences merged into this
+	// row (zero/omitted for a non-aggregated event), FirstSeen/LastSeen are
+	// RFC3339 UTC timestamps bracketing the window. See internal/api/aggregator.go.
+	Count     int    `json:"count,omitempty"`
+	FirstSeen string `json:"first_seen,omitempty"`
+	LastSeen  string `json:"last_seen,omitempty"`
 }
 
 // ReportEvents sends security events to the server.

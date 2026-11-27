@@ -1,0 +1,11 @@
+{
+    "supported": true,
+    "enabled": true,
+    "bot_window_seconds": 60,
+    "web_window_seconds": 30,
+    "max_keys": 10000,
+    "max_count": 1000,
+    "types": [
+        "bot_crawl"
+    ]
+}

@@ -1,0 +1,8 @@
+{
+  "events": [
+    {"type": "env_probe", "severity": "warning", "source_ip": "203.0.113.10", "details": {"domain": "example.test", "uri": "/.env", "user_agent": "Mozilla/5.0"}, "occurred_at": "2026-11-04T10:00:00Z"},
+    {"type": "env_probe", "severity": "warning", "source_ip": "203.0.113.10", "details": {"domain": "example.test", "rollup": "true", "uri": "/.env", "user_agent": "Mozilla/5.0"}, "occurred_at": "2026-11-04T10:00:02Z", "count": 11, "first_seen": "2026-11-04T10:00:02Z", "last_seen": "2026-11-04T10:00:29Z"},
+    {"type": "bot_unknown", "severity": "info", "source_ip": "203.0.113.11", "details": {"domain": "example.test", "sample_uris": "/\n/a\n/b", "uri": "/", "user_agent": "LabAggBot/1.0 (+bot)"}, "occurred_at": "2026-11-04T10:00:00Z", "count": 40, "first_seen": "2026-11-04T10:00:00Z", "last_seen": "2026-11-04T10:00:59Z"},
+    {"type": "malware_realtime", "severity": "critical", "details": {"domain": "example.test", "file": "/var/www/example.test/x.php", "signature": "lab-test"}, "occurred_at": "2026-11-04T10:00:05Z"}
+  ]
+}
