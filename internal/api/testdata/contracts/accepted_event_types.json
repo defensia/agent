@@ -70,5 +70,11 @@
   "xss_attempt",
   "yara_install_failed",
   "yara_installed",
-  "zombie_processes"
+  "zombie_processes",
+  "ban_skipped_protected",
+  "csf_ban_deferred",
+  "csf_executor_degraded",
+  "csf_executor_recovered",
+  "csf_executor_switched",
+  "csf_undo_completed"
 ]
