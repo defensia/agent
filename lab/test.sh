@@ -403,6 +403,51 @@ case " $vms " in
     ;;
 esac
 
+# --- aggregation handshake stage (plan 13, AGG-05) ---
+# Runs lab/load/handshake.sh against debian12-nocsf: proves the REAL
+# agent daemon (not a separately-driven api.Client, which is what
+# TestLoadAggregation/lab-load already exercises) honours the panel's
+# event-aggregation capability handshake end to end — synthetic bot
+# traffic from one IP collapses under ON and not under OFF, a critical
+# (mail brute-force) leg stays individually reported with
+# occurrence_count=1, and the heartbeat's event_pipeline_stats reports
+# aggregation_enabled=true with zero drops. Only runs when debian12-nocsf
+# is in this run's VM list (same gate as the attack stage above — it is
+# the lab's one fixed attack/load target). Skippable via LAB_SKIP_AGG=1
+# for local debugging only; same FAIL-marking posture as
+# LAB_SKIP_CSF_STAGES/LAB_SKIP_SOT_STAGES above — this is a phase-gate
+# requirement, not an optional nicety, so skipping it must never look
+# like a quieter, still-green run.
+case " $vms " in
+  *" debian12-nocsf "*)
+    agg_pass=0 agg_fail=0 agg_result="SKIP" agg_seconds=0
+    if [ "${LAB_SKIP_AGG:-}" = "1" ]; then
+      log "*** LAB_SKIP_AGG=1: aggregation(handshake) SKIPPED — this run counts as FAIL, this stage is required for the phase gate ***"
+      failed_vms="$failed_vms aggregation"
+      printf 'LAB_SKIP_AGG=1: lab/load/handshake.sh was not run.\nThis is a local-debugging-only escape hatch; the phase gate requires it.\n' >"$LAB_DIR/reports/raw/$TS-aggregation.log"
+      agg_fail=1
+      printf '| debian12-nocsf | none | - | aggregation(handshake) | 0 | 1 | 0 | 0 | FAIL |\n' >>"$REPORT"
+    else
+      AGG_RAW="$LAB_DIR/reports/raw/$TS-aggregation.log"
+      agg_start=$(date +%s)
+      "$LAB_DIR/load/handshake.sh" >"$AGG_RAW" 2>&1
+      agg_rc=$?
+      agg_seconds=$(($(date +%s) - agg_start))
+      if [ "$agg_rc" -eq 0 ] && grep -q '^HANDSHAKE_OK' "$AGG_RAW"; then
+        agg_pass=1
+        agg_result="PASS"
+      else
+        agg_fail=1
+        agg_result="FAIL"
+        failed_vms="$failed_vms aggregation"
+      fi
+      printf '| debian12-nocsf | none | - | aggregation(handshake) | %s | %s | 0 | %s | %s |\n' \
+        "$agg_pass" "$agg_fail" "$agg_seconds" "$agg_result" >>"$REPORT"
+      log "aggregation(handshake): pass=$agg_pass fail=$agg_fail seconds=${agg_seconds}s result=$agg_result"
+    fi
+    ;;
+esac
+
 if [ -z "${failed_vms// /}" ]; then
   if [ -n "${LAB_TEST_RUN:-}" ] && [ "${LAB_TEST_RUN}" != "^TestLab" ]; then
     # A focused run (non-default LAB_TEST_RUN) never counts as the gate,

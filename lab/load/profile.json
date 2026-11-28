@@ -1,0 +1,186 @@
+{
+  "source": "production baseline of a shared-hosting fleet, measured 2026-11-27",
+  "rows_per_server_day": 17264,
+  "bot_window_seconds": 60,
+  "web_window_seconds": 30,
+  "target_reduction_pct": 30,
+  "theoretical_reduction_pct": 45,
+  "criticals_per_server_day": 1391,
+  "allowlist": [
+    "bot_crawl"
+  ],
+  "max_keys": 10000,
+  "max_count": 1000,
+  "hourly_share": [
+    0.055,
+    0.042,
+    0.04,
+    0.042,
+    0.04,
+    0.049,
+    0.048,
+    0.023,
+    0.029,
+    0.024,
+    0.022,
+    0.047,
+    0.044,
+    0.042,
+    0.052,
+    0.056,
+    0.058,
+    0.083,
+    0.067,
+    0.024,
+    0.028,
+    0.023,
+    0.016,
+    0.046
+  ],
+  "types": [
+    {
+      "type": "bot_crawl",
+      "severity": "info",
+      "per_server_day": 8190,
+      "repeats_per_key": 2.92
+    },
+    {
+      "type": "path_traversal",
+      "severity": "warning",
+      "per_server_day": 1982,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "ban_created",
+      "severity": "warning",
+      "per_server_day": 1511,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "404_flood",
+      "severity": "warning",
+      "per_server_day": 627,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "bot_unknown",
+      "severity": "info",
+      "per_server_day": 605,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "env_probe",
+      "severity": "warning",
+      "per_server_day": 365,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "env_probe",
+      "severity": "critical",
+      "per_server_day": 363,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "modsecurity_block",
+      "severity": "info",
+      "per_server_day": 361,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "flood",
+      "severity": "critical",
+      "per_server_day": 312,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "404_flood",
+      "severity": "critical",
+      "per_server_day": 285,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "404_flood",
+      "severity": "info",
+      "per_server_day": 271,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "scanner_detected",
+      "severity": "critical",
+      "per_server_day": 271,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "config_probe",
+      "severity": "warning",
+      "per_server_day": 244,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "honeypot_triggered",
+      "severity": "critical",
+      "per_server_day": 244,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "config_probe",
+      "severity": "critical",
+      "per_server_day": 226,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "bot_detected",
+      "severity": "info",
+      "per_server_day": 217,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "xss_attempt",
+      "severity": "critical",
+      "per_server_day": 182,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "config_probe",
+      "severity": "info",
+      "per_server_day": 156,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "honeypot_triggered",
+      "severity": "warning",
+      "per_server_day": 148,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "scanner_detected",
+      "severity": "info",
+      "per_server_day": 107,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "env_probe",
+      "severity": "info",
+      "per_server_day": 100,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "bot_detected",
+      "severity": "warning",
+      "per_server_day": 98,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "malware_scan_progress",
+      "severity": "info",
+      "per_server_day": 96,
+      "repeats_per_key": 1.0
+    },
+    {
+      "type": "honeypot_triggered",
+      "severity": "info",
+      "per_server_day": 303,
+      "repeats_per_key": 1.0
+    }
+  ]
+}

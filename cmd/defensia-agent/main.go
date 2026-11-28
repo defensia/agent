@@ -930,10 +930,11 @@ func runAgent() {
 			OnUpdateRequested: func(p ws.UpdateRequestedPayload) {
 				log.Printf("[reverb] update.requested: checking for updates...")
 				resp, err := apiClient.Heartbeat(api.HeartbeatRequest{
-					Status:    "online",
-					Version:   version,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					IPAddress: detectOutboundIP(),
+					Status:        "online",
+					Version:       version,
+					Timestamp:     time.Now().UTC().Format(time.RFC3339),
+					IPAddress:     detectOutboundIP(),
+					EventPipeline: apiClient.EventPipelineStats(),
 				})
 				if err != nil {
 					log.Printf("[updater] heartbeat failed: %v", err)
@@ -1053,6 +1054,7 @@ func runAgent() {
 					}
 					return 0
 				}(),
+				EventPipeline: apiClient.EventPipelineStats(),
 				Metrics: &api.SystemMetrics{
 					CPUPercent:    sysMetrics.CPUPercent,
 					MemoryTotal:   sysMetrics.MemoryTotal,
@@ -1125,6 +1127,8 @@ func runAgent() {
 	<-quit
 
 	log.Println("Shutting down...")
+	apiClient.Shutdown(10 * time.Second)
+	log.Println("Event queue flushed")
 }
 
 func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatcher, mailW *watcher.MailWatcher, dbW *watcher.DBWatcher, ftpW *watcher.FTPWatcher, geo *geoip.Lookup, geoBlocker *firewall.GeoBlocker, reportUpdateEvent updater.EventReporter, wsType string, banMgr *firewall.BanManager) error {
@@ -1158,6 +1162,13 @@ func syncAndApply(client *api.Client, w *watcher.Watcher, webW *watcher.WebWatch
 		}
 		return nil
 	}
+
+	// Apply the panel's event-aggregation capability handshake (phase 19
+	// AGG-02/AGG-04). Deliberately after the suspended early-return: a
+	// suspended agent keeps whatever aggregation config it already had
+	// rather than silently reconfiguring itself from a sync it is about to
+	// ignore for everything else.
+	client.ConfigureAggregation(api.AggregationConfigFromSync(sync.Config.EventAggregation))
 
 	// Apply brute force config to watcher
 	w.UpdateConfig(watcher.Config{

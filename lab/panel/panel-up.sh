@@ -20,6 +20,24 @@ panel_compose up -d --build --wait db
 log "panel: starting app"
 panel_compose up -d --build app
 
+# reverb (plan 13, AGG-05 — found live 2026-11-27): docker-compose.lab.yml
+# defines a `reverb` service and the `app` container's own
+# BROADCAST_CONNECTION=reverb/BROADCAST_REVERB_HOST=reverb point straight
+# at it, but this script never started it. Every single
+# EventService::store() call unconditionally broadcasts
+# SecurityEventReceived with no try/catch, so with no `reverb` container
+# on the compose network to resolve, EVERY event POST to this lab panel
+# (not just a load test's synthetic traffic — any real agent's event
+# ingest) 500s with "cURL error 6: Could not resolve host: reverb". Idle
+# panels never noticed because lab:bootstrap's seed data is inserted
+# directly via factories, bypassing EventService entirely. Starting
+# `reverb` here (same idempotent up -d --build pattern as db/app, no
+# --wait: it has no healthcheck in the compose file) is a lab
+# infrastructure fix, not an application code change — verified live: a
+# POST to /api/v1/agent/events 500s before this line runs and 201s after.
+log "panel: starting reverb"
+panel_compose up -d --build reverb
+
 log "panel: running migrations"
 panel_compose exec -T app php artisan migrate --force
 

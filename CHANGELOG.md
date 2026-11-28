@@ -2,6 +2,9 @@
 
 All notable changes to the Defensia Agent.
 
+## Unreleased
+- Event aggregation for noisy, non-critical web/bot events (count, first/last seen), enabled only when the panel advertises support; critical events always sent individually. Event delivery now retries transient failures (bounded), drops only rejected events from a batch, flushes on shutdown and reports queue/drop counters in the heartbeat.
+
 ## v1.4.80
 - **fix: Helm installs could never register** — since chart 0.4.1 the DaemonSet passed the organization API key as `DEFENSIA_TOKEN`, which sends the entrypoint down the single-use install-token path; the panel never accepts an org key there, so every node failed and restart-looped. Chart 0.6.1 passes it as `DEFENSIA_API_KEY` (registering through `register-k8s`), sets `NODE_NAME` from `spec.nodeName`, fails fast with a clear message when `apiKey` is empty, supports `existingSecret`, and still accepts the old `config.*` value names.
 - **fix: Docker Swarm stack registers every node** — `docker-compose.swarm.yml` now uses the reusable organization key (`DEFENSIA_API_KEY_FILE` secret) instead of a single-use install token, names each node with `{{.Node.Hostname}}`, and persists `/etc/defensia` in a named volume.
