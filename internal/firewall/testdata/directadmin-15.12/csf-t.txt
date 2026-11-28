@@ -1,0 +1,5 @@
+
+A/D   IP address                               Port   Dir   Time To Live     Comment
+DENY  11.22.0.20                                 *    in    10m 0s           defensia:bench
+DENY  10.0.0.5                                   *    in    10m 0s           x
+#exit=0

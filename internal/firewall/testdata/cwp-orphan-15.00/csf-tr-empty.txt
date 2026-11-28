@@ -1,0 +1,4 @@
+csf: There are no temporary IP bans
+csf: There are no temporary IP allows
+*WARNING* TESTING mode is enabled - do not forget to disable it in the configuration
+#exit=0

@@ -71,6 +71,14 @@ func loadSotState() (*sotLocalState, bool, error) {
 	return &st, true, nil
 }
 
+// createSotTempFn is a test seam for the temp-file-create step of
+// saveSotState below. Production always uses os.CreateTemp; tests replace
+// it to force a write failure deterministically. A chmod-based read-only
+// directory does NOT work for this: it only blocks a non-root writer, and
+// the normal CI workflow (like most containers) runs this test suite as
+// root, which bypasses directory permission bits entirely.
+var createSotTempFn = os.CreateTemp
+
 // saveSotState writes the state file atomically (temp file in the same
 // directory, then rename) with mode 0600 in a 0700 directory.
 func saveSotState(s *sotLocalState) error {
@@ -84,7 +92,7 @@ func saveSotState(s *sotLocalState) error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(dir, ".csf_sot.json.tmp-*")
+	tmp, err := createSotTempFn(dir, ".csf_sot.json.tmp-*")
 	if err != nil {
 		return err
 	}

@@ -1,0 +1,3 @@
+deny failed: [192.168.139.90] is one of this servers addresses!
+*WARNING* TESTING mode is enabled - do not forget to disable it in the configuration
+#exit=0

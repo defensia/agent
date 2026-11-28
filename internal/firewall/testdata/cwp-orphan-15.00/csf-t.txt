@@ -1,0 +1,6 @@
+
+A/D   IP address                               Port   Dir   Time To Live     Comment
+DENY  11.22.0.20                                 *    in    9m 59s           defensia:bench
+DENY  10.0.0.5                                   *    in    10m 0s           x
+*WARNING* TESTING mode is enabled - do not forget to disable it in the configuration
+#exit=0

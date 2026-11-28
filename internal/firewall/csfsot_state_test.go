@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -136,19 +137,23 @@ func TestStateAtomicNoPartialFileOnWriteError(t *testing.T) {
 		t.Fatalf("read baseline: %v", err)
 	}
 
-	// Simulate a write failure by making the directory read-only so the
-	// temp-file create fails; the final file must be untouched.
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod dir: %v", err)
+	// Simulate a write failure via the createSotTempFn test seam, not a
+	// chmod'd read-only directory: root (the user the normal CI workflow
+	// and most containers run this suite as) bypasses directory permission
+	// bits entirely, so a chmod-based failure injection silently stops
+	// injecting anything once run as root. The seam fails deterministically
+	// regardless of who runs the test.
+	prevCreate := createSotTempFn
+	createSotTempFn = func(dir, pattern string) (*os.File, error) {
+		return nil, fmt.Errorf("simulated temp-file create failure")
 	}
-	defer os.Chmod(dir, 0o700)
+	t.Cleanup(func() { createSotTempFn = prevCreate })
 
 	err = saveSotState(&sotLocalState{GenerationAcked: 99})
 	if err == nil {
-		t.Fatal("saveSotState with a read-only dir = nil error, want an error")
+		t.Fatal("saveSotState with a forced temp-file-create failure = nil error, want an error")
 	}
 
-	os.Chmod(dir, 0o700)
 	after, err := os.ReadFile(csfSotStatePath)
 	if err != nil {
 		t.Fatalf("read after failed save: %v", err)

@@ -317,6 +317,9 @@ type HeartbeatRequest struct {
 	FanotifyPermMode    bool     `json:"fanotify_perm_mode,omitempty"`
 	RtFilesInspected    int64    `json:"rt_files_inspected,omitempty"`
 	RtFilesBlocked      int64    `json:"rt_files_blocked,omitempty"`
+	// BanExecutorState (phase 18): omitted entirely (not even a null) when
+	// CSF is not installed on this host — the one case it is ever nil.
+	BanExecutorState *BanExecutorState `json:"ban_executor_state,omitempty"`
 	// EventPipeline reports the agent's own event queue/aggregation/drop
 	// counters (phase 19 AGG-04), stored by the panel and used to warn once
 	// per hour on rising drops. See EventPipelineStats in pipeline.go.
@@ -500,11 +503,35 @@ type SyncConfig struct {
 	// An absent key (old panel) decodes as nil, which the runtime treats
 	// identically to mode "csf" (not source-of-truth managed).
 	CSFSot *csfsotwire.Config `json:"csf_sot,omitempty"`
+
+	// BanExecutor (phase 18 SYNC-01): "defensia" (default) or "csf". An old
+	// panel never sends this key, decoding as "" — buildSyncInput treats ""
+	// identically to "defensia", so an old panel's agent behaves exactly
+	// like Phase 17.
+	BanExecutor string `json:"ban_executor"`
+	// BanExecutorEmergency (SYNC-05/07): the panel's own kill switch for the
+	// ban executor specifically, independent of the Phase 15 CSFIntegrationDisabled
+	// kill switch (buildSyncInput treats either as true -> Emergency).
+	BanExecutorEmergency bool `json:"ban_executor_emergency"`
+	// CSFUndoToken (SYNC-06) is a nullable generation token: nil means "no
+	// undo requested, or none pending", a non-nil string (even "") is a
+	// concrete token the agent must act on exactly once (UndoToken()
+	// normalises nil to "" so callers never juggle the pointer).
+	CSFUndoToken *string `json:"csf_undo_token"`
 	// EventAggregation is the config.event_aggregation capability block
 	// (phase 19 AGG-04): its mere PRESENCE with Supported=true is part of
 	// the handshake an old panel can never send. See
 	// AggregationConfigFromSync in pipeline.go for how this is decoded.
 	EventAggregation *EventAggregationSync `json:"event_aggregation,omitempty"`
+}
+
+// UndoToken returns the undo generation token, or "" when none was sent
+// (nil) or requested by an old panel.
+func (c SyncConfig) UndoToken() string {
+	if c.CSFUndoToken == nil {
+		return ""
+	}
+	return *c.CSFUndoToken
 }
 
 // MonitorConfig holds monitoring settings synced from the panel.
@@ -571,6 +598,33 @@ type Ban struct {
 	ID        int64   `json:"id"`
 	IPAddress string  `json:"ip_address"`
 	ExpiresAt *string `json:"expires_at"`
+	// Reason/BanCount (phase 18 SYNC-02/04): nil on an old panel or a ban
+	// row that never recorded one; buildSyncInput defaults a nil/empty
+	// Reason to "ban" and a nil BanCount to 0, matching Phase 17's existing
+	// ReportBan default rather than inventing a new one.
+	Reason   *string `json:"reason"`
+	BanCount *int    `json:"ban_count"`
+}
+
+// BanExecutorState is the ban-executor half of the heartbeat payload
+// (phase 18 SYNC-01..07 contract, 15 keys — see firewall.ExecutorStatus,
+// which this mirrors field-for-field except CSFLimit's nullability).
+type BanExecutorState struct {
+	Mode             string `json:"mode"`
+	EffectiveMode    string `json:"effective_mode"`
+	State            string `json:"state"`
+	Reason           string `json:"reason"`
+	CSFReady         bool   `json:"csf_ready"`
+	CSFLimit         *int   `json:"csf_limit"` // nil = unknown (never a guessed number)
+	CSFTempbanTotal  int    `json:"csf_tempban_total"`
+	DefensiaInCSF    int    `json:"defensia_in_csf"`
+	Deferred         int    `json:"deferred"`
+	DeferredIPv6     int    `json:"deferred_ipv6"`
+	PendingMigration int    `json:"pending_migration"`
+	SkippedProtected int    `json:"skipped_protected"`
+	LastUndoToken    string `json:"last_undo_token"`
+	LastUndoRemoved  int    `json:"last_undo_removed"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 func (c *Client) Register(req RegisterRequest) (*RegisterResponse, error) {

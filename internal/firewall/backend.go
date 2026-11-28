@@ -235,6 +235,13 @@ func BanIPFor(ip string, ttl time.Duration) error {
 	if isSafeIP(parsed) {
 		return fmt.Errorf("refusing to ban safe IP: %s", ip)
 	}
+	// Phase 18 SYNC-03: single admission point (whitelist, csf.allow/ignore,
+	// logged-in SSH sessions) — checked before the none-backend branch, so a
+	// protected IP is ErrProtectedIP (not ErrNoBackend) and never counted in
+	// NotAppliedBans, on every backend including none.
+	if err := admitBan(parsed.String(), "ban_ip"); err != nil {
+		return err
+	}
 
 	b := current()
 	if b.Name() == "none" {
@@ -249,12 +256,22 @@ func BanIPFor(ip string, ttl time.Duration) error {
 // returns the count actually applied to the kernel.
 func ApplyBanEntries(entries []BanEntry) int {
 	valid := make([]BanEntry, 0, len(entries))
+	skippedProtected := 0
 	for _, e := range entries {
 		parsed := net.ParseIP(e.IP)
 		if parsed == nil || isSafeIP(parsed) {
 			continue
 		}
+		// Phase 18 SYNC-03: same single admission point as BanIPFor.
+		if admitBan(parsed.String(), "apply_ban_entries") != nil {
+			skippedProtected++
+
+			continue
+		}
 		valid = append(valid, e)
+	}
+	if skippedProtected > 0 {
+		log.Printf("[firewall] skipped %d protected IPs in batch", skippedProtected)
 	}
 
 	b := current()

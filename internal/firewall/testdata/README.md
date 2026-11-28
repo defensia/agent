@@ -144,3 +144,26 @@ production work discovers a gap between what this seam currently returns and
 what fork detection actually needs (e.g. distinguishing the `variant` string
 programmatically — today's `csfInfoFrom` does not expose it at all, only the
 numeric `Version`).
+
+## Phase 18 additions (ban executor, SYNC-02/04/07)
+
+`lab/csf-bench.sh` (plan 18-02) adds 10 more real-captured files per fork
+directory, reusing the same fixture dirs above rather than creating new
+ones: `csf-td-ok.txt`, `csf-td-already.txt`, `csf-td-private.txt`,
+`csf-td-own.txt`, `csf-tr-ok.txt`, `csf-tr-notfound.txt`,
+`csf-tr-empty.txt`, `csf-t.txt`, `csf-tempban.txt` (overwrites the existing
+`csf-v.txt` with a fresh capture — same content). Each file's last line is
+`#exit=<code>` (the shell exit code of that specific invocation), stripped
+before classification (see `csf_cli_test.go`'s `stripExitMarker`). These
+ground `csf_cli.go`'s output classifier in real fork behaviour instead of
+documentation assumptions — see that file's own top-of-file comment for the
+one finding that changed the design (private IPs are NOT refused by stock
+CSF v15.00's `-td`).
+
+`testdata/fakecsf/csf` (plan 18-02) is a different kind of fixture: a fake
+`csf` binary (not a captured fork) used by unit tests and lab chaos tests to
+simulate CSF misbehaving (hang, garbage output, wrong exit code, huge
+output, binary output, partial output, slow response) without needing a
+real VM. It is explicitly excluded from `TestFixtureSetComplete`/
+`TestFixturesParse` via `nonCSFFixtureDirs` (same mechanism Phase 17 used
+for `testdata/nft/`).

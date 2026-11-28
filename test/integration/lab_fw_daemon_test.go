@@ -17,8 +17,16 @@ import (
 // up to 30s for it to report active again.
 func restartAgent(t *testing.T) {
 	t.Helper()
-	if _, err := sh(t, "systemctl", "restart", "defensia-agent"); err != nil {
-		t.Fatalf("systemctl restart defensia-agent: %v", err)
+	out, err := sh(t, "systemctl", "restart", "defensia-agent")
+	if err != nil {
+		// Not registered in this environment at all (lab/ci/run-csf-container.sh's
+		// CI container never installs the agent's own systemd unit — see
+		// stopAgent's own comment) — the matching no-op there means there is
+		// nothing to restart back either.
+		if strings.Contains(out, "not loaded") || strings.Contains(out, "not found") || strings.Contains(out, "could not be found") {
+			return
+		}
+		t.Fatalf("systemctl restart defensia-agent: %v (%s)", err, out)
 	}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {

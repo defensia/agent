@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Fake `csf` binary for unit and lab chaos tests. Controlled by env vars:
+#   FAKECSF_MODE        ok|garbage|hang|exit1|huge|binary|partial|slow|passthrough (default: ok)
+#   FAKECSF_MODE_FILE   if set and readable, its trimmed content overrides
+#                       FAKECSF_MODE on EVERY call (lab chaos tests flip
+#                       mode mid-run without restarting the executor)
+#   FAKECSF_LOG         if set, append "$*" (the argv) as one line per call
+#   FAKECSF_TEMPBAN     if set, a file this script maintains to emulate
+#                       /var/lib/csf/csf.tempban across -td/-tr calls
+#   FAKECSF_REAL        (passthrough mode only) the real csf binary to
+#                       exec; defaults to /usr/sbin/csf
+set -uo pipefail
+
+MODE="${FAKECSF_MODE:-ok}"
+if [ -n "${FAKECSF_MODE_FILE:-}" ] && [ -r "${FAKECSF_MODE_FILE}" ]; then
+  file_mode="$(tr -d '[:space:]' < "${FAKECSF_MODE_FILE}")"
+  [ -n "$file_mode" ] && MODE="$file_mode"
+fi
+
+if [ -n "${FAKECSF_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKECSF_LOG"
+fi
+
+case "$MODE" in
+  passthrough)
+    exec "${FAKECSF_REAL:-/usr/sbin/csf}" "$@"
+    ;;
+  hang)
+    sleep 3600
+    exit 0
+    ;;
+  garbage)
+    echo "Segmentation fault (core dumped) ???"
+    exit 0
+    ;;
+  huge)
+    head -c 200000 /dev/zero | tr '\0' 'A'
+    exit 0
+    ;;
+  binary)
+    printf '\x00\x01\x02'
+    exit 0
+    ;;
+  partial)
+    printf 'csf: '
+    exit 0
+    ;;
+  slow)
+    sleep 2
+    ;;
+esac
+
+# ok / exit1 / slow (after the sleep) all share the same "real-looking"
+# output logic below, differing only in exit code (exit1) or timing (slow).
+ARG1="${1:-}"
+case "$ARG1" in
+  -v)
+    echo "csf: v15.00 (generic)"
+    ;;
+  -td)
+    ip="${2:-}"
+    ttl="${3:-3600}"
+    comment="${4:-defensia:ban}"
+    if [ -n "${FAKECSF_TEMPBAN:-}" ] && [ -f "$FAKECSF_TEMPBAN" ] && grep -q "|${ip}|" "$FAKECSF_TEMPBAN" 2>/dev/null; then
+      echo "csf: ${ip} is already temporarily blocked"
+    else
+      echo "DROP  all opt -- in !lo out *  ${ip}  -> 0.0.0.0/0  "
+      echo "csf: ${ip} blocked on port * for ${ttl} seconds inbound"
+      if [ -n "${FAKECSF_TEMPBAN:-}" ]; then
+        echo "$(date +%s)|${ip}||in|${ttl}|${comment}" >> "$FAKECSF_TEMPBAN"
+      fi
+    fi
+    ;;
+  -tr)
+    ip="${2:-}"
+    if [ -n "${FAKECSF_TEMPBAN:-}" ] && [ -f "$FAKECSF_TEMPBAN" ] && grep -q "|${ip}|" "$FAKECSF_TEMPBAN" 2>/dev/null; then
+      grep -v "|${ip}|" "$FAKECSF_TEMPBAN" > "${FAKECSF_TEMPBAN}.tmp" || true
+      mv "${FAKECSF_TEMPBAN}.tmp" "$FAKECSF_TEMPBAN"
+      echo "DROP  all opt -- in !lo out *  ${ip}  -> 0.0.0.0/0  "
+      echo "csf: ${ip} temporary block removed"
+    else
+      echo "csf: ${ip} not found in temporary bans"
+    fi
+    echo "csf: There are no temporary IP allows"
+    ;;
+  -t)
+    echo ""
+    echo "A/D   IP address                               Port   Dir   Time To Live     Comment"
+    if [ -n "${FAKECSF_TEMPBAN:-}" ] && [ -f "$FAKECSF_TEMPBAN" ]; then
+      while IFS='|' read -r _ts ip _port _dir ttl comment; do
+        [ -z "$ip" ] && continue
+        printf 'DENY  %-40s *    in    %ss           %s\n' "$ip" "$ttl" "$comment"
+      done < "$FAKECSF_TEMPBAN"
+    fi
+    ;;
+  *)
+    echo "csf: unknown flag $ARG1"
+    exit 1
+    ;;
+esac
+
+if [ "$MODE" = "exit1" ]; then
+  exit 1
+fi
+exit 0

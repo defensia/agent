@@ -13,38 +13,48 @@ import (
 
 // shouldReportBan reports whether a ban attempt's outcome should still be
 // recorded with the panel as a ban (ReportBan). A ban refused because no
-// firewall backend exists must NOT be reported as applied — the panel would
-// otherwise believe the IP is blocked when nothing in the kernel enforces
-// it. Every other error keeps origin/main's behaviour: report it anyway, so
-// the panel record lets the next sync retry the ban.
+// firewall backend exists, or because the guard protects the IP (SYNC-03:
+// whitelist, csf.allow/ignore, an active SSH session), must NOT be reported
+// as applied — the panel would otherwise believe the IP is blocked when
+// nothing in the kernel enforces it, or when it was deliberately never
+// enforced at all. Every other error keeps origin/main's behaviour: report
+// it anyway, so the panel record lets the next sync retry the ban.
 func shouldReportBan(err error) bool {
-	return err == nil || !errors.Is(err, firewall.ErrNoBackend)
+	return err == nil || !(errors.Is(err, firewall.ErrNoBackend) || errors.Is(err, firewall.ErrProtectedIP))
+}
+
+// banExpiryLayouts are every expires_at shape the panel has ever sent,
+// shared by parseBanExpiry and (indirectly) banTTL so the two never
+// disagree about what the panel actually said.
+var banExpiryLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05.000000Z07:00",
+	"2006-01-02 15:04:05", // no zone in the layout -> time.Parse assumes UTC
+}
+
+// parseBanExpiry parses a panel-provided expires_at into a concrete time,
+// or nil when expiresAt is nil, empty, or unparseable (callers that care
+// about the unparseable case distinguish it themselves — this function
+// does not log, since banTTL's own callers have always silently treated it
+// as "no kernel timeout" and must keep doing so).
+func parseBanExpiry(expiresAt *string) *time.Time {
+	if expiresAt == nil || *expiresAt == "" {
+		return nil
+	}
+	for _, layout := range banExpiryLayouts {
+		if t, err := time.Parse(layout, *expiresAt); err == nil {
+			return &t
+		}
+	}
+	return nil
 }
 
 // banTTL converts a panel-provided expires_at into a kernel ban timeout.
 // Returns 0 (no kernel timeout — expiry is panel-driven instead) when
 // expiresAt is nil, unparseable, or already in the past.
 func banTTL(expiresAt *string, now time.Time) time.Duration {
-	if expiresAt == nil || *expiresAt == "" {
-		return 0
-	}
-
-	layouts := []string{
-		time.RFC3339Nano,
-		"2006-01-02T15:04:05.000000Z07:00",
-		"2006-01-02 15:04:05", // no zone in the layout -> time.Parse assumes UTC
-	}
-
-	var t time.Time
-	var parsed bool
-	for _, layout := range layouts {
-		if tt, err := time.Parse(layout, *expiresAt); err == nil {
-			t = tt
-			parsed = true
-			break
-		}
-	}
-	if !parsed {
+	t := parseBanExpiry(expiresAt)
+	if t == nil {
 		return 0
 	}
 

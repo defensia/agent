@@ -99,7 +99,10 @@ func TestBothHeartbeatLiteralsCarryEventPipeline(t *testing.T) {
 // AGG-02/AGG-04, plan 12): pinned so nobody accidentally reroutes a direct
 // critical report through the aggregating queue in a later change. If this
 // genuinely needs to change, update the pinned constant deliberately.
-const reportEventsCallSites = 21
+//
+// 22 as of the phase 18 x phase 19 merge: phase 18's ban-executor status
+// reporting added one more direct call site on top of phase 19's own 21.
+const reportEventsCallSites = 22
 
 func TestReportEventsCallSitesUnchanged(t *testing.T) {
 	src := readMainSource(t)
