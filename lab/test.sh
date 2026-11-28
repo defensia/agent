@@ -252,6 +252,23 @@ for vm in $vms; do
   fail=$(grep -c '^--- FAIL' "$RAW" || true)
   skip=$(grep -c -- '--- SKIP' "$RAW" || true)
 
+  # Two tests belong to the container-inventory work, not the CSF fork matrix,
+  # and a CSF lab VM is not a container host — they can only ever skip here.
+  # Counting them as failures turned every VM red from 2026-11-23 and the lab
+  # gate sat FAIL for days with nothing actually broken. They are subtracted by
+  # name, with the reason, so an UNEXPECTED skip still fails the row: a quieter
+  # run must never look green.
+  expected_skip=0
+  for t in TestLabCRIEnumeratesTheNodesContainers TestLabCRIInventoryReportsWhatRunsOnTheNode; do
+    if grep -q -- "--- SKIP: $t" "$RAW" 2>/dev/null; then
+      expected_skip=$((expected_skip + 1))
+    fi
+  done
+  if [ "$expected_skip" -gt 0 ]; then
+    log "$vm: $expected_skip expected skip(s) (CRI tests, no container runtime on a CSF VM) — not counted as failures"
+    skip=$((skip - expected_skip))
+  fi
+
   # A VM-level SKIP is only legal in CI (LAB_ALLOW_SKIP=1, no lab here) —
   # inside the lab every assertion must apply, so any SKIP counts as a
   # failed row, same as rc!=0 or fail>0.
