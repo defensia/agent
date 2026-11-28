@@ -60,6 +60,26 @@ func newFakeWorld(t *testing.T) *fakeWorld {
 	csfDir, csfVarDir = w.confDir, w.varDir
 	t.Cleanup(func() { csfDir, csfVarDir = oldConfDir, oldVarDir })
 
+	// lfdRunningFn is a package-level seam (see newTestExecutor's own doc
+	// comment in executor_csf_test.go: nil/"unknown" is treated as "don't
+	// block on this", only an explicit false degrades). The real
+	// lfdRunning(ctx) falls back to a genuine `systemctl is-active lfd`
+	// call when no pid file is readable, which a real systemd host (every
+	// GitHub Actions ubuntu-latest runner — a full VM, not a container)
+	// answers with a clean, decisive "inactive" (false), since lfd is never
+	// installed there. That silently gated environmentReady() to
+	// "lfd_not_running" for every test in this file, forever, on exactly
+	// the one host this package's CI runs on — invisible on a Mac (no
+	// systemctl) or in a plain container (no systemd PID 1, so the same
+	// call errors out instead of returning a decisive answer). Fixed for
+	// executor_csf_test.go's own newTestExecutor at phase 18-12; this file
+	// (plan 08's migrate/undo tests, built on newFakeWorld instead) needed
+	// the identical fake and never got it.
+	prevLFD := lfdRunningFn
+	running := true
+	lfdRunningFn = func(context.Context) *bool { return &running }
+	t.Cleanup(func() { lfdRunningFn = prevLFD })
+
 	w.writeConf(map[string]string{"LF_DAEMON": "1"})
 	w.flush()
 
